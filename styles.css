@@ -150,6 +150,31 @@ p {
   padding: 22px;
 }
 
+.legal-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 0 0 28px;
+  padding: 0;
+}
+
+.legal-nav a {
+  font-weight: 700;
+}
+
+.link-list {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 28px;
+  padding-left: 20px;
+}
+
+.legal-disclaimer {
+  background: var(--notice);
+  border-left: 4px solid var(--accent);
+  padding: 16px 18px;
+}
+
 .effective-date {
   color: var(--muted);
   font-weight: 700;
