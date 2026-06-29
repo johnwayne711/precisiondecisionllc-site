@@ -1,10 +1,10 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Account deletion instructions for Option Engines by Precision Decision LLC.">
-  <title>Account Deletion for Option Engines | Precision Decision LLC</title>
+  <meta name="description" content="Account Deletion for Options Terminal by Precision Decision LLC.">
+  <title>Account Deletion for Options Terminal | Precision Decision LLC</title>
   <link rel="stylesheet" href="../../styles.css">
 </head>
 <body>
@@ -17,17 +17,18 @@
         <a href="../../contact.html">Contact</a>
         <a href="../../privacy.html">Privacy Policy</a>
         <a href="../../terms.html">Terms / Disclaimer</a>
+        <a href="../../licenses.html">Licenses</a>
       </nav>
     </div>
   </header>
 
   <main class="page-main">
     <div class="container narrow">
-      <p class="eyebrow">Option Engines by Precision Decision LLC</p>
-      <h1>Account Deletion for Option Engines</h1>
-      <p class="effective-date">Effective date: May 30, 2026</p>
+      <p class="eyebrow">Options Terminal by Precision Decision LLC</p>
+      <h1>Account Deletion for Options Terminal</h1>
+      <p class="effective-date">Last updated: June 28, 2026</p>
 
-      <nav class="legal-nav" aria-label="Option Engines legal pages">
+      <nav class="legal-nav" aria-label="Options Terminal legal pages">
         <a href="../">Overview</a>
         <a href="../privacy/">Privacy Policy</a>
         <a href="../terms/">Terms of Service</a>
@@ -36,22 +37,45 @@
         <a href="./" aria-current="page">Account Deletion</a>
       </nav>
 
-      <p class="legal-disclaimer">
-        Option Engines is an educational options-chain scanner and analytics tool. Option Engines does not place trades, manage assets, provide brokerage services, or provide personalized investment advice. Users are solely responsible for evaluating all scan results and making their own trading decisions.
-      </p>
-
-      <h2>How to Delete Your Account</h2>
-      <p>When the app account system is active, users will be able to initiate account deletion from inside the app under Account or Settings. Until then, or if a user cannot access the app, users may request deletion by contacting <a href="mailto:admin@precisiondecisionllc.com">admin@precisiondecisionllc.com</a>.</p>
-
-      <h2>What Deletion Means</h2>
-      <p>Account deletion may remove or anonymize account profile data, app preferences, and related account records where technically and legally possible.</p>
-
-      <h2>What May Be Retained</h2>
-      <p>Some information may be retained for legal, tax, accounting, fraud prevention, security, dispute resolution, or legitimate business purposes.</p>
-
-      <h2>Subscription Cancellation</h2>
-      <p>Deleting an account does not automatically cancel an active App Store subscription. Users must cancel subscriptions through Apple or the applicable app marketplace.</p>
-
+      <p>Options Terminal is operated by Precision Decision LLC. This page explains the account-deletion behavior currently implemented in the Options Terminal app.</p>
+      <h2>How to Request Account Deletion</h2>
+      <p>To request deletion from inside the app:</p>
+      <ol class="link-list">
+        <li>Sign in to the Options Terminal account you want to delete.</li>
+        <li>Open the Account page.</li>
+        <li>Select Delete Account.</li>
+        <li>Confirm the browser prompt.</li>
+      </ol>
+      <p>After the request is submitted, the app clears the local sign-in session and redirects to the sign-in/account screen with a deletion status message.</p>
+      <p>If you cannot access the account, contact Precision Decision LLC at <a href="mailto:admin@precisiondecisionllc.com">admin@precisiondecisionllc.com</a>.</p>
+      <h2>What Deletion Removes</h2>
+      <p>The current account-deletion flow removes account-associated records from the local application data stores, including:</p>
+      <ul class="link-list">
+        <li>the local user account record;</li>
+        <li>local sign-in provider links;</li>
+        <li>usage records and analysis-count records;</li>
+        <li>entitlement records;</li>
+        <li>saved watchlists, watchlist symbols, and watchlist alerts;</li>
+        <li>recommendation and support submissions associated with the account.</li>
+      </ul>
+      <p>If the account is linked to an upstream authentication user and backend deletion is configured, the app also attempts to delete that upstream authentication user.</p>
+      <p>If the account used Apple sign-in and a revocable Apple provider link is available and configured, the app attempts to revoke the associated Apple sign-in access.</p>
+      <h2>Local-Only or Partial Deletion Results</h2>
+      <p>If upstream provider deletion is not configured or fails, the app may still complete local deletion and show a status indicating that upstream deletion was not completed. In that case, contact Precision Decision LLC at <a href="mailto:admin@precisiondecisionllc.com">admin@precisiondecisionllc.com</a> if you need follow-up.</p>
+      <h2>What Deletion May Not Remove</h2>
+      <p>Account deletion may not remove:</p>
+      <ul class="link-list">
+        <li>public or official event-source records that are not personal account records;</li>
+        <li>source-provider records controlled by external providers;</li>
+        <li>payment-provider or app-store records, if paid purchases are enabled later;</li>
+        <li>server logs, security records, backups, diagnostic records, legal records, or records retained for fraud prevention, dispute resolution, compliance, or security;</li>
+        <li>information that was not associated with the signed-in account.</li>
+      </ul>
+      <p>Deleting an Options Terminal account does not automatically cancel any external subscription or purchase that may later be sold through an app store or payment processor.</p>
+      <h2>No Trade or Fund Records</h2>
+      <p>Options Terminal does not provide brokerage services, custody, clearing, trade execution, or money-transfer services. The account-deletion flow does not close brokerage positions, cancel brokerage orders, withdraw funds, or affect any external brokerage account.</p>
+      <h2>Eligibility</h2>
+      <p>You must be at least 18 years old or the age of majority in your location, whichever is higher, to use Options Terminal.</p>
       <h2>Contact</h2>
       <p>Contact Precision Decision LLC at <a href="mailto:admin@precisiondecisionllc.com">admin@precisiondecisionllc.com</a>.</p>
     </div>
@@ -59,7 +83,7 @@
 
   <footer class="site-footer">
     <div class="container footer-inner">
-      <p><strong>Option Engines&trade; by Precision Decision LLC</strong></p>
+      <p><strong>Options Terminal by Precision Decision LLC</strong></p>
       <p><a href="mailto:admin@precisiondecisionllc.com">admin@precisiondecisionllc.com</a></p>
       <p>
         <a href="../">Overview</a>
