@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="application-name" content="G-Code Studio">
+  <meta name="description" content="Offline-first lathe G-code backplotter with stock-removal and chuck keep-out previews.">
+  <meta name="robots" content="index,follow">
+  <meta name="apple-mobile-web-app-title" content="G-Code Studio">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#071012">
+  <title>G-Code Studio — Lathe G-code backplotter</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span>G</span><i>·</i><span>S</span></div>
+        <div class="brand-lockup">
+          <div class="brand-title-row">
+            <h1><span class="brand-wordmark"><em>G-CODE</em> <b>STUDIO</b></span></h1>
+            <span class="brand-signature">by Joseph H. Smith</span>
+          </div>
+          <div class="brand-subline"><i aria-hidden="true"></i><span class="brand-subtitle">LATHE BACKPLOT</span></div>
+        </div>
+      </div>
+      <div class="header-status">
+        <span class="status-dot"></span>
+        <span id="programStatus">Sample loaded</span>
+      </div>
+      <div class="header-actions">
+        <input id="fileInput" type="file" accept=".nc,.cnc,.tap,.gcode,.txt" hidden>
+        <input id="originalFileInput" type="file" accept=".nc,.cnc,.tap,.gcode,.txt" hidden>
+        <button id="installButton" class="button secondary optional-action" hidden>Install</button>
+        <button id="openButton" class="button secondary">Open G-code</button>
+        <button id="compareButton" class="button secondary">Compare</button>
+        <button id="saveButton" class="button secondary optional-action">Save as</button>
+        <button id="plotButton" class="button primary">Plot program</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="editor-panel panel">
+        <div class="panel-heading">
+          <div><span class="eyebrow">PROGRAM</span><strong id="fileName">sample-g71-rough.nc</strong></div>
+          <span id="lineCount" class="chip">0 lines</span>
+        </div>
+        <div id="gcodeEditor" class="gcode-editor">
+          <div id="gcodeActiveLine" class="gcode-active-line" aria-hidden="true" hidden></div>
+          <div class="gcode-line-gutter" aria-hidden="true">
+            <pre id="gcodeLineNumbers" class="gcode-line-numbers"></pre>
+            <span id="gcodeActiveNumber" class="gcode-active-number" hidden></span>
+          </div>
+          <textarea id="gcodeInput" wrap="off" spellcheck="false" aria-label="G-code program"></textarea>
+        </div>
+        <div class="editor-footer">
+          <span>Graphics selection follows the source line</span>
+          <button id="loadSampleButton" class="text-button">Reset sample</button>
+        </div>
+      </aside>
+
+      <section class="plot-panel panel">
+        <div class="plot-toolbar">
+          <div class="plot-toolbar-left">
+            <div class="segmented" aria-label="View controls">
+              <button id="fitButton" class="active">Fit</button>
+              <button id="zoomInButton">+</button>
+              <button id="zoomOutButton">−</button>
+            </div>
+            <div class="segmented dimension-toggle" aria-label="Graphics dimension">
+              <button id="view2dButton" class="active" type="button" aria-pressed="true">2D</button>
+              <button id="view3dButton" type="button" aria-pressed="false">3D</button>
+            </div>
+            <button id="toolOverlayButton" class="toolbar-tool tool-overlay-button" type="button" aria-pressed="false" title="Show the dimension-driven tool assembly in the 2D view">Tool</button>
+            <label class="graphics-toggle" title="Show or hide toolpaths without changing program progress or stock removal">
+              <input id="toolpathToggle" type="checkbox" checked>
+              <span>Paths</span>
+            </label>
+            <button id="dimensionButton" class="toolbar-tool" type="button" aria-pressed="false" title="Pin exact line and radius dimensions in the 2D view">Dimension</button>
+            <button id="clearDimensionsButton" class="toolbar-tool clear-tool" type="button" title="Remove all pinned dimensions" disabled>Clear dims</button>
+          </div>
+          <div class="readout"><span>Z</span><strong id="zReadout">0.0000</strong><span>X</span><strong id="xReadout">0.0000</strong><small id="unitReadout">in</small></div>
+          <div class="legend">
+            <span><i class="pending"></i>Pending</span>
+            <span><i class="rapid"></i>Rapid</span>
+            <span><i class="rough"></i>Rough</span>
+            <span><i class="cut"></i>Cut</span>
+            <span><i class="arc"></i>Arc</span>
+          </div>
+        </div>
+        <div id="canvasWrap" class="canvas-wrap">
+          <canvas id="plotCanvas" role="img" aria-label="Interactive lathe backplot. In 2D, click component geometry to inspect it, or use Dimension to pin exact line and radius measurements." title="In 2D, click component geometry to measure it. Turn on Dimension to pin exact line and radius measurements."></canvas>
+          <div id="viewCube" class="view-cube" role="group" aria-label="3D view navigation" hidden>
+            <canvas id="viewCubeCanvas" role="img" aria-label="Clickable view cube. Select a face, edge, or corner to orient the model."></canvas>
+            <button id="viewCubeHome" type="button" aria-label="Return to home isometric view" title="Home isometric view">⌂</button>
+          </div>
+          <section id="geometryInspector" class="geometry-inspector" aria-live="polite" hidden>
+            <header>
+              <div><span>GEOMETRY INSPECTOR</span><strong id="geometryComponent">Select component geometry</strong></div>
+              <button id="clearGeometrySelection" class="close-icon" type="button" aria-label="Clear geometry selection" title="Clear selection"></button>
+            </header>
+            <p id="geometryEntity">Corners, midpoints, and lines snap in 2D.</p>
+            <dl>
+              <div><dt>Selected</dt><dd id="geometrySelectedPoint">—</dd></div>
+              <div><dt id="geometryPrimaryLabel">Length</dt><dd id="geometryLength">—</dd></div>
+              <div><dt id="geometrySecondaryLabel">Delta</dt><dd id="geometrySecondaryValue">—</dd></div>
+              <div><dt>Center</dt><dd id="geometryCenter">—</dd></div>
+              <div><dt>Start</dt><dd id="geometryStart">—</dd></div>
+              <div><dt>Midpoint</dt><dd id="geometryMidpoint">—</dd></div>
+              <div><dt>End</dt><dd id="geometryEnd">—</dd></div>
+            </dl>
+            <small>Geometric X is signed radius from spindle centerline. Dimension mode pins exact model measurements to the 2D view.</small>
+          </section>
+          <div id="toolVerificationBadge" class="tool-verification-badge" aria-live="polite" hidden><span>2D TOOL MODEL</span><strong>MANUFACTURER CAD</strong></div>
+          <div id="emptyState" class="empty-state" hidden>No motion blocks found</div>
+        </div>
+        <div class="transport">
+          <button id="playButton" class="play-button" data-transport-state="play" aria-label="Play"></button>
+          <div class="transport-steps" role="group" aria-label="Program line stepping">
+            <button id="stepBackButton" class="step-button" type="button" aria-label="Step backward one program line" title="Previous program line">◀</button>
+            <button id="stepForwardButton" class="step-button" type="button" aria-label="Step forward one program line" title="Next program line">▶</button>
+          </div>
+          <input id="timeline" type="range" min="0" max="1" value="0" step="1" aria-label="Program line position">
+          <span id="blockReadout">Line 0 / 0</span>
+          <select id="speedSelect" aria-label="Playback speed">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+          </select>
+        </div>
+      </section>
+
+      <aside class="controls-panel panel">
+        <div class="panel-heading machine-heading">
+          <div class="machine-select-group">
+            <span class="eyebrow">SETUP</span>
+            <span class="machine-select-row">
+              <select id="machineSelect" aria-label="Selected machine">
+                <option value="hardinge-conquest-t42" selected>Hardinge Conquest T42 · Fanuc 18-T (Draft)</option>
+                <option value="generic-lathe">Generic lathe</option>
+              </select>
+              <button id="editMachineButton" type="button" aria-label="View or edit selected machine">Edit</button>
+            </span>
+          </div>
+        </div>
+        <div class="control-stack">
+          <label>Orientation
+            <select id="orientationSelect">
+              <option value="left">Chuck left</option>
+              <option value="right">Chuck right</option>
+            </select>
+          </label>
+          <label>X programming
+            <select id="xModeSelect">
+              <option value="diameter">Diameter</option>
+              <option value="radius">Radius</option>
+            </select>
+          </label>
+          <label>Display / setup units
+            <select id="displayUnits">
+              <option value="inch">Inches</option>
+              <option value="mm">Millimeters</option>
+            </select>
+          </label>
+          <label>3D image quality
+            <select id="graphicsQuality">
+              <option value="standard">Standard · faster</option>
+              <option value="fine">Fine · high detail</option>
+              <option value="precision" selected>Precision · maximum</option>
+            </select>
+            <small id="graphicsQualityHint" class="quality-hint">Maximum surface resolution and 0.0001 in arc display chord.</small>
+          </label>
+          <details id="toolAssemblySetup" class="tool-assembly-setup">
+            <summary><span>2D TOOL ASSEMBLY</span><strong>MANUFACTURER CAD</strong></summary>
+            <div class="tool-assembly-body">
+              <label>Assembly library
+                <select id="toolAssemblySelect">
+                  <option value="kennametal-mclnr164d-cnmg432" selected>MCLNR164D + CNMG432 · RH</option>
+                </select>
+              </label>
+              <div class="catalog-identity"><strong>Kennametal 1096070</strong><span>1 in external turning holder · 95° approach</span></div>
+              <div class="control-divider"><span>CNMG432 / CNMG120408 INSERT</span></div>
+              <div class="field-pair">
+                <label><span>Inscribed circle (<span data-unit-label>in</span>)</span><input id="toolInsertLength" type="number" value="0.5000" readonly></label>
+                <label><span>Included angle (°)</span><input id="toolInsertAngle" type="number" value="80" readonly></label>
+              </div>
+              <label><span>Nose radius (<span data-unit-label>in</span>)</span><input id="toolNoseRadius" type="number" value="0.0315" readonly></label>
+              <small class="catalog-detail">Cutting edge 0.5077 in · thickness 0.1875 in · hole Ø 0.203 in</small>
+              <div class="control-divider"><span>MCLNR164D HOLDER</span></div>
+              <div class="field-pair">
+                <label><span>Overall length (<span data-unit-label>in</span>)</span><input id="toolHolderLength" type="number" value="6.0000" readonly></label>
+                <label><span>Shank width B (<span data-unit-label>in</span>)</span><input id="toolHolderHeight" type="number" value="1.0000" readonly></label>
+              </div>
+              <div class="field-pair">
+                <label><span>F dimension (<span data-unit-label>in</span>)</span><input id="toolHolderOffsetZ" type="number" value="1.2500" readonly></label>
+                <label><span>Head length LH (<span data-unit-label>in</span>)</span><input id="toolHolderOffsetX" type="number" value="1.2030" readonly></label>
+              </div>
+              <small class="catalog-detail">Right hand · −5° lead · −5° rake · −5° inclination</small>
+              <small class="catalog-detail">ICSN433 shim · KL46 lock pin · CK20 clamp · STC20 clamp screw</small>
+              <p>Official Kennametal GTM STEP geometry projected from the cutting reference point at exact scale. Curved display edges use a 0.05 mm maximum chord tolerance. Tool collision checking remains disabled.</p>
+            </div>
+          </details>
+          <div class="field-pair">
+            <label><span>Stock Ø (<span data-unit-label>in</span>)</span><input id="stockDiameter" type="number" min="0" step="0.01" value="2.05"></label>
+            <label><span>Overall length (<span data-unit-label>in</span>)</span><input id="stockLength" type="number" min="0" step="0.01" value="3.15"></label>
+          </div>
+          <div class="field-pair">
+            <label><span>Held by jaws (<span data-unit-label>in</span>)</span><input id="stockGripLength" type="number" min="0" step="0.01" value="0.50"></label>
+            <label><span>Stick-out (<span data-unit-label>in</span>)</span><input id="stockStickout" class="calculated-input" type="number" value="2.65" readonly aria-label="Calculated stock stick-out"></label>
+          </div>
+          <small class="stock-placement-hint">Overall length = held by jaws + stick-out. Stick-out is calculated from Face Z.</small>
+          <label class="toggle-row"><input id="stockToggle" type="checkbox" checked><span>Simulate stock removal</span></label>
+          <div class="control-divider"><span>CHUCK KEEP-OUT</span></div>
+          <div class="field-pair">
+            <label><span>Face Z (<span data-unit-label>in</span>)</span><input id="chuckFaceZ" type="number" step="0.01" value="-3.15"></label>
+            <label><span>Jaw Ø (<span data-unit-label>in</span>)</span><input id="jawDiameter" type="number" min="0" step="0.01" value="2.75"></label>
+          </div>
+          <label><span>Safety clearance (<span data-unit-label>in</span>)</span><input id="clearanceInput" type="number" min="0" step="0.005" value="0.12"></label>
+          <label class="toggle-row"><input id="collisionToggle" type="checkbox" checked><span>Show collision envelope</span></label>
+          <p class="quality-note">Image quality controls display tessellation only. It does not change G-code or certify machining accuracy.</p>
+        </div>
+
+        <div class="stats-grid">
+          <div><span>BLOCKS</span><strong id="motionCount">0</strong></div>
+          <div><span>CYCLES</span><strong id="cycleCount">0</strong></div>
+          <div><span>CUT DIST.</span><strong id="cutDistance">0 mm</strong></div>
+          <div><span>RAPID DIST.</span><strong id="rapidDistance">0 mm</strong></div>
+          <div><span>STOCK REMOVED</span><strong id="stockRemoved">0%</strong></div>
+          <div><span>CLEARANCE</span><strong id="collisionStatus" class="safe-value">CLEAR</strong></div>
+          <div><span>BOUNDS</span><strong id="boundsReadout">—</strong></div>
+        </div>
+
+        <div class="warnings">
+          <div class="section-title"><span>PROGRAM NOTES</span><span id="warningCount" class="chip">0</span></div>
+          <ul id="warningList"><li class="muted">No parser warnings.</li></ul>
+        </div>
+        <p class="safety-note">Preview only — the keep-out is a tool-point envelope, not full machine collision verification. Prove out with the control's approved process.</p>
+      </aside>
+    </main>
+
+    <dialog id="machineDialog" class="machine-dialog" aria-labelledby="machineDialogTitle">
+      <form id="machineForm">
+        <header class="machine-dialog-header">
+          <div>
+            <span class="eyebrow">MACHINE DEFINITION</span>
+            <h2 id="machineDialogTitle">Hardinge Conquest T42</h2>
+          </div>
+          <button id="closeMachineButton" type="button" class="dialog-close close-icon" aria-label="Close machine definition"></button>
+        </header>
+
+        <div class="machine-form-body">
+          <div class="machine-data-note">
+            <span id="machineStatusBadge" class="status-badge draft">DRAFT</span>
+            <p>Draft values may be best-effort estimates. The selected profile now affects reference-return and approach plotting; verify every value at the machine before relying on it.</p>
+          </div>
+
+          <section class="machine-form-section">
+            <div class="machine-section-heading"><span>01</span><div><h3>Identity & control</h3><p>The reusable name and control family for this machine.</p></div></div>
+            <div class="machine-form-grid">
+              <label class="wide">Profile name<input name="name" type="text" maxlength="120" required autocomplete="off"></label>
+              <label>Data status<select name="status"><option value="draft">Draft / unverified</option><option value="shop-confirmed">Shop-confirmed</option></select></label>
+              <label>Manufacturer<input name="manufacturer" type="text" maxlength="120" autocomplete="organization"></label>
+              <label>Model<input name="model" type="text" maxlength="120" autocomplete="off"></label>
+              <label>Serial number<input name="serialNumber" type="text" maxlength="120" autocomplete="off"></label>
+              <label>Control manufacturer<input name="controlMake" type="text" maxlength="120" autocomplete="off"></label>
+              <label>Control model<input name="controlModel" type="text" maxlength="120" autocomplete="off"></label>
+              <label>Machine units<select name="units"><option value="inch">Inches</option><option value="mm">Millimeters</option></select></label>
+              <label>X programming<select name="xProgramming"><option value="diameter">Diameter</option><option value="radius">Radius</option></select></label>
+              <label>Chuck orientation<select name="orientation"><option value="left">Chuck left</option><option value="right">Chuck right</option></select></label>
+              <label>Turret stations<input name="turretStations" type="number" min="1" max="100" step="1" placeholder="Unknown"></label>
+            </div>
+          </section>
+
+          <section class="machine-form-section">
+            <div class="machine-section-heading"><span>02</span><div><h3>Travel & reference</h3><p>Machine-coordinate limits and the reference-return position.</p></div></div>
+            <div class="machine-form-grid numeric-grid">
+              <label>X travel minimum<input name="xTravelMin" type="number" step="any" placeholder="Unknown"></label>
+              <label>X travel maximum<input name="xTravelMax" type="number" step="any" placeholder="Unknown"></label>
+              <label>Z travel minimum<input name="zTravelMin" type="number" step="any" placeholder="Unknown"></label>
+              <label>Z travel maximum<input name="zTravelMax" type="number" step="any" placeholder="Unknown"></label>
+              <label>Home X<input name="homeX" type="number" step="any" placeholder="Unknown"></label>
+              <label>Home Z<input name="homeZ" type="number" step="any" placeholder="Unknown"></label>
+            </div>
+          </section>
+
+          <section class="machine-form-section">
+            <div class="machine-section-heading"><span>03</span><div><h3>Program start & rapid motion</h3><p>How G-Code Studio should interpret the position before the first programmed move.</p></div></div>
+            <div class="machine-form-grid">
+              <label class="wide">Initial position assumption<select name="startMode"><option value="unknown">Unknown — do not invent an approach</option><option value="home">Machine home / reference</option><option value="tool-change">Tool-change position</option><option value="safe-index">Safe-index position</option><option value="custom">Custom coordinates</option></select></label>
+              <label>Initial X<input name="startX" type="number" step="any" placeholder="Unknown"></label>
+              <label>Initial Z<input name="startZ" type="number" step="any" placeholder="Unknown"></label>
+              <label class="wide">Rapid interpolation<select name="rapidBehavior"><option value="unknown">Unknown / not confirmed</option><option value="linear">Linear vector path</option><option value="dogleg">Independent-axis / dogleg</option><option value="parameter-dependent">Control-parameter dependent</option></select></label>
+              <label>Maximum X rapid<input name="rapidXMax" type="number" min="0" step="any" placeholder="Unknown"></label>
+              <label>Maximum Z rapid<input name="rapidZMax" type="number" min="0" step="any" placeholder="Unknown"></label>
+            </div>
+          </section>
+
+          <section class="machine-form-section">
+            <div class="machine-section-heading"><span>04</span><div><h3>Safe positions</h3><p>Known machine-coordinate positions for tool changes and turret indexing.</p></div></div>
+            <div class="machine-form-grid numeric-grid">
+              <label>Tool-change X<input name="toolChangeX" type="number" step="any" placeholder="Unknown"></label>
+              <label>Tool-change Z<input name="toolChangeZ" type="number" step="any" placeholder="Unknown"></label>
+              <label>Safe-index X<input name="safeIndexX" type="number" step="any" placeholder="Unknown"></label>
+              <label>Safe-index Z<input name="safeIndexZ" type="number" step="any" placeholder="Unknown"></label>
+              <label class="wide">Machine notes<textarea name="notes" rows="4" maxlength="2000" placeholder="Configuration details, source manual, measurements, options…"></textarea></label>
+            </div>
+          </section>
+        </div>
+
+        <footer class="machine-dialog-footer">
+          <span id="machineSaveStatus" role="status" aria-live="polite"></span>
+          <div>
+            <button id="cancelMachineButton" type="button" class="button secondary">Cancel</button>
+            <button type="submit" class="button primary">Save machine</button>
+          </div>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="compareDialog" class="compare-dialog" aria-labelledby="compareDialogTitle">
+      <div class="compare-shell">
+        <header class="compare-header">
+          <div>
+            <span class="eyebrow">PROGRAM VERIFICATION</span>
+            <h2 id="compareDialogTitle">Compare against proven original</h2>
+            <p>Exact G-code stays on this device. Formatting-only differences can be hidden; code values are never ignored.</p>
+          </div>
+          <button id="closeCompareButton" type="button" class="dialog-close close-icon" aria-label="Close program comparison"></button>
+        </header>
+
+        <section class="compare-sources" aria-label="Programs being compared">
+          <div class="compare-source original-source">
+            <span class="compare-source-label"><i></i>PROVEN ORIGINAL</span>
+            <strong id="originalCompareName">No original selected</strong>
+            <small id="originalCompareMeta">Open the approved program or snapshot the current editor before changing it.</small>
+            <div>
+              <button id="chooseOriginalButton" type="button" class="button secondary">Open original</button>
+              <button id="snapshotOriginalButton" type="button" class="button secondary">Snapshot current</button>
+            </div>
+          </div>
+          <div class="compare-direction" aria-hidden="true">→</div>
+          <div class="compare-source revised-source">
+            <span class="compare-source-label"><i></i>REVISED / CURRENT EDITOR</span>
+            <strong id="revisedCompareName">sample-g71-rough.nc</strong>
+            <small id="revisedCompareMeta">The program currently shown in G-Code Studio.</small>
+          </div>
+        </section>
+
+        <div id="compareEmpty" class="compare-empty">
+          <span class="compare-empty-mark">⇄</span>
+          <h3>Select the proven original</h3>
+          <p>If the revised program is already in the editor, open its approved predecessor. If you are starting from the approved program, snapshot it now and edit afterward.</p>
+          <button id="chooseOriginalEmptyButton" type="button" class="button primary">Open proven original</button>
+        </div>
+
+        <section id="compareResults" class="compare-results" hidden>
+          <div class="compare-summary">
+            <div class="compare-verdict">
+              <span id="compareVerdictBadge" class="compare-verdict-badge">REVIEW</span>
+              <div><strong id="compareVerdict">Differences found</strong><small id="compareVerdictDetail">Review every highlighted block.</small></div>
+            </div>
+            <div class="compare-counts" aria-label="Difference counts">
+              <div><span>CHANGED</span><strong id="compareChangedCount">0</strong></div>
+              <div><span>ADDED</span><strong id="compareAddedCount">0</strong></div>
+              <div><span>REMOVED</span><strong id="compareRemovedCount">0</strong></div>
+              <div><span>UNCHANGED</span><strong id="compareUnchangedCount">0</strong></div>
+            </div>
+            <div class="compare-word-counts" aria-label="Changed G-code word categories">
+              <span>Changed words:</span>
+              <strong id="compareCoordinateWords">X/Z & DIM 0</strong>
+              <strong id="compareCommandWords">G/M/T 0</strong>
+              <strong id="compareProcessWords">F/S 0</strong>
+              <strong id="compareReferenceWords">N/O/P/Q 0</strong>
+            </div>
+          </div>
+
+          <div class="compare-toolbar">
+            <div class="compare-view-toggle" aria-label="Comparison view">
+              <button id="compareCodeView" type="button" class="active" aria-pressed="true">Code audit</button>
+              <button id="compareGraphicsView" type="button" aria-pressed="false">Toolpath audit</button>
+            </div>
+            <label class="code-audit-control"><input id="ignoreFormattingToggle" type="checkbox" checked> Ignore spaces and letter case</label>
+            <label class="code-audit-control"><input id="differencesOnlyToggle" type="checkbox" checked> Differences only</label>
+            <label class="graphics-audit-control" hidden><input id="fitGeometryDifferences" type="checkbox" checked> Fit changed geometry</label>
+            <label class="graphics-audit-control" hidden title="Frame the machining moves and ignore distant rapid approach or home motion"><input id="fitGeometryPart" type="checkbox"> Fit to part</label>
+            <div class="compare-view-toggle graphics-audit-control" hidden aria-label="Toolpath layout">
+              <button id="compareSplitLayout" type="button" class="active" aria-pressed="true">Side by side</button>
+              <button id="compareOverlayLayout" type="button" aria-pressed="false">Overlay</button>
+            </div>
+            <div id="compareNavigation" class="compare-navigation">
+              <button id="previousCompareChange" type="button" aria-label="Previous difference">↑</button>
+              <span id="comparePosition">0 / 0</span>
+              <button id="nextCompareChange" type="button" aria-label="Next difference">↓</button>
+            </div>
+          </div>
+
+          <div id="compareCodeAudit" class="compare-table" role="table" aria-label="Side-by-side G-code comparison">
+            <div class="compare-grid compare-grid-head" role="row">
+              <span role="columnheader">ORIGINAL LINE</span><span role="columnheader">PROVEN ORIGINAL</span>
+              <span role="columnheader">RESULT</span>
+              <span role="columnheader">REVISED LINE</span><span role="columnheader">REVISED PROGRAM</span>
+            </div>
+            <div id="compareRows" class="compare-rows" role="rowgroup"></div>
+          </div>
+
+          <div id="compareGraphicsAudit" class="compare-graphics" hidden>
+            <div class="graphics-audit-heading">
+              <div>
+                <div class="graphics-title-row">
+                  <strong id="graphicsVerdict">Toolpaths match geometrically</strong>
+                  <button id="graphicsInfoButton" type="button" class="graphics-info-button" aria-label="Explain the graphical comparison" aria-controls="graphicsInfoPanel" aria-expanded="false" title="What do these differences mean?">i</button>
+                </div>
+                <span id="graphicsViewportNote">Both windows use the same machine setup, orientation, scale, and viewport.</span>
+              </div>
+              <div class="graphics-legend" aria-label="Toolpath comparison legend">
+                <span><i class="geometry-common"></i>Unchanged</span>
+                <span><i class="geometry-original"></i>Original only</span>
+                <span><i class="geometry-revised"></i>New / altered</span>
+              </div>
+            </div>
+            <aside id="graphicsInfoPanel" class="graphics-info-panel" role="note" aria-label="How to interpret the toolpath audit" hidden>
+              <header>
+                <div><span class="eyebrow">HOW TO READ THIS VIEW</span><strong>One edit can change many plotted moves.</strong></div>
+                <button id="closeGraphicsInfoButton" class="close-icon" type="button" aria-label="Close graphical comparison explanation"></button>
+              </header>
+              <div class="graphics-info-grid">
+                <section><span>01</span><div><strong>What the count means</strong><p><b id="graphicsInfoDifferenceCount">0 differences</b> means that many revised motion segments no longer match the original geometry. It does not mean that many separate code edits were made.</p></div></section>
+                <section><span>02</span><div><strong>Why changes multiply</strong><p>A single X, Z, diameter, or profile edit can regenerate several G71 roughing passes, approaches, and retracts. Each affected plotted segment is counted.</p></div></section>
+                <section><span>03</span><div><strong>How the colors work</strong><p><b class="info-gray">Gray</b> still matches. <b class="info-amber">Amber</b> existed only in the proven original. <b class="info-red">Red</b> is new or altered geometry in the revision.</p></div></section>
+                <section><span>04</span><div><strong>How to verify it</strong><p>Start with <b>Code audit</b> to find the actual edited words, then use this view to inspect their geometric effect. Feed, speed, comment, or sequence changes may not change geometry.</p></div></section>
+              </div>
+              <p class="graphics-info-limit"><strong>Important:</strong> G-Code Studio compares its modeled backplot. Canned cycles and machine behavior are approximations—not control-certified simulation or a substitute for approved prove-out.</p>
+            </aside>
+            <div id="compareSplitPlots" class="compare-plot-grid">
+              <section class="compare-plot-card">
+                <header><span>PROVEN ORIGINAL</span><strong id="originalGeometryCount">0 original-only moves</strong></header>
+                <div class="compare-canvas-wrap"><canvas id="originalCompareCanvas" aria-label="Original program toolpath"></canvas></div>
+              </section>
+              <section class="compare-plot-card revised-plot-card">
+                <header><span>REVISED PROGRAM</span><strong id="revisedGeometryCount">0 new or altered moves</strong></header>
+                <div class="compare-canvas-wrap"><canvas id="revisedCompareCanvas" aria-label="Revised program toolpath"></canvas></div>
+              </section>
+            </div>
+            <section id="compareOverlayPlot" class="compare-plot-card compare-overlay-plot" hidden>
+              <header><span>OVERLAY · ORIGINAL + REVISED</span><strong>Shared coordinates and viewport</strong></header>
+              <div class="compare-canvas-wrap"><canvas id="overlayCompareCanvas" aria-label="Overlaid original and revised program toolpaths"></canvas></div>
+            </section>
+            <p class="graphics-audit-note">A feed, speed, comment, or sequence-number change may appear in the code audit without changing geometry. Review both views before release.</p>
+          </div>
+        </section>
+
+        <footer class="compare-footer">
+          <span>Compare is an audit aid. A clean comparison does not validate setup, offsets, tools, control behavior, or machine safety.</span>
+        </footer>
+      </div>
+    </dialog>
+    <div id="dropOverlay" class="drop-overlay" hidden><strong>Drop G-code to open</strong><span>.nc · .cnc · .tap · .gcode · .txt</span></div>
+  </div>
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>
