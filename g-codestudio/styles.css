@@ -66,6 +66,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .chip { padding: 3px 7px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; font-size: 10px; white-space: nowrap; }
 
 .editor-panel { display: flex; flex-direction: column; min-height: 650px; }
+.program-search { flex: 0 0 auto; padding: 6px; border-bottom: 1px solid var(--border); background: linear-gradient(180deg, rgba(13, 31, 34, .98), rgba(8, 20, 23, .98)); box-shadow: 0 8px 22px rgba(0, 0, 0, .18); }
+.program-search[hidden], .program-search-row[hidden] { display: none; }
+.program-search-row { display: flex; min-width: 0; align-items: center; gap: 5px; }
+.program-search-row + .program-search-row { margin-top: 5px; }
+.program-search-field { display: grid; min-width: 0; flex: 1; grid-template-columns: auto minmax(70px, 1fr); align-items: center; gap: 6px; height: 29px; padding: 0 7px; border: 1px solid #2c474c; border-radius: 6px; background: #071012; }
+.program-search-field:focus-within { border-color: rgba(86, 227, 159, .72); box-shadow: 0 0 0 1px rgba(86, 227, 159, .12), 0 0 14px rgba(86, 227, 159, .08); }
+.program-search-field span { color: #79a0a8; font-size: 8px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
+.program-search-field input { width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; font: 11px "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+.program-search-field input::placeholder { color: #50676d; }
+.program-search-status { min-width: 50px; color: var(--muted); font: 9px "Cascadia Code", Consolas, monospace; text-align: center; white-space: nowrap; }
+.program-search button { display: grid; min-width: 29px; height: 29px; place-items: center; padding: 0; color: #a7bbc0; border: 1px solid #2b4147; border-radius: 6px; background: #0d1728; font: 800 13px/1 system-ui, sans-serif; }
+.program-search button:hover:not(:disabled) { color: var(--accent); border-color: #3f9372; background: #14312a; }
+.program-search button:disabled { cursor: default; opacity: .34; }
+.program-search .program-search-action { display: block; min-width: auto; padding: 0 9px; font-size: 9px; letter-spacing: .02em; }
+.program-replace-row { padding-left: 0; }
 .gcode-editor { --gcode-gutter-width: 42px; position: relative; flex: 1; min-height: 480px; overflow: hidden; background: #090f1a; }
 #gcodeInput { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; margin: 0; padding: 14px 14px 14px calc(var(--gcode-gutter-width) + 12px); resize: none; border: 0; outline: 0; color: #c7d8ee; caret-color: #f2fbff; background: transparent; white-space: pre; overflow: auto; font: 12px/1.68 "Cascadia Code", "SFMono-Regular", Consolas, monospace; tab-size: 2; }
 #gcodeInput::selection { color: #eefbf6; background: rgba(86, 227, 159, .28); }

@@ -45,11 +45,31 @@
     </header>
 
     <main class="workspace">
-      <aside class="editor-panel panel">
+      <aside id="programPanel" class="editor-panel panel">
         <div class="panel-heading">
           <div><span class="eyebrow">PROGRAM</span><strong id="fileName">sample-g71-rough.nc</strong></div>
           <span id="lineCount" class="chip">0 lines</span>
         </div>
+        <section id="programSearchPanel" class="program-search" aria-label="Find and replace" hidden>
+          <div class="program-search-row">
+            <label class="program-search-field">
+              <span>Find</span>
+              <input id="programSearchInput" type="text" autocomplete="off" spellcheck="false" placeholder="Text, N-number, or :line" aria-label="Find in program">
+            </label>
+            <output id="programSearchStatus" class="program-search-status" aria-live="polite">Type to find</output>
+            <button id="programSearchPrevious" type="button" title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>
+            <button id="programSearchNext" type="button" title="Next match (Enter)" aria-label="Next match">↓</button>
+            <button id="programSearchClose" type="button" title="Close (Escape)" aria-label="Close find and replace">×</button>
+          </div>
+          <div id="programReplaceRow" class="program-search-row program-replace-row" hidden>
+            <label class="program-search-field">
+              <span>Replace</span>
+              <input id="programReplaceInput" type="text" autocomplete="off" spellcheck="false" aria-label="Replace with">
+            </label>
+            <button id="programReplaceOne" class="program-search-action" type="button">Replace</button>
+            <button id="programReplaceAll" class="program-search-action" type="button">Replace all</button>
+          </div>
+        </section>
         <div id="gcodeEditor" class="gcode-editor">
           <div id="gcodeActiveLine" class="gcode-active-line" aria-hidden="true" hidden></div>
           <div class="gcode-line-gutter" aria-hidden="true">

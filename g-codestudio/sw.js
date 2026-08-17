@@ -1,4 +1,4 @@
-const CACHE_NAME = "verify-app-v36";
+const CACHE_NAME = "verify-app-v37";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -9,6 +9,7 @@ const APP_ASSETS = [
   "./graphics-quality.mjs",
   "./render-scheduler.mjs",
   "./interaction.mjs",
+  "./editor-search.mjs",
   "./geometry-inspector.mjs",
   "./tool-assembly.mjs",
   "./gcode.mjs",

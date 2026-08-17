@@ -16,6 +16,9 @@ import {
   graphicsHitAt, graphicsSelectionEnabled, programCursorNavigationKey, sourceLineAtOffset,
 } from "./interaction.mjs";
 import {
+  nextProgramSearchIndex, programSearchMatches, replaceAllProgramSearchMatches, replaceProgramSearchMatch,
+} from "./editor-search.mjs";
+import {
   cameraViewForDirection, navigationDragMode, orbitCameraFromDrag, renderLathe3d, renderViewCube, standardCameraView,
   zoomCameraAt,
   viewCubeHitTarget,
@@ -80,8 +83,13 @@ const NUMERIC_MACHINE_FIELDS = new Set([
 const $ = (id) => document.getElementById(id);
 const elements = {
   canvas: $("plotCanvas"), wrap: $("canvasWrap"), input: $("gcodeInput"), fileInput: $("fileInput"),
-  editor: $("gcodeEditor"), activeLine: $("gcodeActiveLine"), lineNumbers: $("gcodeLineNumbers"),
+  programPanel: $("programPanel"), editor: $("gcodeEditor"), activeLine: $("gcodeActiveLine"), lineNumbers: $("gcodeLineNumbers"),
   activeLineNumber: $("gcodeActiveNumber"),
+  programSearchPanel: $("programSearchPanel"), programSearchInput: $("programSearchInput"),
+  programSearchStatus: $("programSearchStatus"), programSearchPrevious: $("programSearchPrevious"),
+  programSearchNext: $("programSearchNext"), programSearchClose: $("programSearchClose"),
+  programReplaceRow: $("programReplaceRow"), programReplaceInput: $("programReplaceInput"),
+  programReplaceOne: $("programReplaceOne"), programReplaceAll: $("programReplaceAll"),
   fileName: $("fileName"), lineCount: $("lineCount"), status: $("programStatus"), timeline: $("timeline"),
   blockReadout: $("blockReadout"), play: $("playButton"), stepBack: $("stepBackButton"), stepForward: $("stepForwardButton"),
   speed: $("speedSelect"), machine: $("machineSelect"), editMachine: $("editMachineButton"), orientation: $("orientationSelect"),
@@ -145,6 +153,7 @@ const preferenceIds = [
 let installPrompt = null;
 let persistTimer = null;
 let programCursorFrame = null;
+const programSearch = {matches: [], index: -1, kind: "empty"};
 const STOCK_FRAME_CACHE_LIMIT = 64;
 const THREE_D_SETTLE_MS = 850;
 
@@ -205,6 +214,120 @@ function updateProgramLineHighlight({scroll = false} = {}) {
   state.highlightedSourceLine = line;
   if (scroll) scrollProgramLineIntoView(line);
   positionProgramLineHighlight();
+}
+
+function programSearchSelection() {
+  const start = elements.input.selectionStart;
+  const end = elements.input.selectionEnd;
+  return start < end && !elements.input.value.slice(start, end).includes("\n")
+    ? elements.input.value.slice(start, end)
+    : "";
+}
+
+function updateProgramSearchControls() {
+  const hasMatches = programSearch.matches.length > 0;
+  const replaceable = hasMatches && programSearch.kind === "text";
+  elements.programSearchPrevious.disabled = !hasMatches;
+  elements.programSearchNext.disabled = !hasMatches;
+  elements.programReplaceOne.disabled = !replaceable;
+  elements.programReplaceAll.disabled = !replaceable;
+}
+
+function activateProgramSearchMatch(index, {keepFocus = true} = {}) {
+  if (!programSearch.matches.length) return;
+  programSearch.index = Math.max(0, Math.min(programSearch.matches.length - 1, index));
+  const match = programSearch.matches[programSearch.index];
+  elements.input.setSelectionRange(match.start, match.end);
+  scrollProgramLineIntoView(match.line);
+  if (!state.programDirty) {
+    state.playing = false;
+    state.lastFrame = 0;
+    setProgramLine(match.line, {scrollProgram: true});
+  } else {
+    elements.input.scrollTop = Math.max(0, elements.input.scrollTop);
+    positionProgramLineHighlight();
+  }
+  elements.programSearchStatus.textContent = programSearch.kind === "line"
+    ? `Line ${match.line}`
+    : `${programSearch.index + 1} of ${programSearch.matches.length}`;
+  if (keepFocus) elements.programSearchInput.focus();
+}
+
+function refreshProgramSearch({direction = 1, reset = false} = {}) {
+  const previousStart = programSearch.matches[programSearch.index]?.start ?? elements.input.selectionStart;
+  const result = programSearchMatches(elements.input.value, elements.programSearchInput.value);
+  programSearch.matches = result.matches;
+  programSearch.kind = result.kind;
+  if (!result.matches.length) {
+    programSearch.index = -1;
+    elements.programSearchStatus.textContent = result.kind === "empty" ? "Type to find" : "No matches";
+    updateProgramSearchControls();
+    return;
+  }
+  if (reset) {
+    const next = result.matches.findIndex((match) => match.start >= previousStart);
+    programSearch.index = next >= 0 ? next : 0;
+  } else {
+    programSearch.index = nextProgramSearchIndex(result.matches, programSearch.index, direction);
+  }
+  updateProgramSearchControls();
+  activateProgramSearchMatch(programSearch.index);
+}
+
+function stepProgramSearch(direction) {
+  if (!programSearch.matches.length) {
+    refreshProgramSearch({reset: true});
+    return;
+  }
+  activateProgramSearchMatch(nextProgramSearchIndex(programSearch.matches, programSearch.index, direction));
+}
+
+function openProgramSearch({replace = false} = {}) {
+  const selected = programSearchSelection();
+  elements.programSearchPanel.hidden = false;
+  elements.programReplaceRow.hidden = !replace;
+  if (selected) elements.programSearchInput.value = selected;
+  refreshProgramSearch({reset: true});
+  elements.programSearchInput.focus();
+  elements.programSearchInput.select();
+}
+
+function closeProgramSearch() {
+  elements.programSearchPanel.hidden = true;
+  elements.programReplaceRow.hidden = true;
+  elements.input.focus({preventScroll: true});
+}
+
+function markProgramChanged() {
+  state.programDirty = true;
+  state.highlightedSourceLine = null;
+  positionProgramLineHighlight();
+  renderProgramLineNumbers();
+  elements.status.textContent = "Program changed — plot to refresh";
+  if (elements.compareDialog.open && state.comparisonOriginal) renderComparison();
+  schedulePersist();
+}
+
+function replaceCurrentProgramMatch() {
+  if (programSearch.kind !== "text" || programSearch.index < 0) return;
+  const match = programSearch.matches[programSearch.index];
+  const replacement = elements.programReplaceInput.value;
+  elements.input.value = replaceProgramSearchMatch(elements.input.value, match, replacement);
+  elements.input.setSelectionRange(match.start, match.start + replacement.length);
+  markProgramChanged();
+  refreshProgramSearch({reset: true});
+  elements.programReplaceInput.focus();
+}
+
+function replaceEveryProgramMatch() {
+  if (programSearch.kind !== "text" || !programSearch.matches.length) return;
+  const replacement = elements.programReplaceInput.value;
+  const replaced = replaceAllProgramSearchMatches(elements.input.value, programSearch.matches, replacement);
+  elements.input.value = replaced.value;
+  markProgramChanged();
+  refreshProgramSearch({reset: true});
+  elements.programSearchStatus.textContent = `Replaced ${replaced.count}`;
+  elements.programReplaceInput.focus();
 }
 
 function persistSession() {
@@ -459,6 +582,11 @@ async function saveMachineEditor(event) {
 function loadProgram(name, content) {
   elements.input.value = content;
   elements.fileName.textContent = name || "program.nc";
+  elements.programSearchPanel.hidden = true;
+  elements.programReplaceRow.hidden = true;
+  programSearch.matches = [];
+  programSearch.index = -1;
+  programSearch.kind = "empty";
   plotProgram();
   persistSession();
 }
@@ -2257,15 +2385,21 @@ elements.input.addEventListener("click", () => syncProgramLineToCursor({force: t
 elements.input.addEventListener("keydown", (event) => {
   if (programCursorNavigationKey(event.key)) scheduleProgramCursorSync();
 });
-elements.input.addEventListener("input", () => {
-  state.programDirty = true;
-  state.highlightedSourceLine = null;
-  positionProgramLineHighlight();
-  renderProgramLineNumbers();
-  elements.status.textContent = "Program changed — plot to refresh";
-  if (elements.compareDialog.open && state.comparisonOriginal) renderComparison();
-  schedulePersist();
+elements.input.addEventListener("input", markProgramChanged);
+elements.programSearchInput.addEventListener("input", () => refreshProgramSearch({reset: true}));
+elements.programSearchInput.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { event.preventDefault(); closeProgramSearch(); }
+  if (event.key === "Enter") { event.preventDefault(); stepProgramSearch(event.shiftKey ? -1 : 1); }
 });
+elements.programReplaceInput.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { event.preventDefault(); closeProgramSearch(); }
+  if (event.key === "Enter") { event.preventDefault(); replaceCurrentProgramMatch(); }
+});
+elements.programSearchPrevious.addEventListener("click", () => stepProgramSearch(-1));
+elements.programSearchNext.addEventListener("click", () => stepProgramSearch(1));
+elements.programSearchClose.addEventListener("click", closeProgramSearch);
+elements.programReplaceOne.addEventListener("click", replaceCurrentProgramMatch);
+elements.programReplaceAll.addEventListener("click", replaceEveryProgramMatch);
 
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -2303,6 +2437,14 @@ window.addEventListener("drop", async (event) => {
 
 window.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.metaKey) {
+    if (event.key.toLowerCase() === "f" && !elements.machineDialog.open && !elements.compareDialog.open) {
+      event.preventDefault();
+      openProgramSearch({replace: false});
+    }
+    if (event.key.toLowerCase() === "h" && !elements.machineDialog.open && !elements.compareDialog.open) {
+      event.preventDefault();
+      openProgramSearch({replace: true});
+    }
     if (event.key.toLowerCase() === "o") { event.preventDefault(); openProgram(); }
     if (event.key.toLowerCase() === "s") { event.preventDefault(); saveProgram(); }
     if (event.key === "Enter") { event.preventDefault(); plotProgram(); persistSession(); }
