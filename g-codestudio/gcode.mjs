@@ -131,8 +131,8 @@ function parseBasicRecord(record, state, xMode, warnings) {
     const rounded = Math.round(code * 10) / 10;
     if (MOTION_CODES.has(rounded)) state.motion = MOTION_CODES.get(rounded);
     else if (rounded === 18) state.sawPlane = true;
-    else if (rounded === 20) { state.scale = 25.4; state.units = "in"; }
-    else if (rounded === 21) { state.scale = 1; state.units = "mm"; }
+    else if (rounded === 20) { state.scale = 25.4; state.units = "in"; state.sawUnitMode = true; }
+    else if (rounded === 21) { state.scale = 1; state.units = "mm"; state.sawUnitMode = true; }
     else if (rounded === 90) state.absolute = true;
     else if (rounded === 91) state.absolute = false;
     else if (![28, 40, 54, 70, 71, 72, 80, 95, 96, 97, 99].includes(rounded)) {
@@ -144,6 +144,7 @@ function parseBasicRecord(record, state, xMode, warnings) {
   const hasX = record.byLetter.has("X");
   const hasZ = record.byLetter.has("Z");
   if (!hasX && !hasZ) return null;
+  if (!state.sawUnitMode) state.assumedUnitsUsed = true;
   const start = {x: state.x, z: state.z};
   const xWord = hasX ? lastWord(record, "X") * state.scale : null;
   const zWord = hasZ ? lastWord(record, "Z") * state.scale : null;
@@ -402,15 +403,18 @@ function cycleCall(record, pending, state) {
 export function parseGcode(source, {
   xMode = "diameter", initialPosition = {x: 0, z: 0}, referencePosition = null,
   rapidBehavior = "linear", rapidXMax = null, rapidZMax = null, arcChordTolerance = 0.0254,
+  defaultUnits = "mm", warnOnAssumedUnits = false,
 } = {}) {
   const lines = source.replace(/\r/g, "").split("\n");
   const records = lines.map(recordFor);
+  const normalizedDefaultUnits = defaultUnits === "inch" || defaultUnits === "in" ? "in" : "mm";
   const state = {
     x: Number.isFinite(initialPosition?.x) ? initialPosition.x : null,
     z: Number.isFinite(initialPosition?.z) ? initialPosition.z : null,
     referencePosition: isKnownPoint(referencePosition) ? {...referencePosition} : null,
     rapidBehavior, rapidXMax, rapidZMax, arcChordTolerance,
-    absolute: true, scale: 1, units: "mm", motion: "rapid", feed: null, sawPlane: false,
+    absolute: true, scale: normalizedDefaultUnits === "in" ? 25.4 : 1, units: normalizedDefaultUnits,
+    motion: "rapid", feed: null, sawPlane: false, sawUnitMode: false, assumedUnitsUsed: false,
   };
   const segments = [];
   const warnings = [];
@@ -502,10 +506,17 @@ export function parseGcode(source, {
   }
 
   if (pending) warnings.push({line: pending.record.line, message: `${pending.code} first block has no matching P/Q cycle block.`});
+  if (warnOnAssumedUnits && state.assumedUnitsUsed) {
+    const label = normalizedDefaultUnits === "in" ? "inches" : "millimeters";
+    warnings.unshift({line: null, info: true, message: `No G20/G21 was found before motion; Program units are assuming ${label}.`});
+  }
   if (!state.sawPlane && segments.some((segment) => segment.type.startsWith("arc"))) {
     warnings.unshift({line: null, message: "G18 was not present; arcs are assumed to use the lathe X/Z plane."});
   }
-  return {segments, warnings, cycles, units: state.units, sourceLines: lines.length};
+  return {
+    segments, warnings, cycles, units: state.units, sourceLines: lines.length,
+    unitsSource: state.assumedUnitsUsed ? "assumed" : "program",
+  };
 }
 
 export function segmentLength(segment, xScale = 1) {

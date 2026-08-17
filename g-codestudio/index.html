@@ -162,6 +162,14 @@
               <option value="radius">Radius</option>
             </select>
           </label>
+          <label>Program units
+            <select id="programUnits">
+              <option value="machine" selected>Machine default</option>
+              <option value="inch">Inches</option>
+              <option value="mm">Millimeters</option>
+            </select>
+            <small id="programUnitsHint" class="quality-hint">Machine default: Inches. Used when G20/G21 is absent.</small>
+          </label>
           <label>Display / setup units
             <select id="displayUnits">
               <option value="inch">Inches</option>

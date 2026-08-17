@@ -1,4 +1,4 @@
-const CACHE_NAME = "verify-app-v35";
+const CACHE_NAME = "verify-app-v36";
 const APP_ASSETS = [
   "./",
   "./index.html",

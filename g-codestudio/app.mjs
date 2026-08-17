@@ -85,7 +85,7 @@ const elements = {
   fileName: $("fileName"), lineCount: $("lineCount"), status: $("programStatus"), timeline: $("timeline"),
   blockReadout: $("blockReadout"), play: $("playButton"), stepBack: $("stepBackButton"), stepForward: $("stepForwardButton"),
   speed: $("speedSelect"), machine: $("machineSelect"), editMachine: $("editMachineButton"), orientation: $("orientationSelect"),
-  xMode: $("xModeSelect"), stockDiameter: $("stockDiameter"), stockLength: $("stockLength"), stockGripLength: $("stockGripLength"), stockStickout: $("stockStickout"), stockToggle: $("stockToggle"),
+  xMode: $("xModeSelect"), programUnits: $("programUnits"), programUnitsHint: $("programUnitsHint"), stockDiameter: $("stockDiameter"), stockLength: $("stockLength"), stockGripLength: $("stockGripLength"), stockStickout: $("stockStickout"), stockToggle: $("stockToggle"),
   empty: $("emptyState"),
   chuckFaceZ: $("chuckFaceZ"), jawDiameter: $("jawDiameter"), clearance: $("clearanceInput"), collisionToggle: $("collisionToggle"),
   displayUnits: $("displayUnits"), unitReadout: $("unitReadout"), save: $("saveButton"), install: $("installButton"),
@@ -137,7 +137,7 @@ const navigation3dRenderer = createFrameScheduler({
 });
 const STORAGE_KEY = "verify.session.v1";
 const preferenceIds = [
-  "machineSelect", "orientationSelect", "xModeSelect", "displayUnits", "stockDiameter", "stockLength", "stockGripLength",
+  "machineSelect", "orientationSelect", "xModeSelect", "programUnits", "displayUnits", "stockDiameter", "stockLength", "stockGripLength",
   "stockToggle", "chuckFaceZ", "jawDiameter", "clearanceInput", "collisionToggle", "graphicsQuality",
   "toolpathToggle",
   "toolAssemblySelect",
@@ -355,6 +355,18 @@ function machineLengthMm(value, profile) {
   return Number(value) * (profile.units === "inch" ? 25.4 : 1);
 }
 
+function selectedProgramUnits(profile = currentMachineProfile()) {
+  if (elements.programUnits.value === "inch" || elements.programUnits.value === "mm") return elements.programUnits.value;
+  return profile?.units === "mm" ? "mm" : "inch";
+}
+
+function updateProgramUnitsHint(profile = currentMachineProfile()) {
+  const selected = selectedProgramUnits(profile);
+  const label = selected === "inch" ? "Inches" : "Millimeters";
+  const source = elements.programUnits.value === "machine" ? `Machine default: ${label}.` : `Fallback: ${label}.`;
+  elements.programUnitsHint.textContent = `${source} Used when G20/G21 is absent.`;
+}
+
 function machinePlotOptions(profile) {
   if (!profile) return {initialPosition: null, referencePosition: null};
   const hasNumber = (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
@@ -373,6 +385,8 @@ function machinePlotOptions(profile) {
   return {
     initialPosition,
     referencePosition,
+    defaultUnits: selectedProgramUnits(profile),
+    warnOnAssumedUnits: true,
     rapidBehavior: profile.rapidBehavior,
     rapidXMax: hasNumber(profile.rapidXMax) ? machineLengthMm(profile.rapidXMax, profile) : null,
     rapidZMax: hasNumber(profile.rapidZMax) ? machineLengthMm(profile.rapidZMax, profile) : null,
@@ -421,6 +435,7 @@ async function saveMachineEditor(event) {
   if (index >= 0) state.machineProfiles[index] = profile;
   persistMachineProfileCache();
   renderMachineSelect(profile.id);
+  updateProgramUnitsHint(profile);
   elements.machineDialogTitle.textContent = profile.name;
   updateMachineStatusBadge(profile.status);
   persistSession();
@@ -1851,6 +1866,12 @@ elements.displayUnits.addEventListener("change", () => {
   persistSession();
 });
 
+elements.programUnits.addEventListener("change", () => {
+  updateProgramUnitsHint();
+  plotProgram();
+  persistSession();
+});
+
 elements.graphicsQuality.addEventListener("change", () => {
   const programLine = state.programLine;
   const visibleBlocks = state.visibleBlocks;
@@ -1876,6 +1897,7 @@ elements.machine.addEventListener("change", () => {
   const machine = currentMachineProfile();
   if (machine?.orientation) elements.orientation.value = machine.orientation;
   if (machine?.xProgramming) elements.xMode.value = machine.xProgramming;
+  updateProgramUnitsHint(machine);
   refreshUnitUi();
   plotProgram();
   persistSession();
@@ -2320,6 +2342,7 @@ const restored = restoreSession();
 activeUnitScale = unitScale();
 syncToolCatalogUi();
 refreshUnitUi();
+updateProgramUnitsHint();
 updateToolControls();
 if (!restored) elements.input.value = sampleProgram;
 plotProgram();
