@@ -31,6 +31,8 @@
       </div>
       <div class="header-status">
         <span class="status-dot"></span>
+        <span class="cycle-time-summary"><span>EST. CYCLE</span> <strong id="cycleTimeHeader" aria-live="polite">—</strong></span>
+        <span class="status-divider" aria-hidden="true">•</span>
         <span id="programStatus">Sample loaded</span>
       </div>
       <div class="header-actions">
@@ -257,6 +259,7 @@
         <div class="stats-grid">
           <div><span>BLOCKS</span><strong id="motionCount">0</strong></div>
           <div><span>CYCLES</span><strong id="cycleCount">0</strong></div>
+          <div class="runtime-stat"><span>ESTIMATED CYCLE TIME</span><strong id="cycleTimeStat" aria-live="polite">—</strong></div>
           <div><span>CUT DIST.</span><strong id="cutDistance">0 mm</strong></div>
           <div><span>RAPID DIST.</span><strong id="rapidDistance">0 mm</strong></div>
           <div><span>STOCK REMOVED</span><strong id="stockRemoved">0%</strong></div>

@@ -1,4 +1,5 @@
 import {parseGcode, programBounds, segmentLength} from "./gcode.mjs";
+import {estimateCycleTime, formatCycleTime} from "./runtime.mjs";
 import {buildStockProfile, collisionPointForSegment, extendStockProfile, findCollisions, stockContourPoints, stockPlacement} from "./simulation.mjs";
 import {convertUnitValue, scaleForUnits} from "./units.mjs";
 import {comparePrograms, compareSegmentGeometry, diffLineTokens, geometryItemsForFit, overlayGeometryLayers} from "./compare.mjs";
@@ -1770,6 +1771,27 @@ function updateStats() {
   $("cycleCount").textContent = String(state.parsed.cycles.length);
   $("rapidDistance").textContent = formatDistance(rapid);
   $("cutDistance").textContent = formatDistance(cut);
+  const machineOptions = machinePlotOptions(currentMachineProfile());
+  const cycleTime = estimateCycleTime(state.parsed, {
+    xScale: xScale(),
+    rapidXMax: machineOptions.rapidXMax,
+    rapidZMax: machineOptions.rapidZMax,
+  });
+  const timeText = cycleTime.hasEstimate
+    ? `${cycleTime.complete ? "" : "≥ "}${formatCycleTime(cycleTime.seconds)}`
+    : "—";
+  const timeTitleParts = [
+    cycleTime.hasEstimate
+      ? `Estimated motion and dwell time: ${formatCycleTime(cycleTime.seconds)} (cut ${formatCycleTime(cycleTime.cuttingSeconds)}, rapid ${formatCycleTime(cycleTime.rapidSeconds)}, dwell ${formatCycleTime(cycleTime.dwellSeconds)}).`
+      : "Cycle time cannot be estimated from the available program and machine data.",
+    ...cycleTime.limitations,
+    "Excludes operator stops, tool-change duration, and spindle acceleration.",
+  ];
+  for (const element of [$("cycleTimeHeader"), $("cycleTimeStat")]) {
+    element.textContent = timeText;
+    element.title = timeTitleParts.join(" ");
+    element.classList.toggle("partial-time", cycleTime.hasEstimate && !cycleTime.complete);
+  }
   $("boundsReadout").textContent = bounds ? `${displayValue(bounds.maxZ - bounds.minZ).toFixed(elements.displayUnits.value === "inch" ? 3 : 1)} × ${displayValue(bounds.maxX - bounds.minX).toFixed(elements.displayUnits.value === "inch" ? 3 : 1)} ${unitName()}` : "—";
   const collisionStatus = $("collisionStatus");
   collisionStatus.textContent = collisions.length ? `${collisions.length} HIT${collisions.length === 1 ? "" : "S"}` : "CLEAR";

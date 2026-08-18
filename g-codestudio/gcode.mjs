@@ -125,8 +125,20 @@ function cloneState(state) {
   return {...state};
 }
 
-function parseBasicRecord(record, state, xMode, warnings) {
-  if (!record.byLetter.size) return null;
+function timingSnapshot(state) {
+  return {
+    feed: state.feed ?? null,
+    feedMode: state.feedMode ?? "unknown",
+    spindleMode: state.spindleMode ?? "unknown",
+    spindleSpeed: state.spindleSpeed ?? null,
+    spindleLimit: state.spindleLimit ?? null,
+    spindleRunning: state.spindleRunning ?? null,
+    unitScale: state.unitScale ?? state.scale ?? 1,
+    programUnits: state.programUnits ?? state.units ?? "mm",
+  };
+}
+
+function updateModalState(record, state, warnings) {
   for (const code of record.byLetter.get("G") || []) {
     const rounded = Math.round(code * 10) / 10;
     if (MOTION_CODES.has(rounded)) state.motion = MOTION_CODES.get(rounded);
@@ -135,12 +147,30 @@ function parseBasicRecord(record, state, xMode, warnings) {
     else if (rounded === 21) { state.scale = 1; state.units = "mm"; state.sawUnitMode = true; }
     else if (rounded === 90) state.absolute = true;
     else if (rounded === 91) state.absolute = false;
-    else if (![28, 40, 54, 70, 71, 72, 80, 95, 96, 97, 99].includes(rounded)) {
+    else if (rounded === 94 || rounded === 98) state.feedMode = "per-minute";
+    else if (rounded === 95 || rounded === 99) state.feedMode = "per-revolution";
+    else if (rounded === 96) state.spindleMode = "css";
+    else if (rounded === 97) state.spindleMode = "rpm";
+    else if (![4, 28, 40, 50, 54, 70, 71, 72, 80].includes(rounded)) {
       warnings.push({line: record.line, message: `G${code} is not modeled.`});
     }
   }
 
   if (record.byLetter.has("F")) state.feed = lastWord(record, "F");
+  if (record.byLetter.has("S")) {
+    if (hasG(record, 50)) state.spindleLimit = lastWord(record, "S");
+    else state.spindleSpeed = lastWord(record, "S");
+  }
+  for (const code of record.byLetter.get("M") || []) {
+    const rounded = Math.round(code);
+    if (rounded === 3 || rounded === 4) state.spindleRunning = true;
+    else if (rounded === 5) state.spindleRunning = false;
+  }
+}
+
+function parseBasicRecord(record, state, xMode, warnings) {
+  if (!record.byLetter.size) return null;
+  updateModalState(record, state, warnings);
   const hasX = record.byLetter.has("X");
   const hasZ = record.byLetter.has("Z");
   if (!hasX && !hasZ) return null;
@@ -165,7 +195,7 @@ function parseBasicRecord(record, state, xMode, warnings) {
   if (distance(start, end) < EPSILON) return null;
 
   const points = state.motion === "rapid" ? rapidPath(start, end, state, xMode) : [start, end];
-  const segment = {type: state.motion, start, end, points, line: record.line, raw: record.raw.trim(), feed: state.feed};
+  const segment = {type: state.motion, start, end, points, line: record.line, raw: record.raw.trim(), ...timingSnapshot(state)};
   if (state.motion === "arc-cw" || state.motion === "arc-ccw") {
     const params = {
       i: record.byLetter.has("I") ? lastWord(record, "I") * state.scale : NaN,
@@ -185,7 +215,7 @@ function parseBasicRecord(record, state, xMode, warnings) {
 function rapidSegment(start, end, record, state, xMode, stage) {
   return {
     type: "rapid", start: {...start}, end: {...end}, points: rapidPath(start, end, state, xMode),
-    line: record.line, raw: record.raw.trim(), feed: state.feed, referenceReturn: true, referenceStage: stage,
+    line: record.line, raw: record.raw.trim(), ...timingSnapshot(state), referenceReturn: true, referenceStage: stage,
   };
 }
 
@@ -293,10 +323,11 @@ function crossingPoint(points, level, key, outsideDirection) {
 
 function generatedSegment(type, start, end, cycle, line, pass, points = null, rapidState = null, xMode = "diameter", geometry = null) {
   const path = points || (type === "rapid" && rapidState ? rapidPath(start, end, rapidState, xMode) : [{...start}, {...end}]);
+  const timingSource = geometry && type !== "rapid" ? geometry : rapidState;
   const segment = {
     type, start: {...start}, end: {...end}, points: path,
     line, raw: `${cycle} generated ${type}${pass ? ` pass ${pass}` : ""}`,
-    feed: null, generated: true, cycle, pass,
+    ...timingSnapshot(timingSource || {}), generated: true, cycle, pass,
     executionLine: line,
     sourceLine: Number.isInteger(geometry?.line) ? geometry.line : line,
   };
@@ -414,11 +445,13 @@ export function parseGcode(source, {
     referencePosition: isKnownPoint(referencePosition) ? {...referencePosition} : null,
     rapidBehavior, rapidXMax, rapidZMax, arcChordTolerance,
     absolute: true, scale: normalizedDefaultUnits === "in" ? 25.4 : 1, units: normalizedDefaultUnits,
-    motion: "rapid", feed: null, sawPlane: false, sawUnitMode: false, assumedUnitsUsed: false,
+    motion: "rapid", feed: null, feedMode: "unknown", spindleMode: "unknown", spindleSpeed: null,
+    spindleLimit: null, spindleRunning: null, sawPlane: false, sawUnitMode: false, assumedUnitsUsed: false,
   };
   const segments = [];
   const warnings = [];
   const cycles = [];
+  const timingEvents = [];
   const definitionIndexes = new Set();
 
   for (const record of records) {
@@ -433,11 +466,22 @@ export function parseGcode(source, {
   let pending = null;
   for (const record of records) {
     if (!record.byLetter.size || definitionIndexes.has(record.index)) continue;
+    if (hasG(record, 4)) {
+      updateModalState(record, state, warnings);
+      const secondsWord = lastWord(record, "X") ?? lastWord(record, "U");
+      const millisecondsWord = lastWord(record, "P");
+      const seconds = Number.isFinite(secondsWord) ? secondsWord : (Number.isFinite(millisecondsWord) ? millisecondsWord / 1000 : NaN);
+      if (seconds >= 0) timingEvents.push({type: "dwell", line: record.line, seconds});
+      else warnings.push({line: record.line, message: "G04 dwell needs X/U seconds or P milliseconds for cycle-time estimation."});
+      continue;
+    }
     if (hasG(record, 28)) {
+      updateModalState(record, state, warnings);
       segments.push(...parseReferenceReturn(record, state, xMode, warnings));
       continue;
     }
     if (hasG(record, 71) || hasG(record, 72)) {
+      updateModalState(record, state, warnings);
       const code = hasG(record, 71) ? "G71" : "G72";
       const p = lastWord(record, "P");
       const q = lastWord(record, "Q");
@@ -476,6 +520,7 @@ export function parseGcode(source, {
     }
 
     if (hasG(record, 70)) {
+      updateModalState(record, state, warnings);
       const p = lastWord(record, "P");
       const q = lastWord(record, "Q");
       const startIndex = sequenceIndex(records, p);
@@ -515,6 +560,7 @@ export function parseGcode(source, {
   }
   return {
     segments, warnings, cycles, units: state.units, sourceLines: lines.length,
+    timingEvents, dwellSeconds: timingEvents.reduce((sum, event) => sum + event.seconds, 0),
     unitsSource: state.assumedUnitsUsed ? "assumed" : "program",
   };
 }
