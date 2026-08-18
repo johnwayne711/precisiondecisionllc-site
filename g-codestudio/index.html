@@ -31,7 +31,7 @@
       </div>
       <div class="header-status">
         <span class="status-dot"></span>
-        <span class="cycle-time-summary"><span>EST. CYCLE</span> <strong id="cycleTimeHeader" aria-live="polite">—</strong></span>
+        <span class="cycle-time-summary"><span>CYCLE</span> <strong id="cycleTimeHeader" aria-live="polite">—</strong></span>
         <span class="status-divider" aria-hidden="true">•</span>
         <span id="programStatus">Sample loaded</span>
       </div>
@@ -148,13 +148,20 @@
             <button id="stepForwardButton" class="step-button" type="button" aria-label="Step forward one program line" title="Next program line">▶</button>
           </div>
           <input id="timeline" type="range" min="0" max="1" value="0" step="1" aria-label="Program line position">
-          <span id="blockReadout">Line 0 / 0</span>
           <select id="speedSelect" aria-label="Playback speed">
             <option value="0.5">0.5×</option>
             <option value="1" selected>1×</option>
             <option value="2">2×</option>
             <option value="4">4×</option>
           </select>
+          <div class="transport-readouts">
+            <span id="blockReadout">Line 0 / 0</span>
+            <span class="reader-time" aria-label="Cycle time at the current program line">
+              <span><b>ELAPSED</b><strong id="readerElapsedTime" aria-live="polite">00:00.0</strong></span>
+              <span><b>REMAIN</b><strong id="readerRemainingTime" aria-live="polite">—</strong></span>
+              <span><b>TOTAL</b><strong id="readerTotalTime">—</strong></span>
+            </span>
+          </div>
         </div>
       </section>
 
@@ -259,7 +266,7 @@
         <div class="stats-grid">
           <div><span>BLOCKS</span><strong id="motionCount">0</strong></div>
           <div><span>CYCLES</span><strong id="cycleCount">0</strong></div>
-          <div class="runtime-stat"><span>ESTIMATED CYCLE TIME</span><strong id="cycleTimeStat" aria-live="polite">—</strong></div>
+          <div class="runtime-stat"><span>PROGRAM CYCLE TIME</span><strong id="cycleTimeStat" aria-live="polite">—</strong></div>
           <div><span>CUT DIST.</span><strong id="cutDistance">0 mm</strong></div>
           <div><span>RAPID DIST.</span><strong id="rapidDistance">0 mm</strong></div>
           <div><span>STOCK REMOVED</span><strong id="stockRemoved">0%</strong></div>

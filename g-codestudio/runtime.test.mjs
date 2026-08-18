@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {parseGcode} from "./gcode.mjs";
-import {estimateCycleTime, formatCycleTime} from "./runtime.mjs";
+import {
+  cycleTimeAtPosition, estimateCycleTime, formatCycleTime, LEGACY_RAPID_RATE_MM_PER_MINUTE,
+} from "./runtime.mjs";
 
 test("estimates G95 cutting time from feed per revolution and fixed RPM", () => {
   const parsed = parseGcode(`G20 G95
@@ -84,15 +86,40 @@ N120 X1.2`, {
   assert.ok(estimate.seconds > 0);
 });
 
-test("marks an estimate incomplete when rapid-rate data is unavailable", () => {
+test("uses the conservative older-machine fallback when rapid data is unavailable", () => {
   const parsed = {segments: [{type: "rapid", points: [{x: 0, z: 0}, {x: 10, z: 0}]}]};
   const estimate = estimateCycleTime(parsed);
-  assert.equal(estimate.hasEstimate, false);
+  assert.equal(estimate.hasEstimate, true);
   assert.equal(estimate.complete, false);
-  assert.equal(estimate.untimedSegments, 1);
+  assert.equal(estimate.quality, "assumed");
+  assert.equal(estimate.untimedSegments, 0);
+  assert.equal(estimate.fallbackRapidXUsed, true);
+  assert.ok(Math.abs(estimate.seconds - (10 / LEGACY_RAPID_RATE_MM_PER_MINUTE * 60)) < 1e-9);
+  assert.ok(estimate.limitations.some((limitation) => limitation.includes("400 IPM")));
+});
+
+test("synchronizes elapsed and remaining time with motion blocks and dwell lines", () => {
+  const parsed = parseGcode(`G21 G94
+G1 Z-50 F50
+G1 Z-100
+G04 P3000`, {
+    initialPosition: {x: 20, z: 0},
+    defaultUnits: "mm",
+  });
+  const estimate = estimateCycleTime(parsed);
+  const firstMove = cycleTimeAtPosition(estimate, {visibleBlocks: 1, sourceLine: 2});
+  const secondMove = cycleTimeAtPosition(estimate, {visibleBlocks: 2, sourceLine: 3});
+  const dwellComplete = cycleTimeAtPosition(estimate, {visibleBlocks: 2, sourceLine: 4});
+  assert.equal(firstMove.elapsedSeconds, 60);
+  assert.equal(firstMove.remainingSeconds, 63);
+  assert.equal(secondMove.elapsedSeconds, 120);
+  assert.equal(secondMove.remainingSeconds, 3);
+  assert.equal(dwellComplete.elapsedSeconds, 123);
+  assert.equal(dwellComplete.remainingSeconds, 0);
 });
 
 test("formats cycle time for minute and hour durations", () => {
   assert.equal(formatCycleTime(65), "01:05");
   assert.equal(formatCycleTime(3661), "1:01:01");
+  assert.equal(formatCycleTime(65.26, {tenths: true}), "01:05.3");
 });

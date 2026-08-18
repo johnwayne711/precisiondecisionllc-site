@@ -1,5 +1,5 @@
 import {parseGcode, programBounds, segmentLength} from "./gcode.mjs";
-import {estimateCycleTime, formatCycleTime} from "./runtime.mjs";
+import {cycleTimeAtPosition, estimateCycleTime, formatCycleTime} from "./runtime.mjs";
 import {buildStockProfile, collisionPointForSegment, extendStockProfile, findCollisions, stockContourPoints, stockPlacement} from "./simulation.mjs";
 import {convertUnitValue, scaleForUnits} from "./units.mjs";
 import {comparePrograms, compareSegmentGeometry, diffLineTokens, geometryItemsForFit, overlayGeometryLayers} from "./compare.mjs";
@@ -93,6 +93,7 @@ const elements = {
   programReplaceOne: $("programReplaceOne"), programReplaceAll: $("programReplaceAll"),
   fileName: $("fileName"), lineCount: $("lineCount"), status: $("programStatus"), timeline: $("timeline"),
   blockReadout: $("blockReadout"), play: $("playButton"), stepBack: $("stepBackButton"), stepForward: $("stepForwardButton"),
+  readerElapsedTime: $("readerElapsedTime"), readerRemainingTime: $("readerRemainingTime"), readerTotalTime: $("readerTotalTime"),
   speed: $("speedSelect"), machine: $("machineSelect"), editMachine: $("editMachineButton"), orientation: $("orientationSelect"),
   xMode: $("xModeSelect"), programUnits: $("programUnits"), programUnitsHint: $("programUnitsHint"), stockDiameter: $("stockDiameter"), stockLength: $("stockLength"), stockGripLength: $("stockGripLength"), stockStickout: $("stockStickout"), stockToggle: $("stockToggle"),
   empty: $("emptyState"),
@@ -124,7 +125,7 @@ const elements = {
 };
 
 const state = {
-  parsed: {segments: [], warnings: []}, programLine: 0, visibleBlocks: 0, playing: false, lastFrame: 0,
+  parsed: {segments: [], warnings: []}, cycleTime: null, programLine: 0, visibleBlocks: 0, playing: false, lastFrame: 0,
   camera: {scale: 1, offsetX: 0, offsetY: 0, fitted: false}, drag: null, cursor: null,
   machineProfiles: DEFAULT_MACHINE_PROFILES.map((profile) => ({...profile})),
   comparisonOriginal: null, comparison: null, compareChangeIndex: -1,
@@ -1777,8 +1778,9 @@ function updateStats() {
     rapidXMax: machineOptions.rapidXMax,
     rapidZMax: machineOptions.rapidZMax,
   });
+  state.cycleTime = cycleTime;
   const timeText = cycleTime.hasEstimate
-    ? `${cycleTime.complete ? "" : "≥ "}${formatCycleTime(cycleTime.seconds)}`
+    ? qualifiedTime(cycleTime.seconds, cycleTime.quality)
     : "—";
   const timeTitleParts = [
     cycleTime.hasEstimate
@@ -1790,13 +1792,16 @@ function updateStats() {
   for (const element of [$("cycleTimeHeader"), $("cycleTimeStat")]) {
     element.textContent = timeText;
     element.title = timeTitleParts.join(" ");
-    element.classList.toggle("partial-time", cycleTime.hasEstimate && !cycleTime.complete);
+    element.classList.toggle("partial-time", cycleTime.quality === "partial");
+    element.classList.toggle("assumed-time", cycleTime.quality === "assumed");
   }
   $("boundsReadout").textContent = bounds ? `${displayValue(bounds.maxZ - bounds.minZ).toFixed(elements.displayUnits.value === "inch" ? 3 : 1)} × ${displayValue(bounds.maxX - bounds.minX).toFixed(elements.displayUnits.value === "inch" ? 3 : 1)} ${unitName()}` : "—";
   const collisionStatus = $("collisionStatus");
   collisionStatus.textContent = collisions.length ? `${collisions.length} HIT${collisions.length === 1 ? "" : "S"}` : "CLEAR";
   collisionStatus.className = collisions.length ? "danger-value" : "safe-value";
   const notes = [...state.parsed.warnings];
+  const rapidAssumption = cycleTime.limitations.find((limitation) => limitation.includes("rapid timing assumes"));
+  if (rapidAssumption) notes.unshift({line: null, info: true, message: rapidAssumption});
   if (collisions.length) {
     const lines = [...new Set(collisions.map((collision) => collision.segment.line).filter(Boolean))];
     notes.unshift({line: lines[0] || null, danger: true, message: `${collisions.length} toolpath move${collisions.length === 1 ? "" : "s"} enter the configured chuck keep-out envelope.`});
@@ -1820,6 +1825,37 @@ function updateStats() {
   }
 }
 
+function qualifiedTime(seconds, quality, {tenths = false} = {}) {
+  const prefix = quality === "partial" ? "≥ " : (quality === "assumed" ? "≈ " : "");
+  return `${prefix}${formatCycleTime(seconds, {tenths})}`;
+}
+
+function updateReaderTime() {
+  const estimate = state.cycleTime;
+  const values = [
+    [elements.readerElapsedTime, "elapsedSeconds", "elapsedQuality"],
+    [elements.readerRemainingTime, "remainingSeconds", "remainingQuality"],
+    [elements.readerTotalTime, "totalSeconds", "totalQuality"],
+  ];
+  if (!estimate?.hasEstimate) {
+    for (const [element] of values) {
+      element.textContent = "—";
+      element.classList.remove("partial-time", "assumed-time");
+    }
+    return;
+  }
+  const position = cycleTimeAtPosition(estimate, {
+    visibleBlocks: state.visibleBlocks,
+    sourceLine: state.programLine,
+  });
+  for (const [element, secondsKey, qualityKey] of values) {
+    const quality = position[qualityKey];
+    element.textContent = qualifiedTime(position[secondsKey], quality, {tenths: true});
+    element.classList.toggle("partial-time", quality === "partial");
+    element.classList.toggle("assumed-time", quality === "assumed");
+  }
+}
+
 function updateTransport({scrollProgram = false} = {}) {
   const totalBlocks = state.parsed.segments.length;
   const totalLines = state.parsed.sourceLines || programLineCount();
@@ -1835,6 +1871,7 @@ function updateTransport({scrollProgram = false} = {}) {
   elements.play.setAttribute("aria-label", state.playing ? "Pause" : "Play");
   elements.stepBack.disabled = state.programLine <= 0;
   elements.stepForward.disabled = state.programLine >= totalLines && state.visibleBlocks >= range.end;
+  updateReaderTime();
   if (state.visibleBlocks > 0) {
     const point = state.parsed.segments[Math.min(state.visibleBlocks, totalBlocks) - 1].end;
     const places = elements.displayUnits.value === "inch" ? 4 : 3;
