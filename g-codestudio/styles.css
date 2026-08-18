@@ -174,6 +174,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .reader-time strong { color: var(--accent); font: 700 11px "Cascadia Code", Consolas, monospace; }
 .reader-time strong.partial-time { color: var(--warn); }
 .reader-time strong.assumed-time { color: #fbbf24; }
+.reader-time #readerElapsedTime.assumed-time { color: var(--accent); }
 
 .controls-panel { display: flex; flex-direction: column; min-height: 650px; }
 .control-stack { display: flex; flex-direction: column; gap: 12px; padding: 13px; border-bottom: 1px solid var(--border); }
