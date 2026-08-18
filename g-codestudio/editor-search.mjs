@@ -42,6 +42,19 @@ export function nextProgramSearchIndex(matches, currentIndex, direction = 1) {
   return (base + step + matches.length) % matches.length;
 }
 
+export function programSearchIndexFromAnchor(matches, anchor, direction = 1) {
+  if (!matches.length) return -1;
+  const offset = Math.max(0, Number(anchor) || 0);
+  if (direction < 0) {
+    for (let index = matches.length - 1; index >= 0; index -= 1) {
+      if (matches[index].end <= offset) return index;
+    }
+    return matches.length - 1;
+  }
+  const index = matches.findIndex((match) => match.start >= offset);
+  return index >= 0 ? index : 0;
+}
+
 export function replaceProgramSearchMatch(source, match, replacement) {
   if (!match) return String(source);
   return `${String(source).slice(0, match.start)}${replacement}${String(source).slice(match.end)}`;
