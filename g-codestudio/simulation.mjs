@@ -1,5 +1,6 @@
 const CUT_TYPES = new Set(["linear", "arc-cw", "arc-ccw", "rough", "cycle-profile", "finish"]);
 const EPSILON = 1e-9;
+const POINT_CUTTING_MODEL = Object.freeze({mode: "point", axialMin: 0, axialMax: 0, axialDirection: "both"});
 
 function samplesForSegment(segment, xScale, resolution = 1) {
   const samples = [];
@@ -68,6 +69,133 @@ function applyLineEnvelope(profile, zPositions, before, after, xScale, stockRadi
   return null;
 }
 
+function minimumAbsoluteLinearValue(beforeValue, afterValue, minimumRatio, maximumRatio) {
+  const first = beforeValue + (afterValue - beforeValue) * minimumRatio;
+  const second = beforeValue + (afterValue - beforeValue) * maximumRatio;
+  if (Math.min(first, second) <= EPSILON && Math.max(first, second) >= -EPSILON) return 0;
+  return Math.min(Math.abs(first), Math.abs(second));
+}
+
+function roundedBandOffset(offset, minimumOffset, maximumOffset, cornerRadius) {
+  const width = maximumOffset - minimumOffset;
+  const radius = Math.max(0, Math.min(Number(cornerRadius) || 0, width / 2));
+  if (offset < minimumOffset - EPSILON || offset > maximumOffset + EPSILON) return Infinity;
+  if (radius <= EPSILON) return 0;
+  if (offset < minimumOffset + radius) {
+    const distance = offset - (minimumOffset + radius);
+    return radius - Math.sqrt(Math.max(0, radius * radius - distance * distance));
+  }
+  if (offset > maximumOffset - radius) {
+    const distance = offset - (maximumOffset - radius);
+    return radius - Math.sqrt(Math.max(0, radius * radius - distance * distance));
+  }
+  return 0;
+}
+
+function minimumRoundedBandRadius(stockZ, before, after, xScale, minimumOffset, maximumOffset, cornerRadius) {
+  const deltaZ = after.z - before.z;
+  const deltaX = after.x - before.x;
+  const candidate = (ratio) => {
+    if (ratio < -EPSILON || ratio > 1 + EPSILON) return Infinity;
+    const clamped = Math.max(0, Math.min(1, ratio));
+    const referenceZ = before.z + deltaZ * clamped;
+    const radialOffset = roundedBandOffset(stockZ - referenceZ, minimumOffset, maximumOffset, cornerRadius);
+    if (!Number.isFinite(radialOffset)) return Infinity;
+    const radius = Math.abs((before.x + deltaX * clamped) * xScale);
+    return radius + radialOffset;
+  };
+
+  if (Math.abs(deltaZ) <= EPSILON) {
+    const radialOffset = roundedBandOffset(stockZ - before.z, minimumOffset, maximumOffset, cornerRadius);
+    if (!Number.isFinite(radialOffset)) return Infinity;
+    return minimumAbsoluteLinearValue(before.x * xScale, after.x * xScale, 0, 1) + radialOffset;
+  }
+
+  const width = maximumOffset - minimumOffset;
+  const radius = Math.max(0, Math.min(Number(cornerRadius) || 0, width / 2));
+  const breakpoints = [0, 1];
+  for (const offset of [minimumOffset, minimumOffset + radius, maximumOffset - radius, maximumOffset]) {
+    const ratio = (stockZ - before.z - offset) / deltaZ;
+    if (ratio > EPSILON && ratio < 1 - EPSILON) breakpoints.push(ratio);
+  }
+  if (Math.abs(deltaX) > EPSILON) {
+    const centerCrossing = -before.x / deltaX;
+    if (centerCrossing > EPSILON && centerCrossing < 1 - EPSILON) breakpoints.push(centerCrossing);
+  }
+  breakpoints.sort((a, b) => a - b);
+  const unique = breakpoints.filter((value, index) => !index || Math.abs(value - breakpoints[index - 1]) > EPSILON);
+  let minimum = Infinity;
+  for (const ratio of unique) minimum = Math.min(minimum, candidate(ratio));
+
+  // Between the analytic breakpoints the radius-plus-corner-sag function is
+  // convex. Golden-section minimization finds the physical cutter envelope
+  // without reducing the insert to a rectangular display approximation.
+  const phi = (Math.sqrt(5) - 1) / 2;
+  for (let index = 1; index < unique.length; index += 1) {
+    let left = unique[index - 1];
+    let right = unique[index];
+    if (right - left <= EPSILON) continue;
+    const midpoint = (left + right) / 2;
+    if (!Number.isFinite(candidate(midpoint))) continue;
+    let first = right - (right - left) * phi;
+    let second = left + (right - left) * phi;
+    let firstValue = candidate(first);
+    let secondValue = candidate(second);
+    for (let iteration = 0; iteration < 36; iteration += 1) {
+      if (firstValue <= secondValue) {
+        right = second;
+        second = first;
+        secondValue = firstValue;
+        first = right - (right - left) * phi;
+        firstValue = candidate(first);
+      } else {
+        left = first;
+        first = second;
+        firstValue = secondValue;
+        second = left + (right - left) * phi;
+        secondValue = candidate(second);
+      }
+    }
+    minimum = Math.min(minimum, firstValue, secondValue);
+  }
+  return minimum;
+}
+
+function applyAxialBandLineEnvelope(profile, zPositions, before, after, xScale, stockRadius, axialMin, axialMax, cornerRadius = 0) {
+  const minimumOffset = Math.min(axialMin, axialMax);
+  const maximumOffset = Math.max(axialMin, axialMax);
+  const deltaZ = after.z - before.z;
+  const minimumZ = Math.min(before.z, after.z) + minimumOffset;
+  const maximumZ = Math.max(before.z, after.z) + maximumOffset;
+  const {start, end} = sampleRange(zPositions, minimumZ, maximumZ);
+  const beforeRadius = before.x * xScale;
+  const afterRadius = after.x * xScale;
+
+  for (let index = start; index <= end; index += 1) {
+    const stockZ = zPositions[index];
+    if (Number(cornerRadius) > EPSILON) {
+      const candidate = minimumRoundedBandRadius(
+        stockZ, before, after, xScale, minimumOffset, maximumOffset, cornerRadius,
+      );
+      if (Number.isFinite(candidate)) profile[index] = Math.min(profile[index], Math.min(stockRadius, candidate));
+      continue;
+    }
+    let minimumRatio = 0;
+    let maximumRatio = 1;
+    if (Math.abs(deltaZ) <= EPSILON) {
+      if (stockZ < before.z + minimumOffset - EPSILON || stockZ > before.z + maximumOffset + EPSILON) continue;
+    } else {
+      const firstRatio = (stockZ - maximumOffset - before.z) / deltaZ;
+      const secondRatio = (stockZ - minimumOffset - before.z) / deltaZ;
+      minimumRatio = Math.max(0, Math.min(firstRatio, secondRatio));
+      maximumRatio = Math.min(1, Math.max(firstRatio, secondRatio));
+      if (minimumRatio > maximumRatio + EPSILON) continue;
+    }
+    const candidate = minimumAbsoluteLinearValue(beforeRadius, afterRadius, minimumRatio, maximumRatio);
+    profile[index] = Math.min(profile[index], Math.min(stockRadius, candidate));
+  }
+}
+
 function applyArcEnvelope(profile, zPositions, segment, xScale, stockRadius) {
   const center = segment.center;
   const radius = Number(segment.radius);
@@ -88,16 +216,83 @@ function applyArcEnvelope(profile, zPositions, segment, xScale, stockRadius) {
   return true;
 }
 
-function applySegmentEnvelope(profile, zPositions, segment, xScale, stockRadius) {
+function toolModelForSegment(segment, toolResolver) {
+  if (typeof toolResolver !== "function") return POINT_CUTTING_MODEL;
+  const resolved = toolResolver(segment.toolKey ?? null, segment);
+  if (!resolved) return {mode: "unassigned"};
+  return resolved.cuttingModel || resolved;
+}
+
+function cuttingOffsets(model) {
+  if (Number.isFinite(model.axialMin) && Number.isFinite(model.axialMax)) {
+    return {minimum: Number(model.axialMin), maximum: Number(model.axialMax)};
+  }
+  const width = Number(model.axialWidth);
+  if (!(width > EPSILON)) return null;
+  if (model.tipDatum === "negative-z-edge") return {minimum: 0, maximum: width};
+  if (model.tipDatum === "positive-z-edge") return {minimum: -width, maximum: 0};
+  if (model.tipDatum === "center") return {minimum: -width / 2, maximum: width / 2};
+  return null;
+}
+
+function permittedAxialDirection(model, before, after) {
+  const direction = model.axialDirection || "both";
+  const deltaZ = after.z - before.z;
+  if (Math.abs(deltaZ) <= EPSILON || direction === "both") return true;
+  if (direction === "positive-z") return deltaZ > 0;
+  if (direction === "negative-z") return deltaZ < 0;
+  if (direction === "radial-only") return false;
+  return false;
+}
+
+function warningFor(segment, code, message) {
+  return {line: segment.executionLine || segment.line || null, toolKey: segment.toolKey || null, code, message};
+}
+
+function applySegmentEnvelope(profile, zPositions, segment, xScale, stockRadius, toolResolver) {
+  const model = toolModelForSegment(segment, toolResolver);
+  if (model.mode === "unassigned") {
+    return {materialEndZ: null, warning: warningFor(segment, "tool-unassigned", `${segment.toolKey || "This motion"} has no confirmed tool assignment; stock removal was not applied.`)};
+  }
+  if (model.mode === "unsupported") {
+    return {materialEndZ: null, warning: warningFor(segment, "tool-removal-unsupported", `${segment.toolKey || "The active tool"} does not yet have a supported stock-removal model.`)};
+  }
+  if (model.simulationReady === false) {
+    return {materialEndZ: null, warning: warningFor(segment, "tool-removal-unconfirmed", `${segment.toolKey || "The active tool"} is not confirmed for dimensional stock removal.`)};
+  }
+
+  const offsets = model.mode === "axial-band" ? cuttingOffsets(model) : null;
+  if (model.mode === "axial-band" && !offsets) {
+    return {materialEndZ: null, warning: warningFor(segment, "tool-datum-unresolved", `${segment.toolKey || "The active groove tool"} needs an explicit cutting width and Z datum edge before stock removal can be modeled.`)};
+  }
   const sourceMotion = segment.sourceMotion || segment.type;
-  if ((sourceMotion === "arc-cw" || sourceMotion === "arc-ccw") && applyArcEnvelope(profile, zPositions, segment, xScale, stockRadius)) return null;
+  if (offsets && (sourceMotion === "arc-cw" || sourceMotion === "arc-ccw")) {
+    return {materialEndZ: null, warning: warningFor(segment, "tool-arc-sweep-unsupported", `${segment.toolKey || "The active groove tool"} uses a finite-width cutter on an arc; exact swept-arc stock removal is not yet supported, so this cut was not applied.`)};
+  }
+  if (!offsets && (sourceMotion === "arc-cw" || sourceMotion === "arc-ccw") && applyArcEnvelope(profile, zPositions, segment, xScale, stockRadius)) {
+    return {materialEndZ: null, warning: null};
+  }
   const points = segment.points?.length >= 2 ? segment.points : [segment.start, segment.end];
+  for (let index = 1; index < points.length; index += 1) {
+    if (!permittedAxialDirection(model, points[index - 1], points[index])) {
+      return {materialEndZ: null, warning: warningFor(segment, "tool-direction-blocked", `${segment.toolKey || "The active tool"} is not confirmed for this Z cutting direction; stock removal was not applied.`)};
+    }
+  }
   let materialEndZ = null;
   for (let index = 1; index < points.length; index += 1) {
-    const facedToZ = applyLineEnvelope(profile, zPositions, points[index - 1], points[index], xScale, stockRadius);
+    const before = points[index - 1];
+    const after = points[index];
+    if (offsets) {
+      applyAxialBandLineEnvelope(
+        profile, zPositions, before, after, xScale, stockRadius,
+        offsets.minimum, offsets.maximum, model.cornerRadius,
+      );
+      continue;
+    }
+    const facedToZ = applyLineEnvelope(profile, zPositions, before, after, xScale, stockRadius);
     if (Number.isFinite(facedToZ)) materialEndZ = materialEndZ === null ? facedToZ : Math.min(materialEndZ, facedToZ);
   }
-  return materialEndZ;
+  return {materialEndZ, warning: null};
 }
 
 export function stockAxialBounds(stockLength, stockStartZ) {
@@ -122,15 +317,85 @@ export function stockPlacement(overallLength, chuckFaceZ, gripLength = 0) {
   };
 }
 
-export function stockContourPoints(stock) {
-  const profile = Array.from(stock?.profile || []);
+export function stockVerificationColumns(stockLength, {
+  maximumStep = 0.00254, minimumColumns = 64, maximumColumns = 250001,
+} = {}) {
+  const length = Math.max(0, Number(stockLength) || 0);
+  const step = Math.max(EPSILON, Number(maximumStep) || 0.00254);
+  const minimum = Math.max(2, Math.round(Number(minimumColumns) || 64));
+  const maximum = Math.max(minimum, Math.round(Number(maximumColumns) || 250001));
+  const required = Math.max(minimum, Math.ceil(length / step) + 1);
+  if (required > maximum) {
+    throw new RangeError(`Stock length requires ${required.toLocaleString("en-US")} verification columns to hold the ${step} mm maximum axial step; the configured safe limit is ${maximum.toLocaleString("en-US")}.`);
+  }
+  return required;
+}
+
+function featurePreservingIndexes(length, maximumPoints, valueAt) {
+  const limit = Number.isFinite(Number(maximumPoints)) ? Math.max(2, Math.floor(Number(maximumPoints))) : Infinity;
+  if (length <= limit) return Array.from({length}, (_, index) => index);
+  if (limit < 8) {
+    return Array.from({length: limit}, (_, index) => Math.round(index * (length - 1) / (limit - 1)));
+  }
+  const indexes = new Set([0, length - 1]);
+  const candidates = [];
+  for (let index = 1; index < length - 1; index += 1) {
+    const previous = Number(valueAt(index - 1));
+    const current = Number(valueAt(index));
+    const next = Number(valueAt(index + 1));
+    if (![previous, current, next].every(Number.isFinite)) continue;
+    const leftDelta = current - previous;
+    const rightDelta = next - current;
+    const curvature = Math.abs(rightDelta - leftDelta);
+    if (curvature <= EPSILON) continue;
+    const turning = (leftDelta < -EPSILON && rightDelta >= -EPSILON)
+      || (leftDelta > EPSILON && rightDelta <= EPSILON);
+    candidates.push({index, score: curvature + (turning ? Math.max(Math.abs(leftDelta), Math.abs(rightDelta)) : 0)});
+  }
+  candidates.sort((first, second) => second.score - first.score || first.index - second.index);
+  const selectedCenters = [];
+  const centerLimit = Math.max(1, Math.floor((limit - 2) / 3));
+  for (const candidate of candidates) {
+    if (selectedCenters.length >= centerLimit) break;
+    if (selectedCenters.some((index) => Math.abs(index - candidate.index) <= 2)) continue;
+    selectedCenters.push(candidate.index);
+    for (const index of [candidate.index - 1, candidate.index, candidate.index + 1]) {
+      if (index >= 0 && index < length && indexes.size < limit) indexes.add(index);
+    }
+  }
+  for (let index = 1; indexes.size < limit && index < limit - 1; index += 1) {
+    indexes.add(Math.round(index * (length - 1) / (limit - 1)));
+  }
+  return [...indexes].sort((first, second) => first - second);
+}
+
+function limitedContourPoints(points, maximumPoints) {
+  return featurePreservingIndexes(points.length, maximumPoints, (index) => points[index].radius)
+    .map((index) => points[index]);
+}
+
+export function stockContourPoints(stock, {maximumPoints = Infinity} = {}) {
+  const profileSource = stock?.profile;
   const positions = stock?.zPositions;
-  if (!profile.length || !positions?.length) return [];
+  if (!profileSource?.length || !positions?.length) return [];
   const startZ = Number.isFinite(Number(stock.startZ)) ? Number(stock.startZ) : Number(positions[0]);
   const nominalEndZ = Number.isFinite(Number(stock.endZ)) ? Number(stock.endZ) : Number(positions[positions.length - 1]);
   const materialEndZ = Number.isFinite(Number(stock.materialEndZ))
     ? Math.max(startZ, Math.min(nominalEndZ, Number(stock.materialEndZ)))
     : nominalEndZ;
+  const displayLimit = Number.isFinite(Number(maximumPoints))
+    ? Math.max(2, Math.floor(Number(maximumPoints)))
+    : Infinity;
+  const sourceStartsAtStock = Math.abs(Number(positions[0]) - startZ) <= EPSILON;
+  const sourceEndsAtStock = Math.abs(Number(positions[positions.length - 1]) - nominalEndZ) <= EPSILON;
+  if (displayLimit < profileSource.length
+    && materialEndZ >= nominalEndZ - EPSILON
+    && sourceStartsAtStock
+    && sourceEndsAtStock) {
+    return featurePreservingIndexes(profileSource.length, displayLimit, (index) => Number(profileSource[index]))
+      .map((sourceIndex) => ({z: Number(positions[sourceIndex]), radius: Number(profileSource[sourceIndex])}));
+  }
+  const profile = Array.from(profileSource);
   let points = profile.map((radius, index) => ({z: Number(positions[index]), radius: Number(radius)}));
   if ((points[0]?.z ?? startZ) > startZ + EPSILON) points.unshift({z: startZ, radius: points[0]?.radius || 0});
   if (materialEndZ < nominalEndZ - EPSILON) {
@@ -138,16 +403,16 @@ export function stockContourPoints(stock) {
     const faceRadius = [...points].reverse().find((point) => point.radius > EPSILON)?.radius;
     if (!(faceRadius > EPSILON)) return [];
     points.push({z: materialEndZ, radius: faceRadius});
-    return points;
+    return limitedContourPoints(points, maximumPoints);
   }
   if ((points.at(-1)?.z ?? nominalEndZ) < nominalEndZ - EPSILON) {
     points.push({z: nominalEndZ, radius: points.at(-1)?.radius || 0});
   }
-  return points;
+  return limitedContourPoints(points, maximumPoints);
 }
 
 export function buildStockProfile(segments, {
-  stockDiameter, stockLength, stockStartZ, xScale = 0.5, visibleCount = segments.length, columns = 800,
+  stockDiameter, stockLength, stockStartZ, xScale = 0.5, visibleCount = segments.length, columns = 800, toolResolver = null,
 } = {}) {
   const radius = Math.max(0, Number(stockDiameter) || 0) / 2;
   const {startZ, endZ, length} = stockAxialBounds(stockLength, stockStartZ);
@@ -163,11 +428,11 @@ export function buildStockProfile(segments, {
     profile, zPositions, columns: sampleCount, radius, length, startZ, endZ,
     materialEndZ: endZ, removedPercent: 0, analytic: true, visibleCount: 0,
   };
-  return extendStockProfile(stock, segments, {startIndex: 0, endIndex: visibleCount, xScale});
+  return extendStockProfile(stock, segments, {startIndex: 0, endIndex: visibleCount, xScale, toolResolver});
 }
 
 export function extendStockProfile(stock, segments, {
-  startIndex = stock?.visibleCount || 0, endIndex = segments.length, xScale = 0.5,
+  startIndex = stock?.visibleCount || 0, endIndex = segments.length, xScale = 0.5, toolResolver = null,
 } = {}) {
   if (!stock?.profile || !stock?.zPositions) return stock;
   const start = Math.max(0, Math.min(segments.length, Math.round(Number(startIndex) || 0)));
@@ -177,10 +442,19 @@ export function extendStockProfile(stock, segments, {
   if (!next.radius || !next.length) return next;
 
   let materialEndZ = Number.isFinite(Number(stock.materialEndZ)) ? Number(stock.materialEndZ) : stock.endZ;
+  const toolWarnings = [...(stock.toolWarnings || [])];
+  const warningKeys = new Set(toolWarnings.map((warning) => `${warning.code}|${warning.line}|${warning.toolKey}`));
   for (const segment of segments.slice(start, end)) {
     if (!CUT_TYPES.has(segment.type)) continue;
-    const facedToZ = applySegmentEnvelope(profile, next.zPositions, segment, xScale, next.radius);
-    if (Number.isFinite(facedToZ)) materialEndZ = Math.min(materialEndZ, facedToZ);
+    const result = applySegmentEnvelope(profile, next.zPositions, segment, xScale, next.radius, toolResolver);
+    if (Number.isFinite(result.materialEndZ)) materialEndZ = Math.min(materialEndZ, result.materialEndZ);
+    if (result.warning) {
+      const key = `${result.warning.code}|${result.warning.line}|${result.warning.toolKey}`;
+      if (!warningKeys.has(key)) {
+        warningKeys.add(key);
+        toolWarnings.push(result.warning);
+      }
+    }
   }
 
   let remainingArea = 0;
@@ -188,7 +462,7 @@ export function extendStockProfile(stock, segments, {
   const removedPercent = profile.length && next.radius
     ? Math.max(0, Math.min(100, (1 - remainingArea / (profile.length * next.radius * next.radius)) * 100))
     : 0;
-  return {...next, materialEndZ, removedPercent};
+  return {...next, materialEndZ, removedPercent, toolWarnings};
 }
 
 // Compatibility alias for callers migrating from the former raster stock model.

@@ -445,7 +445,7 @@ function drawPolyline(context, points, project, {color, width = 1, dash = [], al
 }
 
 function stockRings(stock, orientationSign, maximumRings = 70) {
-  const contour = stockContourPoints(stock);
+  const contour = stockContourPoints(stock, {maximumPoints: maximumRings});
   if (!contour.length) return [];
   const step = Math.max(1, Math.ceil(contour.length / maximumRings));
   const rings = [];

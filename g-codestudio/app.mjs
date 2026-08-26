@@ -1,13 +1,20 @@
 import {parseGcode, programBounds, segmentLength} from "./gcode.mjs";
 import {cycleTimeAtPosition, estimateCycleTime, formatCycleTime} from "./runtime.mjs";
-import {buildStockProfile, collisionPointForSegment, extendStockProfile, findCollisions, stockContourPoints, stockPlacement} from "./simulation.mjs";
+import {
+  buildStockProfile, collisionPointForSegment, extendStockProfile, findCollisions, stockContourPoints,
+  stockPlacement, stockVerificationColumns,
+} from "./simulation.mjs";
 import {convertUnitValue, scaleForUnits} from "./units.mjs";
 import {comparePrograms, compareSegmentGeometry, diffLineTokens, geometryItemsForFit, overlayGeometryLayers} from "./compare.mjs";
 import {graphicsQualityPreset, renderGraphicsQualityPreset} from "./graphics-quality.mjs";
 import {createFrameScheduler} from "./render-scheduler.mjs";
 import {
-  buildToolAssembly2d, DEFAULT_TOOL_ASSEMBLY_2D, TOOL_ASSEMBLY_2D_STATUS, toolReferencePointForExecution,
+  buildToolAssembly2d, DEFAULT_TOOL_ASSEMBLY_2D, listToolAssemblies2d, sampleToolNoseArc, TOOL_ASSEMBLY_2D_STATUS,
+  toolAssembly2dById, toolReferencePointForExecution,
 } from "./tool-assembly.mjs";
+import {
+  activeToolKeyAtLine, programAssignmentScope, reconcileToolAssignments, reviseToolAssignmentSetup,
+} from "./program-tools.mjs";
 import {
   arcGeometry, geometryHitAt, geometryMeasurement, geometryPointAt, lineGeometry, motionGeometry, polylineGeometry, rectangleGeometry,
   sampleGeometryEntity,
@@ -115,9 +122,7 @@ const elements = {
   graphicsInfoButton: $("graphicsInfoButton"), graphicsInfoPanel: $("graphicsInfoPanel"),
   view2d: $("view2dButton"), view3d: $("view3dButton"),
   toolOverlay: $("toolOverlayButton"), toolVerificationBadge: $("toolVerificationBadge"),
-  toolAssembly: $("toolAssemblySelect"), toolInsertLength: $("toolInsertLength"), toolInsertAngle: $("toolInsertAngle"),
-  toolNoseRadius: $("toolNoseRadius"), toolHolderLength: $("toolHolderLength"), toolHolderHeight: $("toolHolderHeight"),
-  toolHolderOffsetZ: $("toolHolderOffsetZ"), toolHolderOffsetX: $("toolHolderOffsetX"),
+  programToolsSetup: $("programToolsSetup"), programToolSummary: $("programToolSummary"), programToolList: $("programToolList"),
   viewCube: $("viewCube"), viewCubeCanvas: $("viewCubeCanvas"), viewCubeHome: $("viewCubeHome"),
   graphicsQuality: $("graphicsQuality"), graphicsQualityHint: $("graphicsQualityHint"),
   toolpathToggle: $("toolpathToggle"),
@@ -133,12 +138,13 @@ const state = {
   compareView: "code", compareGraphicsLayout: "split", comparisonGeometry: null,
   viewMode: "2d", camera3d: {yaw: -Math.PI / 4, pitch: Math.asin(1 / Math.sqrt(3)), zoom: 1, panX: 0, panY: 0},
   viewCubeRegions: [], viewCubeHover: null,
-  stockProfileCache: null,
+  stockProfileCache: null, stockSamplingError: null,
   preview3dUntil: 0, precisionRedrawTimer: null,
   graphicsHits: [], hoverBlockIndex: null, highlightedSourceLine: null, programDirty: false,
   componentGeometry: [], geometryHover: null, geometrySelection: null,
   dimensions: [], dimensionMode: false,
   showTool2d: false,
+  toolAssignments: {}, toolAssignmentRevision: 0, toolAssignmentScope: null,
 };
 const ctx = elements.canvas.getContext("2d");
 const navigation3dRenderer = createFrameScheduler({
@@ -151,7 +157,6 @@ const preferenceIds = [
   "machineSelect", "orientationSelect", "xModeSelect", "programUnits", "displayUnits", "stockDiameter", "stockLength", "stockGripLength",
   "stockToggle", "chuckFaceZ", "jawDiameter", "clearanceInput", "collisionToggle", "graphicsQuality",
   "toolpathToggle",
-  "toolAssemblySelect",
 ];
 let installPrompt = null;
 let persistTimer = null;
@@ -441,6 +446,8 @@ function persistSession() {
       preferences,
       fileName: elements.fileName.textContent,
       program: elements.input.value,
+      toolAssignments: state.toolAssignments,
+      toolAssignmentScope: state.toolAssignmentScope,
     }));
   } catch {
     // Storage can be unavailable in hardened browsers; G-Code Studio remains fully usable.
@@ -465,6 +472,15 @@ function restoreSession() {
     if (typeof saved.program === "string" && saved.program.trim()) {
       elements.input.value = saved.program;
       elements.fileName.textContent = typeof saved.fileName === "string" ? saved.fileName : "restored-program.nc";
+      if (saved.toolAssignments && typeof saved.toolAssignments === "object" && !Array.isArray(saved.toolAssignments)) {
+        state.toolAssignments = Object.fromEntries(Object.entries(saved.toolAssignments).filter(([key, assignment]) => (
+          /^T[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/i.test(key)
+          && assignment
+          && typeof assignment === "object"
+          && !Array.isArray(assignment)
+        )));
+      }
+      state.toolAssignmentScope = typeof saved.toolAssignmentScope === "string" ? saved.toolAssignmentScope : null;
       return true;
     }
   } catch {
@@ -680,6 +696,10 @@ async function saveMachineEditor(event) {
 }
 
 function loadProgram(name, content) {
+  state.toolAssignments = {};
+  state.toolAssignmentScope = null;
+  state.toolAssignmentRevision += 1;
+  state.stockProfileCache = null;
   elements.input.value = content;
   elements.fileName.textContent = name || "program.nc";
   elements.programSearchPanel.hidden = true;
@@ -1211,8 +1231,16 @@ function screenRect(z0, z1, radius0, radius1) {
 }
 
 function stockProfileFor(stockDiameter, stockLength) {
-  const quality = graphicsQuality();
   const axial = configuredStockBounds(stockLength);
+  let verificationColumns = null;
+  try {
+    verificationColumns = stockVerificationColumns(axial.length);
+    state.stockSamplingError = null;
+  } catch (error) {
+    state.stockSamplingError = error instanceof Error ? error.message : String(error);
+    state.stockProfileCache = null;
+    return null;
+  }
   const key = {
     parsed: state.parsed,
     stockDiameter,
@@ -1220,7 +1248,8 @@ function stockProfileFor(stockDiameter, stockLength) {
     gripLength: axial.gripLength,
     stockStartZ: axial.startZ,
     xScale: xScale(),
-    quality: quality.id,
+    verificationColumns,
+    toolAssignmentRevision: state.toolAssignmentRevision,
   };
   const cached = state.stockProfileCache;
   const matches = cached && Object.entries(key).every(([name, value]) => cached.key[name] === value);
@@ -1231,7 +1260,8 @@ function stockProfileFor(stockDiameter, stockLength) {
       stockStartZ: axial.startZ,
       xScale: key.xScale,
       visibleCount: 0,
-      columns: quality.stockColumns,
+      columns: key.verificationColumns,
+      toolResolver: resolvedCuttingModel,
     });
     state.stockProfileCache = {key, frames: new Map([[0, base]])};
   }
@@ -1251,6 +1281,7 @@ function stockProfileFor(stockDiameter, stockLength) {
     startIndex,
     endIndex: target,
     xScale: key.xScale,
+    toolResolver: resolvedCuttingModel,
   });
   frames.set(target, stock);
   while (frames.size > STOCK_FRAME_CACHE_LIMIT) {
@@ -1349,12 +1380,14 @@ function currentComponentGeometry() {
     const radius = stockDiameter / 2;
     if (radius && length) {
       const stock = stockProfileFor(stockDiameter, length);
+      if (!stock) return entities;
       const profile = stockContourPoints(stock);
       const upper = profile.map((point) => ({z: point.z, x: point.radius}));
       const lower = profile.map((point) => ({z: point.z, x: -point.radius}));
       entities.push(...exactStockContourGeometry(stock));
-      entities.push(...polylineGeometry({id: "stock-upper", component: "Current stock", label: "Upper profile", points: upper, metadata: {sampledContour: true}}));
-      entities.push(...polylineGeometry({id: "stock-lower", component: "Current stock", label: "Lower profile", points: lower, metadata: {sampledContour: true}}));
+      const maximumAxialStep = stock.length / Math.max(1, stock.columns - 1);
+      entities.push(...polylineGeometry({id: "stock-upper", component: "Current stock", label: "Upper dimensional-grid profile", points: upper, metadata: {sampledContour: true, maximumAxialStep}}));
+      entities.push(...polylineGeometry({id: "stock-lower", component: "Current stock", label: "Lower dimensional-grid profile", points: lower, metadata: {sampledContour: true, maximumAxialStep}}));
       if (upper.length && Math.abs(upper[0].x - lower[0].x) > 1e-9) {
         entities.push(lineGeometry({id: "stock-back", component: "Current stock", label: "Back face", start: lower[0], end: upper[0]}));
       }
@@ -1398,13 +1431,17 @@ function drawStock() {
   const radius = stockDiameter / 2;
   if (!radius || !length) return;
   const stock = stockProfileFor(stockDiameter, length);
+  if (!stock) {
+    $("stockRemoved").textContent = "BLOCKED";
+    return;
+  }
   $("stockRemoved").textContent = `${stock.removedPercent.toFixed(1)}%`;
 
   const envelope = screenRect(stock.startZ, stock.endZ, -radius, radius);
   ctx.fillStyle = "rgba(245, 158, 11, 0.025)";
   ctx.fillRect(envelope.x, envelope.y, envelope.width, envelope.height);
 
-  const profilePoints = stockContourPoints(stock);
+  const profilePoints = stockContourPoints(stock, {maximumPoints: Math.min(graphicsQuality().stockColumns, 1200)});
   if (!profilePoints.length) return;
   const traceProfile = (points, sign, move) => {
     points.forEach((point, index) => {
@@ -1431,11 +1468,298 @@ function drawStock() {
   ctx.setLineDash([]);
 }
 
-function configuredToolAssembly2d() {
+function activeProgramToolKey() {
+  return activeToolKeyAtLine(state.parsed.executableToolCalls || [], state.programLine);
+}
+
+function toolCallsForKey(toolKey) {
+  return (state.parsed.executableToolCalls || []).filter((call) => call.key === toolKey);
+}
+
+function configuredToolAssembly2d(toolKey = activeProgramToolKey()) {
+  const assignment = toolKey ? state.toolAssignments[toolKey] : null;
+  const definition = assignment?.toolId ? toolAssembly2dById(assignment.toolId) : null;
+  if (!definition) return null;
   return {
-    ...DEFAULT_TOOL_ASSEMBLY_2D,
-    id: elements.toolAssembly.value,
+    ...definition,
+    cuttingModel: {
+      ...definition.cuttingModel,
+      tipDatum: assignment.tipDatum || definition.cuttingModel?.tipDatum || null,
+      axialDirection: assignment.axialDirection || definition.cuttingModel?.axialDirection || null,
+    },
   };
+}
+
+function toolAssignmentReadiness(toolKey) {
+  const assignment = state.toolAssignments[toolKey];
+  if (!assignment?.toolId) return {status: "unassigned", ready: false, errors: ["No tool selected."]};
+  if (assignment.confirmed !== true) return {status: "blocked", ready: false, errors: ["The tool selection has not been explicitly confirmed."]};
+  const configured = configuredToolAssembly2d(toolKey);
+  if (!configured) return {status: "blocked", ready: false, errors: ["The selected tool definition is unavailable."]};
+  const model = buildToolAssembly2d(configured, {z: 0, x: 0});
+  if (!model.valid) return {status: "blocked", ready: false, errors: model.errors};
+  if (model.cuttingModel?.simulationReady !== true) {
+    return {
+      status: "blocked",
+      ready: false,
+      errors: [model.cuttingModel?.blockedReason || "This tool does not yet have a confirmed dimensional stock-removal model."],
+    };
+  }
+  return {status: "confirmed", ready: true, errors: [], configured, model};
+}
+
+function resolvedCuttingModel(toolKey) {
+  if (!toolKey) return null;
+  const readiness = toolAssignmentReadiness(toolKey);
+  if (!readiness.ready) return readiness.status === "unassigned" ? null : {mode: "unsupported"};
+  return readiness.model.cuttingModel;
+}
+
+function assignmentWarnings() {
+  const warnings = [];
+  if (elements.stockToggle.checked) {
+    const length = Math.max(0, setupValue(elements.stockLength));
+    try {
+      stockVerificationColumns(configuredStockBounds(length).length);
+    } catch (error) {
+      warnings.push({
+        line: null,
+        danger: true,
+        message: `Stock simulation is blocked: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+  const firstUnassignedMotion = (state.parsed.segments || []).find((segment) => segment.type !== "rapid" && !segment.toolKey);
+  if (firstUnassignedMotion) {
+    warnings.push({
+      line: firstUnassignedMotion.executionLine || firstUnassignedMotion.line || null,
+      danger: true,
+      message: "A cutting move occurs before any executable T call. Its tool-dependent stock removal is blocked.",
+    });
+  }
+  warnings.push(...[...new Set((state.parsed.executableToolCalls || []).map((call) => call.key))].flatMap((toolKey) => {
+    const readiness = toolAssignmentReadiness(toolKey);
+    if (readiness.ready) {
+      const model = readiness.model.cuttingModel;
+      if (model.mode !== "axial-band") return [];
+      const messages = [];
+      for (const segment of state.parsed.segments.filter((entry) => entry.toolKey === toolKey && entry.type !== "rapid")) {
+        const sourceMotion = segment.sourceMotion || segment.type;
+        if (sourceMotion === "arc-cw" || sourceMotion === "arc-ccw") {
+          messages.push({line: segment.executionLine || segment.line, danger: true, message: `${toolKey} uses a finite-width cutter on an arc. Exact swept-arc stock removal is not yet supported, so that cut is blocked.`});
+          continue;
+        }
+        const deltaZ = segment.end.z - segment.start.z;
+        const allowed = model.axialDirection === "both"
+          || Math.abs(deltaZ) <= 1e-9
+          || (model.axialDirection === "positive-z" && deltaZ > 0)
+          || (model.axialDirection === "negative-z" && deltaZ < 0);
+        if (!allowed) messages.push({line: segment.executionLine || segment.line, danger: true, message: `${toolKey} is not confirmed for this Z cutting direction; stock removal is blocked for this move.`});
+      }
+      return messages;
+    }
+    const first = toolCallsForKey(toolKey)[0];
+    const message = readiness.status === "unassigned"
+      ? `${toolKey} is unassigned. Its motion remains visible, but stock removal is blocked until the program tool is selected.`
+      : `${toolKey} tool definition is incomplete: ${readiness.errors[0]}`;
+    return [{line: first?.line || null, danger: true, message}];
+  }));
+  return warnings;
+}
+
+function invalidateToolAssignments({renderControls = true} = {}) {
+  state.toolAssignmentRevision += 1;
+  state.stockProfileCache = null;
+  if (renderControls) renderProgramToolAssignments();
+  updateStats();
+  draw();
+  schedulePersist();
+}
+
+function toolChoiceLabel(definition) {
+  const status = TOOL_ASSEMBLY_2D_STATUS[definition.verification] || TOOL_ASSEMBLY_2D_STATUS.unverified;
+  return `${definition.name} · ${status}`;
+}
+
+function selectField(labelText, values, selected, placeholder, onChange) {
+  const label = document.createElement("label");
+  label.textContent = labelText;
+  const select = document.createElement("select");
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = placeholder;
+  select.append(empty);
+  for (const [value, labelTextValue] of values) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = labelTextValue;
+    select.append(option);
+  }
+  select.value = selected || "";
+  select.addEventListener("change", () => onChange(select.value));
+  label.append(select);
+  return label;
+}
+
+function renderProgramToolAssignments() {
+  const calls = state.parsed.executableToolCalls || [];
+  const keys = [...new Set(calls.map((call) => call.key))];
+  elements.programToolList.replaceChildren();
+  const mapped = keys.filter((key) => toolAssignmentReadiness(key).ready).length;
+  elements.programToolSummary.textContent = keys.length ? `${mapped}/${keys.length} READY` : "NO T CALLS";
+  if (!keys.length) {
+    const empty = document.createElement("div");
+    empty.className = "program-tool-empty";
+    empty.textContent = "Plot a program containing a T call to assign its tools.";
+    elements.programToolList.append(empty);
+    return;
+  }
+
+  const library = listToolAssemblies2d();
+  for (const toolKey of keys) {
+    const toolCalls = toolCallsForKey(toolKey);
+    const assignment = state.toolAssignments[toolKey] || {};
+    const readiness = toolAssignmentReadiness(toolKey);
+    const firstSuggestion = toolCalls.flatMap((call) => call.suggestions || [])[0] || null;
+    const card = document.createElement("section");
+    card.className = `program-tool-card ${readiness.status}`;
+
+    const heading = document.createElement("div");
+    heading.className = "program-tool-heading";
+    const keyLabel = document.createElement("strong");
+    keyLabel.textContent = toolKey;
+    const lines = document.createElement("span");
+    lines.textContent = `Line${toolCalls.length === 1 ? "" : "s"} ${toolCalls.map((call) => call.line).join(", ")}`;
+    heading.append(keyLabel, lines);
+    card.append(heading);
+
+    const comments = toolCalls.flatMap((call) => call.comments || []).map((comment) => comment.text).filter(Boolean);
+    if (firstSuggestion || comments.length) {
+      const hint = document.createElement("p");
+      hint.className = "program-tool-hint";
+      const suggestionText = firstSuggestion ? `Suggested family: ${firstSuggestion.label}. ` : "";
+      hint.textContent = `${suggestionText}${comments[0] ? `Header: “${comments[0]}”` : ""}`.trim();
+      card.append(hint);
+    }
+
+    const controls = document.createElement("div");
+    controls.className = "program-tool-controls";
+    controls.append(selectField(
+      "Tool assembly",
+      library.map((definition) => [definition.id, toolChoiceLabel(definition)]),
+      assignment.toolId,
+      firstSuggestion ? `Unassigned — suggestion: ${firstSuggestion.label}` : "Unassigned — select exact tool",
+      (toolId) => {
+        const definition = toolAssembly2dById(toolId);
+        state.toolAssignments[toolKey] = toolId ? {
+          toolId,
+          confirmed: false,
+          tipDatum: definition?.cuttingModel?.tipDatum || null,
+          axialDirection: definition?.cuttingModel?.axialDirection || null,
+        } : {};
+        invalidateToolAssignments();
+      },
+    ));
+
+    const definition = assignment.toolId ? toolAssembly2dById(assignment.toolId) : null;
+    const datumChoices = definition?.cuttingModel?.tipDatumChoices || [];
+    if (datumChoices.length) {
+      controls.append(selectField(
+        "Programmed Z reference",
+        datumChoices.map((value) => [value, ({
+          "negative-z-edge": "Negative-Z cutting edge",
+          center: "Insert center",
+          "positive-z-edge": "Positive-Z cutting edge",
+        })[value] || value]),
+        assignment.tipDatum,
+        `Confirm datum (suggested: ${definition.cuttingModel.recommendedTipDatum || "none"})`,
+        (tipDatum) => {
+          state.toolAssignments[toolKey] = reviseToolAssignmentSetup(state.toolAssignments[toolKey], {
+            tipDatum: tipDatum || null,
+          });
+          invalidateToolAssignments();
+        },
+      ));
+    }
+    const directionChoices = definition?.cuttingModel?.axialDirectionChoices || [];
+    if (directionChoices.length) {
+      controls.append(selectField(
+        "Permitted cutting direction",
+        directionChoices.map((value) => [value, ({
+          "positive-z": "Toward +Z (back turn)",
+          "negative-z": "Toward −Z",
+          "radial-only": "Radial plunge only",
+        })[value] || value]),
+        assignment.axialDirection,
+        `Confirm direction (suggested: ${definition.cuttingModel.recommendedAxialDirection || "none"})`,
+        (axialDirection) => {
+          state.toolAssignments[toolKey] = reviseToolAssignmentSetup(state.toolAssignments[toolKey], {
+            axialDirection: axialDirection || null,
+          });
+          invalidateToolAssignments();
+        },
+      ));
+    }
+    const confirmation = document.createElement("button");
+    confirmation.type = "button";
+    confirmation.className = "program-tool-confirmation";
+    const requiredConfigurationComplete = Boolean(assignment.toolId)
+      && (!datumChoices.length || Boolean(assignment.tipDatum))
+      && (!directionChoices.length || Boolean(assignment.axialDirection));
+    confirmation.disabled = !requiredConfigurationComplete;
+    confirmation.setAttribute("aria-pressed", String(assignment.confirmed === true));
+    confirmation.setAttribute("aria-label", `Confirm ${toolKey} mounted holder, insert, hand, and programmed reference convention`);
+    confirmation.textContent = assignment.confirmed === true
+      ? "Mounted setup confirmed — click to clear confirmation."
+      : "Confirm mounted holder, insert, hand, and programmed reference convention.";
+    confirmation.addEventListener("click", () => {
+      const confirmed = state.toolAssignments[toolKey]?.confirmed !== true;
+      state.toolAssignments[toolKey] = {...state.toolAssignments[toolKey], confirmed};
+      confirmation.setAttribute("aria-pressed", String(confirmed));
+      confirmation.textContent = confirmed
+        ? "Mounted setup confirmed — click to clear confirmation."
+        : "Confirm mounted holder, insert, hand, and programmed reference convention.";
+      invalidateToolAssignments({renderControls: false});
+      const nextReadiness = toolAssignmentReadiness(toolKey);
+      const confirmedCount = keys.filter((key) => toolAssignmentReadiness(key).ready).length;
+      elements.programToolSummary.textContent = `${confirmedCount}/${keys.length} READY`;
+      card.className = `program-tool-card ${nextReadiness.status}`;
+      status.className = `program-tool-chip ${nextReadiness.status === "confirmed" ? "confirmed" : (nextReadiness.status === "blocked" ? "blocked" : "warning")}`;
+      status.textContent = nextReadiness.ready ? "STOCK MODEL READY" : nextReadiness.errors[0];
+    });
+    controls.append(confirmation);
+    card.append(controls);
+
+    const meta = document.createElement("div");
+    meta.className = "program-tool-meta";
+    const status = document.createElement("span");
+    status.className = `program-tool-chip ${readiness.status === "confirmed" ? "confirmed" : (readiness.status === "blocked" ? "blocked" : "warning")}`;
+    status.textContent = readiness.ready ? "STOCK MODEL READY" : readiness.errors[0];
+    meta.append(status);
+    if (definition?.insertCuttingWidth) {
+      const width = document.createElement("span");
+      width.className = "program-tool-chip";
+      width.textContent = `W ${displayValue(definition.insertCuttingWidth).toFixed(elements.displayUnits.value === "inch" ? 4 : 3)} ${unitName()}`;
+      meta.append(width);
+    }
+    if (firstSuggestion) {
+      const suggestion = document.createElement("span");
+      suggestion.className = "program-tool-chip warning";
+      suggestion.textContent = "HEADER SUGGESTION · NOT CONFIRMED";
+      meta.append(suggestion);
+    }
+    if (definition?.geometryNotice) {
+      const envelope = document.createElement("span");
+      envelope.className = "program-tool-chip";
+      envelope.textContent = definition.renderingClaim === "catalog-scaled-envelope"
+        ? "2D CATALOG ENVELOPE · SEAT/HEAD OMITTED"
+        : "GEOMETRY UNVERIFIED";
+      envelope.title = definition.geometryNotice;
+      meta.append(envelope);
+    }
+    card.append(meta);
+    elements.programToolList.append(card);
+  }
 }
 
 function toolPhysicalToScreen(point) {
@@ -1459,15 +1783,28 @@ function drawToolAssembly2d() {
     elements.toolVerificationBadge.hidden = true;
     return;
   }
+  const toolKey = activeProgramToolKey();
+  const configured = configuredToolAssembly2d(toolKey);
   const programmedReference = toolReferencePointForExecution(state.parsed.segments, state.visibleBlocks);
   const physicalReference = programmedReference ? {z: programmedReference.z, x: programmedReference.x * xScale()} : null;
-  const model = buildToolAssembly2d(configuredToolAssembly2d(), physicalReference);
   const badgeStatus = elements.toolVerificationBadge.querySelector("strong");
   elements.toolVerificationBadge.hidden = false;
+  if (!toolKey || !configured) {
+    elements.toolVerificationBadge.classList.add("invalid");
+    badgeStatus.textContent = toolKey ? `${toolKey} UNASSIGNED` : "NO ACTIVE TOOL";
+    return;
+  }
+  const readiness = toolAssignmentReadiness(toolKey);
+  if (!readiness.ready) {
+    elements.toolVerificationBadge.classList.add("invalid");
+    badgeStatus.textContent = `${toolKey} · CONFIG REQUIRED`;
+    return;
+  }
+  const model = buildToolAssembly2d(configured, physicalReference);
   elements.toolVerificationBadge.classList.toggle("invalid", !model.valid);
   badgeStatus.textContent = model.valid
-    ? (TOOL_ASSEMBLY_2D_STATUS[model.verification] || TOOL_ASSEMBLY_2D_STATUS.unverified)
-    : "CONFIG ERROR";
+    ? `${toolKey} · ${TOOL_ASSEMBLY_2D_STATUS[model.verification] || TOOL_ASSEMBLY_2D_STATUS.unverified}`
+    : `${toolKey} · CONFIG REQUIRED`;
   if (!model.valid) return;
 
   const tracePolygon = (points) => {
@@ -1493,19 +1830,25 @@ function drawToolAssembly2d() {
   };
 
   const componentStyle = {
-    holder: ["rgba(71, 85, 105, .72)", "rgba(203, 213, 225, .9)", 1.25],
-    shim: ["rgba(146, 104, 24, .82)", "rgba(251, 191, 36, .9)", 1.05],
-    insert: ["rgba(245, 158, 11, .92)", "#fde68a", 1.45],
-    lockPin: ["rgba(51, 65, 85, .96)", "rgba(203, 213, 225, .95)", 1.05],
-    clamp: ["rgba(71, 85, 105, .98)", "rgba(226, 232, 240, .92)", 1.2],
-    clampScrew: ["rgba(30, 41, 59, .98)", "rgba(203, 213, 225, .92)", 1.1],
+    holder: ["rgba(71, 85, 105, .78)", "rgba(203, 213, 225, .92)", 1.2],
+    insert: ["rgba(245, 158, 11, .94)", "#fde68a", 1.45],
+    cutter: ["rgba(245, 158, 11, .94)", "#fde68a", 1.45],
   };
-  const layerOrder = ["holder", "shim", "insert", "lockPin", "clamp", "clampScrew"];
+  const layerOrder = ["holder", "insert", "cutter"];
   for (const role of layerOrder) {
     const component = model.components.find((entry) => entry.role === role);
     if (!component) continue;
     const [fill, stroke, lineWidth] = componentStyle[role];
     fillPolygon(component.outline, fill, stroke, lineWidth);
+  }
+
+  if (model.insert?.noseArc) {
+    const nose = sampleToolNoseArc(model.insert.noseArc, graphicsQuality().arcChordTolerance);
+    ctx.beginPath();
+    tracePolygon(nose);
+    ctx.strokeStyle = "#fff7d6";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
   }
 
   ctx.strokeStyle = "#f8fafc";
@@ -1517,10 +1860,10 @@ function drawToolAssembly2d() {
   ctx.fillStyle = "#fbbf24";
   ctx.beginPath(); ctx.arc(reference.x, reference.y, 2.3, 0, Math.PI * 2); ctx.fill();
 
-  const labelAnchor = toolPhysicalToScreen(model.holder.shankOutline[3]);
+  const labelAnchor = toolPhysicalToScreen(model.holder.outline.at(-2) || model.referencePoint);
   ctx.fillStyle = "rgba(253, 230, 138, .88)";
   ctx.font = '8px "Cascadia Code", Consolas, monospace';
-  ctx.fillText("MCLNR164D · CNMG432 · MANUFACTURER CAD", labelAnchor.x + 5, labelAnchor.y - 5);
+  ctx.fillText(`${toolKey} · ${model.name} · FLAT 2D CATALOG ENVELOPE`, labelAnchor.x + 5, labelAnchor.y - 5);
   ctx.restore();
 }
 
@@ -1655,6 +1998,10 @@ function clearPinnedDimensions({disableMode = false} = {}) {
 }
 
 function pinDimension(entity) {
+  if (entity.metadata?.sampledContour) {
+    elements.status.textContent = "Sampled stock-grid chords cannot be pinned as exact dimensions; select an exact programmed line or radius.";
+    return;
+  }
   const key = dimensionEntityKey(entity);
   if (state.dimensions.some((dimension) => dimension.key === key)) return;
   state.dimensions.push({key, entity: JSON.parse(JSON.stringify(entity))});
@@ -1774,9 +2121,13 @@ function renderGeometryInspector() {
   if (!active) return;
   const hit = state.geometrySelection;
   const measurement = geometryMeasurement(hit.entity);
+  const sampledContour = hit.entity.metadata?.sampledContour === true;
   const snapNames = {corner: "Corner / intersection", midpoint: "Midpoint", line: "On line", arc: "On radius"};
   $("geometryComponent").textContent = hit.entity.component;
-  $("geometryEntity").textContent = `${hit.entity.label} · ${snapNames[hit.kind] || "Geometry"}`;
+  const samplingNote = sampledContour
+    ? ` · GRID APPROXIMATION ≤ ${formatDistance(hit.entity.metadata.maximumAxialStep, elements.displayUnits.value === "inch" ? 4 : 3)} AXIAL STEP`
+    : "";
+  $("geometryEntity").textContent = `${hit.entity.label} · ${snapNames[hit.kind] || "Geometry"}${samplingNote}`;
   $("geometrySelectedPoint").textContent = formatGeometryPoint(hit.modelPoint);
   if (hit.entity.type === "arc") {
     $("geometryPrimaryLabel").textContent = "Radius";
@@ -1785,7 +2136,7 @@ function renderGeometryInspector() {
     $("geometrySecondaryValue").textContent = formatDistance(measurement.arcLength, elements.displayUnits.value === "inch" ? 4 : 3);
     $("geometryCenter").textContent = formatGeometryPoint(measurement.center);
   } else {
-    $("geometryPrimaryLabel").textContent = "Length";
+    $("geometryPrimaryLabel").textContent = sampledContour ? "Approx. chord" : "Length";
     $("geometryLength").textContent = formatDistance(measurement.length, elements.displayUnits.value === "inch" ? 4 : 3);
     $("geometrySecondaryLabel").textContent = "ΔZ / ΔX";
     $("geometrySecondaryValue").textContent = `${formatDistance(Math.abs(measurement.deltaZ), elements.displayUnits.value === "inch" ? 4 : 3)} / ${formatDistance(Math.abs(measurement.deltaX), elements.displayUnits.value === "inch" ? 4 : 3)}`;
@@ -1821,7 +2172,7 @@ function draw3d(rect) {
     const stockLength = Math.max(0, setupValue(elements.stockLength));
     if (stockDiameter && stockLength) {
       stock = stockProfileFor(stockDiameter, stockLength);
-      $("stockRemoved").textContent = `${stock.removedPercent.toFixed(1)}%`;
+      $("stockRemoved").textContent = stock ? `${stock.removedPercent.toFixed(1)}%` : "BLOCKED";
     }
   } else {
     $("stockRemoved").textContent = "OFF";
@@ -1898,7 +2249,7 @@ function updateStats() {
   const collisionStatus = $("collisionStatus");
   collisionStatus.textContent = collisions.length ? `${collisions.length} HIT${collisions.length === 1 ? "" : "S"}` : "CLEAR";
   collisionStatus.className = collisions.length ? "danger-value" : "safe-value";
-  const notes = [...state.parsed.warnings];
+  const notes = [...state.parsed.warnings, ...assignmentWarnings()];
   const rapidAssumption = cycleTime.limitations.find((limitation) => limitation.includes("rapid timing assumes"));
   if (rapidAssumption) notes.unshift({line: null, info: true, message: rapidAssumption});
   if (collisions.length) {
@@ -2029,6 +2380,9 @@ function stepProgram(direction) {
 
 function plotProgram({fit = true, clearDimensions = true} = {}) {
   const machine = currentMachineProfile();
+  const previousAssignments = state.toolAssignments;
+  const previousAssignmentScope = state.toolAssignmentScope;
+  const nextAssignmentScope = programAssignmentScope(elements.input.value, {fileName: elements.fileName.textContent});
   state.parsed = parseGcode(elements.input.value, {
     xMode: elements.xMode.value,
     arcChordTolerance: graphicsQuality().arcChordTolerance,
@@ -2037,6 +2391,18 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
   if (machine?.status === "draft") {
     state.parsed.warnings.unshift({line: null, info: true, message: `${machine.name} draft estimates are active; verify the machine definition before relying on approach or rapid geometry.`});
   }
+  state.toolAssignments = reconcileToolAssignments(state.parsed.executableToolCalls || [], previousAssignments, {
+    previousScope: previousAssignmentScope,
+    nextScope: nextAssignmentScope,
+  });
+  state.toolAssignmentScope = nextAssignmentScope;
+  if (elements.input.value.trim() === sampleProgram.trim() && (state.parsed.toolCalls || []).some((call) => call.key === "T0101")) {
+    state.toolAssignments.T0101 ||= {
+      toolId: DEFAULT_TOOL_ASSEMBLY_2D.id, confirmed: false, tipDatum: null, axialDirection: "negative-z",
+    };
+  }
+  state.toolAssignmentRevision += 1;
+  state.stockProfileCache = null;
   state.programLine = 0;
   state.visibleBlocks = 0;
   state.playing = false;
@@ -2046,6 +2412,7 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
   state.geometrySelection = null;
   if (clearDimensions) clearPinnedDimensions({disableMode: true});
   renderProgramLineNumbers();
+  renderProgramToolAssignments();
   const cycleStatus = state.parsed.cycles.filter((cycle) => cycle.code !== "G70").map((cycle) => `${cycle.code} ${cycle.passes} passes`).join(" • ");
   elements.status.textContent = state.parsed.segments.length ? `${state.parsed.segments.length} motion blocks${cycleStatus ? ` • ${cycleStatus}` : ""}` : "No motion found";
   updateStats(); updateTransport();
@@ -2088,10 +2455,6 @@ function animate(timestamp) {
   if (state.playing) requestAnimationFrame(animate);
 }
 
-const toolDimensionalInputs = [
-  elements.toolInsertLength, elements.toolNoseRadius, elements.toolHolderLength, elements.toolHolderHeight,
-  elements.toolHolderOffsetZ, elements.toolHolderOffsetX,
-];
 const dimensionalInputs = [
   elements.stockDiameter, elements.stockLength, elements.stockGripLength, elements.chuckFaceZ, elements.jawDiameter, elements.clearance,
 ];
@@ -2114,25 +2477,8 @@ function refreshUnitUi() {
   for (const input of [elements.stockDiameter, elements.stockLength, elements.stockGripLength, elements.chuckFaceZ, elements.jawDiameter]) input.step = standardStep;
   elements.clearance.step = elements.displayUnits.value === "inch" ? "0.005" : "0.1";
   elements.stockStickout.step = standardStep;
-  const toolStep = elements.displayUnits.value === "inch" ? "0.001" : "0.01";
-  for (const input of toolDimensionalInputs) input.step = toolStep;
-  elements.toolNoseRadius.step = elements.displayUnits.value === "inch" ? "0.0001" : "0.001";
   refreshStockPlacementUi();
   updateGraphicsQualityHint();
-}
-
-function syncToolCatalogUi() {
-  const scale = unitScale();
-  const places = elements.displayUnits.value === "inch" ? 4 : 3;
-  const show = (input, millimeters) => { input.value = String(Number((millimeters / scale).toFixed(places))); };
-  elements.toolAssembly.value = DEFAULT_TOOL_ASSEMBLY_2D.id;
-  show(elements.toolInsertLength, DEFAULT_TOOL_ASSEMBLY_2D.insertIc);
-  elements.toolInsertAngle.value = String(DEFAULT_TOOL_ASSEMBLY_2D.insertIncludedAngle);
-  show(elements.toolNoseRadius, DEFAULT_TOOL_ASSEMBLY_2D.insertNoseRadius);
-  show(elements.toolHolderLength, DEFAULT_TOOL_ASSEMBLY_2D.holderLength);
-  show(elements.toolHolderHeight, DEFAULT_TOOL_ASSEMBLY_2D.holderShankWidth);
-  show(elements.toolHolderOffsetZ, DEFAULT_TOOL_ASSEMBLY_2D.holderFDimension);
-  show(elements.toolHolderOffsetX, DEFAULT_TOOL_ASSEMBLY_2D.holderHeadLength);
 }
 
 elements.displayUnits.addEventListener("change", () => {
@@ -2145,8 +2491,8 @@ elements.displayUnits.addEventListener("change", () => {
     input.value = String(Number(converted.toFixed(places)));
   }
   activeUnitScale = nextScale;
-  syncToolCatalogUi();
   refreshUnitUi();
+  renderProgramToolAssignments();
   renderGeometryInspector();
   updateStats(); updateTransport(); fitView();
   persistSession();
@@ -2356,14 +2702,6 @@ for (const control of [
 
 for (const control of [elements.stockLength, elements.stockGripLength]) {
   control.addEventListener("input", refreshStockPlacementUi);
-}
-
-for (const control of [elements.toolAssembly, elements.toolInsertAngle, ...toolDimensionalInputs]) {
-  control.addEventListener("change", () => {
-    draw();
-    persistSession();
-  });
-  if (control.tagName === "INPUT") control.addEventListener("input", draw);
 }
 
 elements.canvas.addEventListener("wheel", (event) => { event.preventDefault(); const rect = elements.canvas.getBoundingClientRect(); zoomAt(event.deltaY < 0 ? 1.12 : 0.89, event.clientX - rect.left, event.clientY - rect.top); }, {passive: false});
@@ -2644,7 +2982,6 @@ state.machineProfiles = mergeMachineProfiles(DEFAULT_MACHINE_PROFILES, readMachi
 renderMachineSelect();
 const restored = restoreSession();
 activeUnitScale = unitScale();
-syncToolCatalogUi();
 refreshUnitUi();
 updateProgramUnitsHint();
 updateToolControls();

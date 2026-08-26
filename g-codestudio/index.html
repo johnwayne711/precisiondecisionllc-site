@@ -137,9 +137,9 @@
               <div><dt>Midpoint</dt><dd id="geometryMidpoint">—</dd></div>
               <div><dt>End</dt><dd id="geometryEnd">—</dd></div>
             </dl>
-            <small>Geometric X is signed radius from spindle centerline. Dimension mode pins exact model measurements to the 2D view.</small>
+            <small>Geometric X is signed radius from spindle centerline. Dimension mode pins exact analytic/programmed entities; sampled stock-grid chords are labeled approximate and cannot be pinned as exact dimensions.</small>
           </section>
-          <div id="toolVerificationBadge" class="tool-verification-badge" aria-live="polite" hidden><span>2D TOOL MODEL</span><strong>MANUFACTURER CAD</strong></div>
+          <div id="toolVerificationBadge" class="tool-verification-badge" aria-live="polite" hidden><span>2D TOOL MODEL</span><strong>NO ACTIVE TOOL</strong></div>
           <div id="emptyState" class="empty-state" hidden>No motion blocks found</div>
         </div>
         <div class="transport">
@@ -214,34 +214,14 @@
             </select>
             <small id="graphicsQualityHint" class="quality-hint">Maximum surface resolution and 0.0001 in arc display chord.</small>
           </label>
-          <details id="toolAssemblySetup" class="tool-assembly-setup">
-            <summary><span>2D TOOL ASSEMBLY</span><strong>MANUFACTURER CAD</strong></summary>
+          <details id="programToolsSetup" class="tool-assembly-setup">
+            <summary><span>PROGRAM TOOLS</span><strong id="programToolSummary">NO T CALLS</strong></summary>
             <div class="tool-assembly-body">
-              <label>Assembly library
-                <select id="toolAssemblySelect">
-                  <option value="kennametal-mclnr164d-cnmg432" selected>MCLNR164D + CNMG432 · RH</option>
-                </select>
-              </label>
-              <div class="catalog-identity"><strong>Kennametal 1096070</strong><span>1 in external turning holder · 95° approach</span></div>
-              <div class="control-divider"><span>CNMG432 / CNMG120408 INSERT</span></div>
-              <div class="field-pair">
-                <label><span>Inscribed circle (<span data-unit-label>in</span>)</span><input id="toolInsertLength" type="number" value="0.5000" readonly></label>
-                <label><span>Included angle (°)</span><input id="toolInsertAngle" type="number" value="80" readonly></label>
+              <p>Each executable exact T word is mapped to this exact filename and program text only. Header comments can suggest a family, but they never confirm a tool, datum, cutting direction, or mounted setup. Comments immediately before or after a T call are considered.</p>
+              <div id="programToolList" class="program-tool-list" aria-live="polite">
+                <div class="program-tool-empty">Plot a program containing a T call to assign its tools.</div>
               </div>
-              <label><span>Nose radius (<span data-unit-label>in</span>)</span><input id="toolNoseRadius" type="number" value="0.0315" readonly></label>
-              <small class="catalog-detail">Cutting edge 0.5077 in · thickness 0.1875 in · hole Ø 0.203 in</small>
-              <div class="control-divider"><span>MCLNR164D HOLDER</span></div>
-              <div class="field-pair">
-                <label><span>Overall length (<span data-unit-label>in</span>)</span><input id="toolHolderLength" type="number" value="6.0000" readonly></label>
-                <label><span>Shank width B (<span data-unit-label>in</span>)</span><input id="toolHolderHeight" type="number" value="1.0000" readonly></label>
-              </div>
-              <div class="field-pair">
-                <label><span>F dimension (<span data-unit-label>in</span>)</span><input id="toolHolderOffsetZ" type="number" value="1.2500" readonly></label>
-                <label><span>Head length LH (<span data-unit-label>in</span>)</span><input id="toolHolderOffsetX" type="number" value="1.2030" readonly></label>
-              </div>
-              <small class="catalog-detail">Right hand · −5° lead · −5° rake · −5° inclination</small>
-              <small class="catalog-detail">ICSN433 shim · KL46 lock pin · CK20 clamp · STC20 clamp screw</small>
-              <p>Official Kennametal GTM STEP geometry projected from the cutting reference point at exact scale. Curved display edges use a 0.05 mm maximum chord tolerance. Tool collision checking remains disabled.</p>
+              <p class="tool-safety-note">Unassigned tools and unresolved cutting datums do not remove stock. Unconfirmed or display-only tools are blocked as well. Catalog-scaled 2D envelopes omit unsourced seating/head CAD; the programmed-contact-point model does not silently add tool-nose compensation. Confirmed assignments persist only in local browser storage for the unchanged program and are not uploaded.</p>
             </div>
           </details>
           <div class="field-pair">
@@ -261,7 +241,7 @@
           </div>
           <label><span>Safety clearance (<span data-unit-label>in</span>)</span><input id="clearanceInput" type="number" min="0" step="0.005" value="0.12"></label>
           <label class="toggle-row"><input id="collisionToggle" type="checkbox" checked><span>Show collision envelope</span></label>
-          <p class="quality-note">Image quality controls display tessellation only. It does not change G-code or certify machining accuracy.</p>
+          <p class="quality-note">Image quality controls display tessellation only. Stock proof uses a separate fixed physical sampling tolerance; neither setting changes G-code or certifies machining accuracy.</p>
         </div>
 
         <div class="stats-grid">

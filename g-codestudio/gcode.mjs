@@ -1,3 +1,5 @@
+import {extractProgramToolCalls} from "./program-tools.mjs";
+
 const MOTION_CODES = new Map([[0, "rapid"], [1, "linear"], [2, "arc-cw"], [3, "arc-ccw"]]);
 const EPSILON = 1e-9;
 
@@ -125,6 +127,16 @@ function cloneState(state) {
   return {...state};
 }
 
+function applyRecordToolCall(record, state) {
+  const call = record.toolCalls?.at(-1);
+  if (!call) return;
+  // This Fanuc-style parser applies a T word before any motion in the same
+  // block. The exact address remains opaque: leading zeros are retained and
+  // no station/offset split (or T0000 cancellation) is guessed here.
+  state.activeToolKey = call.key;
+  state.activeToolCallLine = call.line;
+}
+
 function timingSnapshot(state) {
   return {
     feed: state.feed ?? null,
@@ -168,7 +180,8 @@ function updateModalState(record, state, warnings) {
   }
 }
 
-function parseBasicRecord(record, state, xMode, warnings) {
+function parseBasicRecord(record, state, xMode, warnings, {executeToolCall = true} = {}) {
+  if (executeToolCall) applyRecordToolCall(record, state);
   if (!record.byLetter.size) return null;
   updateModalState(record, state, warnings);
   const hasX = record.byLetter.has("X");
@@ -195,7 +208,10 @@ function parseBasicRecord(record, state, xMode, warnings) {
   if (distance(start, end) < EPSILON) return null;
 
   const points = state.motion === "rapid" ? rapidPath(start, end, state, xMode) : [start, end];
-  const segment = {type: state.motion, start, end, points, line: record.line, raw: record.raw.trim(), ...timingSnapshot(state)};
+  const segment = {
+    type: state.motion, start, end, points, line: record.line, raw: record.raw.trim(), ...timingSnapshot(state),
+    toolKey: state.activeToolKey, toolCallLine: state.activeToolCallLine,
+  };
   if (state.motion === "arc-cw" || state.motion === "arc-ccw") {
     const params = {
       i: record.byLetter.has("I") ? lastWord(record, "I") * state.scale : NaN,
@@ -216,6 +232,7 @@ function rapidSegment(start, end, record, state, xMode, stage) {
   return {
     type: "rapid", start: {...start}, end: {...end}, points: rapidPath(start, end, state, xMode),
     line: record.line, raw: record.raw.trim(), ...timingSnapshot(state), referenceReturn: true, referenceStage: stage,
+    toolKey: state.activeToolKey, toolCallLine: state.activeToolCallLine,
   };
 }
 
@@ -258,7 +275,10 @@ function contourFor(records, startIndex, endIndex, state, xMode, warnings) {
   const localState = cloneState(state);
   const segments = [];
   for (let index = startIndex; index <= endIndex; index += 1) {
-    const segment = parseBasicRecord(records[index], localState, xMode, warnings);
+    // P-Q records describe contour geometry. A T word retained in one of those
+    // records is metadata, not an executed modal tool change for the canned
+    // cycle. G70/G71/G72 all use the tool active at their executing call.
+    const segment = parseBasicRecord(records[index], localState, xMode, warnings, {executeToolCall: false});
     if (segment) segments.push(segment);
   }
   return {segments, state: localState};
@@ -330,6 +350,8 @@ function generatedSegment(type, start, end, cycle, line, pass, points = null, ra
     ...timingSnapshot(timingSource || {}), generated: true, cycle, pass,
     executionLine: line,
     sourceLine: Number.isInteger(geometry?.line) ? geometry.line : line,
+    toolKey: rapidState?.activeToolKey ?? null,
+    toolCallLine: rapidState?.activeToolCallLine ?? null,
   };
   if (geometry?.center && Number.isFinite(geometry.radius) && Number.isFinite(geometry.sweep)) {
     Object.assign(segment, {
@@ -438,6 +460,7 @@ export function parseGcode(source, {
 } = {}) {
   const lines = source.replace(/\r/g, "").split("\n");
   const records = lines.map(recordFor);
+  const extractedToolCalls = extractProgramToolCalls(source);
   const normalizedDefaultUnits = defaultUnits === "inch" || defaultUnits === "in" ? "in" : "mm";
   const state = {
     x: Number.isFinite(initialPosition?.x) ? initialPosition.x : null,
@@ -447,6 +470,7 @@ export function parseGcode(source, {
     absolute: true, scale: normalizedDefaultUnits === "in" ? 25.4 : 1, units: normalizedDefaultUnits,
     motion: "rapid", feed: null, feedMode: "unknown", spindleMode: "unknown", spindleSpeed: null,
     spindleLimit: null, spindleRunning: null, sawPlane: false, sawUnitMode: false, assumedUnitsUsed: false,
+    activeToolKey: null, activeToolCallLine: null,
   };
   const segments = [];
   const warnings = [];
@@ -455,7 +479,9 @@ export function parseGcode(source, {
   const definitionIndexes = new Set();
 
   for (const record of records) {
-    if (!(hasG(record, 71) || hasG(record, 72)) || !Number.isFinite(lastWord(record, "P")) || !Number.isFinite(lastWord(record, "Q"))) continue;
+    if (!(hasG(record, 70) || hasG(record, 71) || hasG(record, 72))
+      || !Number.isFinite(lastWord(record, "P"))
+      || !Number.isFinite(lastWord(record, "Q"))) continue;
     const startIndex = sequenceIndex(records, lastWord(record, "P"));
     const endIndex = sequenceIndex(records, lastWord(record, "Q"));
     if (startIndex >= 0 && endIndex >= startIndex) {
@@ -463,9 +489,27 @@ export function parseGcode(source, {
     }
   }
 
+  const toolCalls = extractedToolCalls.map((call) => {
+    const definitionOnly = definitionIndexes.has(call.line - 1);
+    return {
+      ...call,
+      executable: !definitionOnly,
+      definitionOnly,
+      executionContext: definitionOnly ? "cycle-definition" : "main",
+    };
+  });
+  const executableToolCalls = toolCalls.filter((call) => call.executable);
+  const toolCallsByLine = new Map();
+  for (const call of toolCalls) {
+    if (!toolCallsByLine.has(call.line)) toolCallsByLine.set(call.line, []);
+    toolCallsByLine.get(call.line).push(call);
+  }
+  for (const record of records) record.toolCalls = toolCallsByLine.get(record.line) || [];
+
   let pending = null;
   for (const record of records) {
     if (!record.byLetter.size || definitionIndexes.has(record.index)) continue;
+    applyRecordToolCall(record, state);
     if (hasG(record, 4)) {
       updateModalState(record, state, warnings);
       const secondsWord = lastWord(record, "X") ?? lastWord(record, "U");
@@ -538,6 +582,8 @@ export function parseGcode(source, {
           generated: true,
           cycle: "G70",
           executionLine: record.line,
+          toolKey: state.activeToolKey,
+          toolCallLine: state.activeToolCallLine,
         });
       }
       state.x = contour.state.x;
@@ -559,7 +605,7 @@ export function parseGcode(source, {
     warnings.unshift({line: null, message: "G18 was not present; arcs are assumed to use the lathe X/Z plane."});
   }
   return {
-    segments, warnings, cycles, units: state.units, sourceLines: lines.length,
+    segments, warnings, cycles, toolCalls, executableToolCalls, units: state.units, sourceLines: lines.length,
     timingEvents, dwellSeconds: timingEvents.reduce((sum, event) => sum + event.seconds, 0),
     unitsSource: state.assumedUnitsUsed ? "assumed" : "program",
   };

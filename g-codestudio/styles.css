@@ -199,6 +199,28 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tool-assembly-body > label:first-child { margin-top: 9px; }
 .tool-assembly-body p { margin: 0; color: #b49a6c; font-size: 8px; line-height: 1.45; }
 .tool-assembly-body input[readonly] { color: #d8e5e7; border-color: rgba(251, 191, 36, .22); background: rgba(7, 16, 18, .72); cursor: default; }
+.program-tool-list { display: flex; flex-direction: column; gap: 8px; }
+.program-tool-empty { padding: 9px; color: #7f969a; border: 1px dashed rgba(130, 159, 164, .25); border-radius: 7px; font-size: 8px; line-height: 1.45; }
+.program-tool-card { display: grid; gap: 7px; padding: 9px; border: 1px solid rgba(86, 227, 159, .2); border-radius: 8px; background: rgba(5, 17, 19, .58); }
+.program-tool-card.unassigned { border-color: rgba(251, 191, 36, .34); background: rgba(38, 28, 8, .24); }
+.program-tool-card.blocked { border-color: rgba(251, 113, 133, .38); background: rgba(43, 13, 21, .24); }
+.program-tool-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.program-tool-heading strong { color: #e5eef0; font: 850 10px/1.2 "Cascadia Code", Consolas, monospace; letter-spacing: .06em; }
+.program-tool-heading span { color: #789095; font: 7px/1.35 "Cascadia Code", Consolas, monospace; text-align: right; }
+.program-tool-hint { margin: 0; color: #9eb1b5; font-size: 8px; line-height: 1.4; }
+.program-tool-hint strong { color: #56e39f; font-weight: 850; }
+.program-tool-controls { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; }
+.program-tool-controls label { gap: 4px; }
+.program-tool-controls select { font-size: 8px; }
+.program-tool-controls .program-tool-confirmation { width: 100%; padding: 7px; color: #a9bdc1; border: 1px solid rgba(130, 159, 164, .22); border-radius: 6px; background: rgba(7, 18, 20, .62); font: inherit; font-size: 7.5px; line-height: 1.4; letter-spacing: 0; text-align: left; text-transform: none; cursor: pointer; }
+.program-tool-confirmation[aria-pressed="true"] { color: #56e39f; border-color: rgba(86, 227, 159, .45); background: rgba(14, 72, 54, .28); }
+.program-tool-confirmation:disabled { opacity: .45; cursor: not-allowed; }
+.program-tool-meta { display: flex; flex-wrap: wrap; gap: 5px; }
+.program-tool-chip { padding: 3px 5px; color: #a9bdc1; border: 1px solid rgba(130, 159, 164, .24); border-radius: 999px; background: rgba(10, 27, 29, .65); font-size: 7px; letter-spacing: .04em; }
+.program-tool-chip.confirmed { color: #56e39f; border-color: rgba(86, 227, 159, .35); }
+.program-tool-chip.warning { color: #fbbf24; border-color: rgba(251, 191, 36, .38); }
+.program-tool-chip.blocked { color: #fb7185; border-color: rgba(251, 113, 133, .4); }
+.tool-safety-note { padding-top: 7px; border-top: 1px solid rgba(251, 191, 36, .14); }
 .catalog-identity { display: flex; flex-direction: column; gap: 2px; padding: 7px 8px; border: 1px solid rgba(86, 227, 159, .18); border-radius: 6px; background: rgba(8, 41, 33, .34); }
 .catalog-identity strong { color: #86efac; font: 9px/1.25 "Cascadia Code", Consolas, monospace; letter-spacing: .03em; }
 .catalog-identity span, .catalog-detail { color: #84a2a7; font: 7.5px/1.45 "Cascadia Code", Consolas, monospace; letter-spacing: 0; text-transform: none; }
