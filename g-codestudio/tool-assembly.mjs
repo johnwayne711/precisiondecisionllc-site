@@ -170,6 +170,10 @@ export function listToolAssemblies2d() {
   return [...TOOL_ASSEMBLY_2D_LIBRARY];
 }
 
+export function listSelectableToolAssemblies2d() {
+  return TOOL_ASSEMBLY_2D_LIBRARY.filter((entry) => toolAssembly2dDisplayCapability(entry).available);
+}
+
 export function toolAssembly2dById(id) {
   return TOOL_ASSEMBLY_2D_LIBRARY.find((entry) => entry.id === id) || null;
 }
@@ -195,21 +199,11 @@ function cuttingOffsets(model) {
   return null;
 }
 
-export function validateToolAssembly2d(assembly) {
+function validateToolAssembly2dGeometry(assembly, {requirePlacement = true} = {}) {
   const errors = [];
   if (!assembly || !assembly.id) return ["A tool assembly is required."];
   if (!SUPPORTED_GEOMETRY_KINDS.has(assembly.geometryKind)) {
     errors.push(`Geometry kind ${assembly.geometryKind || "unknown"} does not have a supported 2D builder.`);
-  }
-  const cuttingMode = assembly.cuttingModel?.mode;
-  if (!SUPPORTED_CUTTING_MODES.has(cuttingMode)) {
-    errors.push(`Cutting model ${cuttingMode || "unknown"} is not supported for stock removal.`);
-  }
-  if (assembly.geometryKind === "diamond-turning" && cuttingMode !== "point") {
-    errors.push("Diamond-turning geometry requires the point cutting model.");
-  }
-  if (assembly.geometryKind === "groove" && cuttingMode !== "axial-band") {
-    errors.push("Groove geometry requires the finite axial-band cutting model.");
   }
   for (const [label, value] of [
     ["Holder overall length", assembly.holderLength],
@@ -239,12 +233,6 @@ export function validateToolAssembly2d(assembly) {
         errors.push(`Insert nose radius must be less than ${maximumRadius.toFixed(4)} mm.`);
       }
     }
-    if (assembly.cuttingModel?.referenceSemantics !== "programmed-contact-point") {
-      errors.push("The turning model must explicitly use programmed-contact-point reference semantics.");
-    }
-    if (!["negative-z", "positive-z", "radial-only"].includes(assembly.cuttingModel?.axialDirection)) {
-      errors.push("The permitted Z cutting direction must be confirmed for this turning tool.");
-    }
   }
   if (assembly.geometryKind === "groove") {
     if (!finite(assembly.insertCuttingWidth) || assembly.insertCuttingWidth <= 0) errors.push("Insert cutting width must be confirmed and greater than zero.");
@@ -255,13 +243,46 @@ export function validateToolAssembly2d(assembly) {
         errors.push("Every catalog corner radius must identify its supported cutting-edge side.");
       }
     }
-    if (!cuttingOffsets(assembly.cuttingModel || {})) errors.push("The programmed Z datum edge must be confirmed.");
-    if (!CONFIRMED_AXIAL_DIRECTIONS.has(assembly.cuttingModel?.axialDirection)) {
-      errors.push("The permitted Z cutting direction must be confirmed.");
-    }
+    if (requirePlacement && !cuttingOffsets(assembly.cuttingModel || {})) errors.push("The programmed Z datum edge must be confirmed to place this outline.");
   }
   if (finite(assembly.holderHeadLength) && finite(assembly.holderLength) && assembly.holderHeadLength >= assembly.holderLength) {
     errors.push("Holder head length must be shorter than the overall length.");
+  }
+  return errors;
+}
+
+export function validateToolAssemblyDisplay2d(assembly) {
+  return validateToolAssembly2dGeometry(assembly);
+}
+
+export function toolAssembly2dDisplayCapability(assembly) {
+  const errors = validateToolAssembly2dGeometry(assembly, {requirePlacement: false});
+  return {available: errors.length === 0, errors};
+}
+
+export function validateToolAssembly2d(assembly) {
+  const errors = validateToolAssembly2dGeometry(assembly);
+  if (!assembly || !assembly.id) return errors;
+  const cuttingMode = assembly.cuttingModel?.mode;
+  if (!SUPPORTED_CUTTING_MODES.has(cuttingMode)) {
+    errors.push(`Cutting model ${cuttingMode || "unknown"} is not supported for stock removal.`);
+  }
+  if (assembly.geometryKind === "diamond-turning" && cuttingMode !== "point") {
+    errors.push("Diamond-turning geometry requires the point cutting model.");
+  }
+  if (assembly.geometryKind === "groove" && cuttingMode !== "axial-band") {
+    errors.push("Groove geometry requires the finite axial-band cutting model.");
+  }
+  if (assembly.geometryKind === "diamond-turning") {
+    if (assembly.cuttingModel?.referenceSemantics !== "programmed-contact-point") {
+      errors.push("The turning model must explicitly use programmed-contact-point reference semantics.");
+    }
+    if (!["negative-z", "positive-z", "radial-only"].includes(assembly.cuttingModel?.axialDirection)) {
+      errors.push("The permitted Z cutting direction must be confirmed for this turning tool.");
+    }
+  }
+  if (assembly.geometryKind === "groove" && !CONFIRMED_AXIAL_DIRECTIONS.has(assembly.cuttingModel?.axialDirection)) {
+    errors.push("The permitted Z cutting direction must be confirmed.");
   }
   return errors;
 }
@@ -367,8 +388,8 @@ function resolvedCuttingModel(assembly) {
   return {...model, simulationReady};
 }
 
-export function buildToolAssembly2d(assembly, referencePoint) {
-  const errors = validateToolAssembly2d(assembly);
+function buildToolAssemblyWithValidation(assembly, referencePoint, validator) {
+  const errors = validator(assembly);
   if (!referencePoint || !finite(referencePoint.z) || !finite(referencePoint.x)) errors.push("Programmed tool reference point is unavailable.");
   if (errors.length) return {valid: false, errors, id: assembly?.id || null, verification: assembly?.verification || "unverified"};
   let geometry = null;
@@ -403,6 +424,14 @@ export function buildToolAssembly2d(assembly, referencePoint) {
     },
     ...geometry,
   };
+}
+
+export function buildToolAssemblyDisplay2d(assembly, referencePoint) {
+  return buildToolAssemblyWithValidation(assembly, referencePoint, validateToolAssemblyDisplay2d);
+}
+
+export function buildToolAssembly2d(assembly, referencePoint) {
+  return buildToolAssemblyWithValidation(assembly, referencePoint, validateToolAssembly2d);
 }
 
 export function sampleToolNoseArc(noseArc, maximumChord = 0.05) {

@@ -9,8 +9,8 @@ import {comparePrograms, compareSegmentGeometry, diffLineTokens, geometryItemsFo
 import {graphicsQualityPreset, renderGraphicsQualityPreset} from "./graphics-quality.mjs";
 import {createFrameScheduler} from "./render-scheduler.mjs";
 import {
-  buildToolAssembly2d, DEFAULT_TOOL_ASSEMBLY_2D, listToolAssemblies2d, sampleToolNoseArc, TOOL_ASSEMBLY_2D_STATUS,
-  toolAssembly2dById, toolReferencePointForExecution,
+  buildToolAssembly2d, buildToolAssemblyDisplay2d, DEFAULT_TOOL_ASSEMBLY_2D, listSelectableToolAssemblies2d,
+  sampleToolNoseArc, TOOL_ASSEMBLY_2D_STATUS, toolAssembly2dById, toolReferencePointForExecution,
 } from "./tool-assembly.mjs";
 import {
   activeToolKeyAtLine, programAssignmentScope, reconcileToolAssignments, reviseToolAssignmentSetup,
@@ -1493,11 +1493,11 @@ function configuredToolAssembly2d(toolKey = activeProgramToolKey()) {
 function toolAssignmentReadiness(toolKey) {
   const assignment = state.toolAssignments[toolKey];
   if (!assignment?.toolId) return {status: "unassigned", ready: false, errors: ["No tool selected."]};
-  if (assignment.confirmed !== true) return {status: "blocked", ready: false, errors: ["The tool selection has not been explicitly confirmed."]};
   const configured = configuredToolAssembly2d(toolKey);
   if (!configured) return {status: "blocked", ready: false, errors: ["The selected tool definition is unavailable."]};
   const model = buildToolAssembly2d(configured, {z: 0, x: 0});
   if (!model.valid) return {status: "blocked", ready: false, errors: model.errors};
+  if (assignment.confirmed !== true) return {status: "blocked", ready: false, errors: ["The tool selection has not been explicitly confirmed."]};
   if (model.cuttingModel?.simulationReady !== true) {
     return {
       status: "blocked",
@@ -1578,7 +1578,7 @@ function invalidateToolAssignments({renderControls = true} = {}) {
 
 function toolChoiceLabel(definition) {
   const status = TOOL_ASSEMBLY_2D_STATUS[definition.verification] || TOOL_ASSEMBLY_2D_STATUS.unverified;
-  return `${definition.name} · ${status}`;
+  return `${definition.name} · ${status} · 2D OUTLINE`;
 }
 
 function selectField(labelText, values, selected, placeholder, onChange) {
@@ -1589,10 +1589,11 @@ function selectField(labelText, values, selected, placeholder, onChange) {
   empty.value = "";
   empty.textContent = placeholder;
   select.append(empty);
-  for (const [value, labelTextValue] of values) {
+  for (const [value, labelTextValue, disabled = false] of values) {
     const option = document.createElement("option");
     option.value = value;
     option.textContent = labelTextValue;
+    option.disabled = disabled;
     select.append(option);
   }
   select.value = selected || "";
@@ -1615,7 +1616,7 @@ function renderProgramToolAssignments() {
     return;
   }
 
-  const library = listToolAssemblies2d();
+  const library = listSelectableToolAssemblies2d();
   for (const toolKey of keys) {
     const toolCalls = toolCallsForKey(toolKey);
     const assignment = state.toolAssignments[toolKey] || {};
@@ -1644,9 +1645,14 @@ function renderProgramToolAssignments() {
 
     const controls = document.createElement("div");
     controls.className = "program-tool-controls";
+    const selectedDefinition = assignment.toolId ? toolAssembly2dById(assignment.toolId) : null;
+    const toolChoices = library.map((definition) => [definition.id, toolChoiceLabel(definition)]);
+    if (selectedDefinition && !library.some((definition) => definition.id === selectedDefinition.id)) {
+      toolChoices.unshift([selectedDefinition.id, `${selectedDefinition.name} · NOT IMPLEMENTED — SELECT ANOTHER TOOL`, true]);
+    }
     controls.append(selectField(
       "Tool assembly",
-      library.map((definition) => [definition.id, toolChoiceLabel(definition)]),
+      toolChoices,
       assignment.toolId,
       firstSuggestion ? `Unassigned — suggestion: ${firstSuggestion.label}` : "Unassigned — select exact tool",
       (toolId) => {
@@ -1661,7 +1667,7 @@ function renderProgramToolAssignments() {
       },
     ));
 
-    const definition = assignment.toolId ? toolAssembly2dById(assignment.toolId) : null;
+    const definition = selectedDefinition;
     const datumChoices = definition?.cuttingModel?.tipDatumChoices || [];
     if (datumChoices.length) {
       controls.append(selectField(
@@ -1704,6 +1710,7 @@ function renderProgramToolAssignments() {
     confirmation.type = "button";
     confirmation.className = "program-tool-confirmation";
     const requiredConfigurationComplete = Boolean(assignment.toolId)
+      && library.some((entry) => entry.id === assignment.toolId)
       && (!datumChoices.length || Boolean(assignment.tipDatum))
       && (!directionChoices.length || Boolean(assignment.axialDirection));
     confirmation.disabled = !requiredConfigurationComplete;
@@ -1773,7 +1780,7 @@ function updateToolControls() {
   elements.toolOverlay.classList.toggle("active", active);
   elements.toolOverlay.setAttribute("aria-pressed", String(active));
   elements.toolOverlay.title = available
-    ? "Show or hide the dimension-driven 2D tool assembly"
+    ? "Show or hide the dimension-driven 2D tool outline"
     : "The tool assembly is currently available in 2D only";
   if (!active) elements.toolVerificationBadge.hidden = true;
 }
@@ -1794,18 +1801,14 @@ function drawToolAssembly2d() {
     badgeStatus.textContent = toolKey ? `${toolKey} UNASSIGNED` : "NO ACTIVE TOOL";
     return;
   }
-  const readiness = toolAssignmentReadiness(toolKey);
-  if (!readiness.ready) {
+  const model = buildToolAssemblyDisplay2d(configured, physicalReference);
+  if (!model.valid) {
     elements.toolVerificationBadge.classList.add("invalid");
-    badgeStatus.textContent = `${toolKey} · CONFIG REQUIRED`;
+    badgeStatus.textContent = `${toolKey} · OUTLINE UNAVAILABLE`;
     return;
   }
-  const model = buildToolAssembly2d(configured, physicalReference);
-  elements.toolVerificationBadge.classList.toggle("invalid", !model.valid);
-  badgeStatus.textContent = model.valid
-    ? `${toolKey} · ${TOOL_ASSEMBLY_2D_STATUS[model.verification] || TOOL_ASSEMBLY_2D_STATUS.unverified}`
-    : `${toolKey} · CONFIG REQUIRED`;
-  if (!model.valid) return;
+  elements.toolVerificationBadge.classList.remove("invalid");
+  badgeStatus.textContent = `${toolKey} · 2D OUTLINE`;
 
   const tracePolygon = (points) => {
     points.forEach((point, index) => {
@@ -1818,28 +1821,26 @@ function drawToolAssembly2d() {
   ctx.lineCap = "round";
   const reference = toolPhysicalToScreen(model.referencePoint);
 
-  const fillPolygon = (points, fill, stroke, lineWidth = 1.2) => {
+  const strokePolygon = (points, stroke, lineWidth = 1.2) => {
     ctx.beginPath();
     tracePolygon(points);
     ctx.closePath();
-    ctx.fillStyle = fill;
     ctx.strokeStyle = stroke;
     ctx.lineWidth = lineWidth;
-    ctx.fill();
     ctx.stroke();
   };
 
   const componentStyle = {
-    holder: ["rgba(71, 85, 105, .78)", "rgba(203, 213, 225, .92)", 1.2],
-    insert: ["rgba(245, 158, 11, .94)", "#fde68a", 1.45],
-    cutter: ["rgba(245, 158, 11, .94)", "#fde68a", 1.45],
+    holder: ["rgba(203, 213, 225, .92)", 1.2],
+    insert: ["#fde68a", 1.45],
+    cutter: ["#fde68a", 1.45],
   };
   const layerOrder = ["holder", "insert", "cutter"];
   for (const role of layerOrder) {
     const component = model.components.find((entry) => entry.role === role);
     if (!component) continue;
-    const [fill, stroke, lineWidth] = componentStyle[role];
-    fillPolygon(component.outline, fill, stroke, lineWidth);
+    const [stroke, lineWidth] = componentStyle[role];
+    strokePolygon(component.outline, stroke, lineWidth);
   }
 
   if (model.insert?.noseArc) {
@@ -1857,13 +1858,14 @@ function drawToolAssembly2d() {
   ctx.moveTo(reference.x - 5, reference.y); ctx.lineTo(reference.x + 5, reference.y);
   ctx.moveTo(reference.x, reference.y - 5); ctx.lineTo(reference.x, reference.y + 5);
   ctx.stroke();
-  ctx.fillStyle = "#fbbf24";
-  ctx.beginPath(); ctx.arc(reference.x, reference.y, 2.3, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "#fbbf24";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(reference.x, reference.y, 2.3, 0, Math.PI * 2); ctx.stroke();
 
   const labelAnchor = toolPhysicalToScreen(model.holder.outline.at(-2) || model.referencePoint);
   ctx.fillStyle = "rgba(253, 230, 138, .88)";
   ctx.font = '8px "Cascadia Code", Consolas, monospace';
-  ctx.fillText(`${toolKey} · ${model.name} · FLAT 2D CATALOG ENVELOPE`, labelAnchor.x + 5, labelAnchor.y - 5);
+  ctx.fillText(`${toolKey} · ${model.name} · 2D OUTLINE`, labelAnchor.x + 5, labelAnchor.y - 5);
   ctx.restore();
 }
 

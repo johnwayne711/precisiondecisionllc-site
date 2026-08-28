@@ -99,7 +99,7 @@
               <button id="view2dButton" class="active" type="button" aria-pressed="true">2D</button>
               <button id="view3dButton" type="button" aria-pressed="false">3D</button>
             </div>
-            <button id="toolOverlayButton" class="toolbar-tool tool-overlay-button" type="button" aria-pressed="false" title="Show the dimension-driven tool assembly in the 2D view">Tool</button>
+            <button id="toolOverlayButton" class="toolbar-tool tool-overlay-button" type="button" aria-pressed="false" title="Show the dimension-driven tool outline in the 2D view">Tool</button>
             <label class="graphics-toggle" title="Show or hide toolpaths without changing program progress or stock removal">
               <input id="toolpathToggle" type="checkbox" checked>
               <span>Paths</span>
@@ -139,7 +139,7 @@
             </dl>
             <small>Geometric X is signed radius from spindle centerline. Dimension mode pins exact analytic/programmed entities; sampled stock-grid chords are labeled approximate and cannot be pinned as exact dimensions.</small>
           </section>
-          <div id="toolVerificationBadge" class="tool-verification-badge" aria-live="polite" hidden><span>2D TOOL MODEL</span><strong>NO ACTIVE TOOL</strong></div>
+          <div id="toolVerificationBadge" class="tool-verification-badge" aria-live="polite" hidden><span>2D TOOL OUTLINE</span><strong>NO ACTIVE TOOL</strong></div>
           <div id="emptyState" class="empty-state" hidden>No motion blocks found</div>
         </div>
         <div class="transport">
