@@ -115,6 +115,67 @@ function programFilename(options) {
   return normalized ? normalized.toUpperCase() : null;
 }
 
+function exactAssemblyRef(candidate) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  const {id, revision} = candidate;
+  if (typeof id !== "string" || !id.length || id.trim() !== id) return null;
+  if (!Number.isInteger(revision) || revision < 1) return null;
+  return {id, revision};
+}
+
+/**
+ * Resolve the revision identity carried by a program-tool assignment without
+ * consulting either tooling library. Schema-v2 assignments must carry an exact
+ * id/revision pair; the former toolId-only shape is explicitly marked legacy.
+ */
+export function toolAssignmentAssemblyRef(assignment) {
+  if (!assignment || typeof assignment !== "object" || Array.isArray(assignment)) return null;
+  if (assignment.schemaVersion === 2) return exactAssemblyRef(assignment.assemblyRef);
+  if (assignment.schemaVersion !== undefined) return null;
+  if (typeof assignment.toolId !== "string" || !assignment.toolId.length || assignment.toolId.trim() !== assignment.toolId) {
+    return null;
+  }
+  return {id: assignment.toolId, revision: null, legacy: true};
+}
+
+function versionedSetupFields(setup) {
+  if (!setup || typeof setup !== "object" || Array.isArray(setup)) return {};
+  const fields = {...setup};
+  delete fields.schemaVersion;
+  delete fields.assemblyRef;
+  delete fields.toolId;
+  delete fields.confirmed;
+  delete fields.confirmationSource;
+  return fields;
+}
+
+/** Create an unconfirmed assignment pinned to one exact assembly revision. */
+export function createVersionedToolAssignment(assembly, setup = {}) {
+  const assemblyRef = exactAssemblyRef(assembly);
+  if (!assemblyRef) return {};
+  return {
+    schemaVersion: 2,
+    assemblyRef,
+    ...versionedSetupFields(setup),
+    confirmed: false,
+  };
+}
+
+/**
+ * Normalize an assignment against an already-resolved assembly. Exact v2
+ * assignments survive unchanged; legacy or stale same-id revisions migrate to
+ * the resolved revision with confirmation and provenance deliberately revoked.
+ */
+export function normalizeVersionedToolAssignment(assignment, resolvedAssembly) {
+  const resolvedRef = exactAssemblyRef(resolvedAssembly);
+  const assignmentRef = toolAssignmentAssemblyRef(assignment);
+  if (!resolvedRef || !assignmentRef || assignmentRef.id !== resolvedRef.id) return {};
+  if (assignmentRef.legacy !== true && assignmentRef.revision === resolvedRef.revision) {
+    return {...assignment, assemblyRef: {...assignmentRef}};
+  }
+  return createVersionedToolAssignment(resolvedRef, assignment);
+}
+
 /**
  * Return a deterministic assignment scope for the exact opened program text.
  * Filename and O-program word (when present) remain readable identity fields,
@@ -135,6 +196,35 @@ export function programAssignmentScope(source, options = {}) {
     break;
   }
   return `program-tool-scope:v2:${JSON.stringify([filename, programKey, normalizedSource])}`;
+}
+
+/**
+ * The application may ship a deliberately configured demonstration program.
+ * Its setup is trusted only when the text came from that built-in action and
+ * still matches the bundled source exactly. Matching user-loaded text is not
+ * sufficient, and any editor input permanently clears the built-in origin.
+ */
+export function isExactBundledProgram(source, bundledSource, bundledOrigin = false) {
+  const normalizedSource = String(source ?? "").replace(/\r/g, "");
+  const normalizedBundledSource = String(bundledSource ?? "").replace(/\r/g, "");
+  return bundledOrigin === true
+    && normalizedSource === normalizedBundledSource;
+}
+
+/**
+ * Persist ordinary assignments unchanged, including genuine user confirmations,
+ * but omit the automatic bundled-sample assignment. The separate exact-source
+ * bundled-origin marker may restore the sample bootstrap without converting
+ * that automatic setup into an ordinary saved program-tool confirmation.
+ */
+export function toolAssignmentsForPersistence(assignments) {
+  if (!assignments || typeof assignments !== "object" || Array.isArray(assignments)) return {};
+  return Object.fromEntries(Object.entries(assignments).filter(([, assignment]) => (
+    assignment
+    && typeof assignment === "object"
+    && !Array.isArray(assignment)
+    && assignment.confirmationSource !== "bundled-sample"
+  )));
 }
 
 export function extractProgramToolCalls(source, {nearbyCommentWindow = 12} = {}) {
@@ -191,11 +281,13 @@ export function reviseToolAssignmentSetup(assignment, changes = {}) {
     ? changes
     : {};
   const changed = Object.entries(normalizedChanges).some(([key, value]) => current[key] !== value);
-  return {
+  const revised = {
     ...current,
     ...normalizedChanges,
     confirmed: changed ? false : current.confirmed === true,
   };
+  if (changed) delete revised.confirmationSource;
+  return revised;
 }
 
 export function reconcileToolAssignments(toolCalls, previousAssignments = {}, scopeOptions = null) {

@@ -218,6 +218,7 @@
             <summary><span>PROGRAM TOOLS</span><strong id="programToolSummary">NO T CALLS</strong></summary>
             <div class="tool-assembly-body">
               <p>Each executable exact T word is mapped to this exact filename and program text only. Header comments can suggest a family, but they never confirm a tool, datum, cutting direction, or mounted setup. Comments immediately before or after a T call are considered.</p>
+              <button id="toolLibraryButton" type="button" class="tool-library-open" aria-haspopup="dialog" aria-controls="toolLibraryDialog">Browse tool library</button>
               <div id="programToolList" class="program-tool-list" aria-live="polite">
                 <div class="program-tool-empty">Plot a program containing a T call to assign its tools.</div>
               </div>
@@ -340,6 +341,70 @@
           </div>
         </footer>
       </form>
+    </dialog>
+
+    <dialog id="toolLibraryDialog" class="tool-library-dialog" aria-labelledby="toolLibraryTitle" aria-describedby="toolLibraryDescription">
+      <div class="tool-library-shell">
+        <header class="tool-library-header">
+          <div>
+            <span class="eyebrow">SOURCE-LINKED TOOLING</span>
+            <h2 id="toolLibraryTitle">Tool Library</h2>
+            <p id="toolLibraryDescription">Browse holders, inserts, and explicitly compatible mounted assemblies. Catalog-only records may establish identity, dimensions, or compatibility without proving a mounted outline, programmed reference, cutting model, or collision authority.</p>
+          </div>
+          <button id="toolLibraryClose" type="button" class="dialog-close close-icon" aria-label="Close tool library"></button>
+        </header>
+
+        <div class="tool-library-toolbar">
+          <label class="tool-library-search" for="toolLibrarySearch">
+            <span>Search library</span>
+            <input id="toolLibrarySearch" type="search" autocomplete="off" spellcheck="false" placeholder="Manufacturer, catalog number, ISO code, family…">
+          </label>
+          <div class="tool-library-tabs" role="tablist" aria-label="Tool library record type">
+            <button id="toolLibraryTabAssemblies" type="button" class="tool-library-tab active" data-library-tab="assemblies" role="tab" aria-selected="true" aria-controls="toolLibraryTabPanel">Mounted assemblies</button>
+            <button id="toolLibraryTabHolders" type="button" class="tool-library-tab" data-library-tab="holders" role="tab" aria-selected="false" aria-controls="toolLibraryTabPanel" tabindex="-1">Holders</button>
+            <button id="toolLibraryTabInserts" type="button" class="tool-library-tab" data-library-tab="inserts" role="tab" aria-selected="false" aria-controls="toolLibraryTabPanel" tabindex="-1">Inserts</button>
+          </div>
+          <fieldset class="tool-library-filters">
+            <legend>Filter tool library</legend>
+            <label for="toolLibraryFamilyFilter"><span>Family</span><select id="toolLibraryFamilyFilter"><option value="">All families</option><option value="turn">Turning</option><option value="groove-profile">Groove / profile</option><option value="parting">Parting / cutoff</option></select></label>
+            <label for="toolLibraryShapeFilter"><span>Shape</span><select id="toolLibraryShapeFilter"><option value="">All shapes</option><option value="C">C · 80°</option><option value="D">D · 55°</option><option value="V">V · 35°</option><option value="groove">Groove / profile</option><option value="parting">Parting / cutoff</option></select></label>
+            <label for="toolLibraryAuthorityFilter"><span>Display authority</span><select id="toolLibraryAuthorityFilter"><option value="">All display tiers</option><option value="manufacturer-cad-projection">Manufacturer CAD projection</option><option value="catalog-construction">Catalog construction</option><option value="catalog-only">Catalog record only</option></select></label>
+          </fieldset>
+        </div>
+
+        <div class="tool-library-content">
+          <section id="toolLibraryTabPanel" class="tool-library-results-pane" role="tabpanel" aria-label="Tool library records">
+            <div class="tool-library-pane-heading"><span id="toolLibraryResultsTitle">MOUNTED ASSEMBLIES</span><strong id="toolLibraryResultCount" aria-live="polite">0 RESULTS</strong></div>
+            <div id="toolLibraryResults" class="tool-library-results" role="list" aria-label="Tool library results">
+              <div class="tool-library-empty" role="listitem"><strong>Library records load locally.</strong><span>Catalog-only entries remain browse-only until a mounted display or cutting contract is explicitly supported.</span></div>
+            </div>
+          </section>
+
+          <article id="toolLibraryDetail" class="tool-library-detail" tabindex="-1" aria-labelledby="toolLibraryDetailTitle">
+            <header>
+              <div><span class="eyebrow">RECORD DETAILS</span><h3 id="toolLibraryDetailTitle">Select a library record</h3></div>
+              <span class="tool-library-revision">NO REVISION</span>
+            </header>
+            <p class="tool-library-detail-copy">Details will show the exact holder, insert, mounted compatibility, retained sources, and the independent authority of each supported capability.</p>
+            <div class="tool-library-authorities" aria-label="Selected record authority">
+              <div class="tool-library-authority" data-library-authority="display"><span>DISPLAY</span><strong>NOT ESTABLISHED</strong></div>
+              <div class="tool-library-authority" data-library-authority="reference"><span>REFERENCE</span><strong>NOT ESTABLISHED</strong></div>
+              <div class="tool-library-authority blocked" data-library-authority="cutting"><span>CUTTING</span><strong>BLOCKED</strong></div>
+              <div class="tool-library-authority blocked" data-library-authority="collision"><span>COLLISION</span><strong>BLOCKED</strong></div>
+            </div>
+            <div class="tool-library-detail-empty">
+              <strong>No record selected</strong>
+              <span>Select a mounted assembly, holder, or insert to inspect its catalog identity, compatible records, source evidence, dimensions, and limitations.</span>
+            </div>
+          </article>
+        </div>
+
+        <footer class="tool-library-footer">
+          <p>Assigning a catalog record never confirms its programmed datum, cutting direction, stock-removal model, or collision clearance.</p>
+          <label for="toolLibraryTarget"><span>Assignment target</span><select id="toolLibraryTarget"><option value="">Choose an executable T call</option></select></label>
+          <button id="toolLibraryAssign" type="button" class="button primary" disabled>Assign mounted assembly</button>
+        </footer>
+      </div>
     </dialog>
 
     <dialog id="compareDialog" class="compare-dialog" aria-labelledby="compareDialogTitle">

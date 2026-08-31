@@ -1,4 +1,4 @@
-import {parseGcode, programBounds, segmentLength} from "./gcode.mjs";
+import {parseGcode, programBounds, segmentLength, spindleStateAtLine} from "./gcode.mjs";
 import {cycleTimeAtPosition, estimateCycleTime, formatCycleTime} from "./runtime.mjs";
 import {
   buildStockProfile, collisionPointForSegment, extendStockProfile, findCollisions, stockContourPoints,
@@ -10,10 +10,16 @@ import {graphicsQualityPreset, renderGraphicsQualityPreset} from "./graphics-qua
 import {createFrameScheduler} from "./render-scheduler.mjs";
 import {
   buildToolAssembly2d, buildToolAssemblyDisplay2d, DEFAULT_TOOL_ASSEMBLY_2D, listSelectableToolAssemblies2d,
-  sampleToolNoseArc, TOOL_ASSEMBLY_2D_STATUS, toolAssembly2dById, toolReferencePointForExecution,
+  resolveAssignableToolAssembly2d, TOOL_ASSEMBLY_2D_STATUS, toolAssembly2dById, toolReferencePointForExecution,
 } from "./tool-assembly.mjs";
 import {
-  activeToolKeyAtLine, programAssignmentScope, reconcileToolAssignments, reviseToolAssignmentSetup,
+  TOOL_LIBRARY_CATALOG, catalogDiamondInsertOutline2d, listToolLibraryAssemblies,
+  toolLibraryAssemblyById, toolLibraryAssemblyDetail,
+} from "./tool-library.mjs";
+import {
+  activeToolKeyAtLine, createVersionedToolAssignment, isExactBundledProgram, normalizeVersionedToolAssignment,
+  programAssignmentScope, reconcileToolAssignments, reviseToolAssignmentSetup, toolAssignmentAssemblyRef,
+  toolAssignmentsForPersistence,
 } from "./program-tools.mjs";
 import {
   arcGeometry, geometryHitAt, geometryMeasurement, geometryPointAt, lineGeometry, motionGeometry, polylineGeometry, rectangleGeometry,
@@ -123,6 +129,12 @@ const elements = {
   view2d: $("view2dButton"), view3d: $("view3dButton"),
   toolOverlay: $("toolOverlayButton"), toolVerificationBadge: $("toolVerificationBadge"),
   programToolsSetup: $("programToolsSetup"), programToolSummary: $("programToolSummary"), programToolList: $("programToolList"),
+  toolLibraryButton: $("toolLibraryButton"), toolLibraryDialog: $("toolLibraryDialog"), toolLibraryClose: $("toolLibraryClose"),
+  toolLibrarySearch: $("toolLibrarySearch"), toolLibraryFamilyFilter: $("toolLibraryFamilyFilter"),
+  toolLibraryShapeFilter: $("toolLibraryShapeFilter"), toolLibraryAuthorityFilter: $("toolLibraryAuthorityFilter"),
+  toolLibraryResults: $("toolLibraryResults"), toolLibraryResultsTitle: $("toolLibraryResultsTitle"),
+  toolLibraryResultCount: $("toolLibraryResultCount"), toolLibraryDetail: $("toolLibraryDetail"),
+  toolLibraryTarget: $("toolLibraryTarget"), toolLibraryAssign: $("toolLibraryAssign"),
   viewCube: $("viewCube"), viewCubeCanvas: $("viewCubeCanvas"), viewCubeHome: $("viewCubeHome"),
   graphicsQuality: $("graphicsQuality"), graphicsQualityHint: $("graphicsQualityHint"),
   toolpathToggle: $("toolpathToggle"),
@@ -144,7 +156,8 @@ const state = {
   componentGeometry: [], geometryHover: null, geometrySelection: null,
   dimensions: [], dimensionMode: false,
   showTool2d: false,
-  toolAssignments: {}, toolAssignmentRevision: 0, toolAssignmentScope: null,
+  toolAssignments: {}, toolAssignmentRevision: 0, toolAssignmentScope: null, bundledSample: false,
+  toolLibraryTab: "assemblies", toolLibrarySelection: null,
 };
 const ctx = elements.canvas.getContext("2d");
 const navigation3dRenderer = createFrameScheduler({
@@ -168,6 +181,7 @@ const programSearch = {
 const programTextMeasureContext = document.createElement("canvas").getContext("2d");
 const STOCK_FRAME_CACHE_LIMIT = 64;
 const THREE_D_SETTLE_MS = 850;
+const TOOL_LIBRARY_SOURCE_BY_ID = new Map(TOOL_LIBRARY_CATALOG.sources.map((source) => [source.id, source]));
 
 function programEditorMetrics() {
   const style = getComputedStyle(elements.input);
@@ -373,6 +387,12 @@ function closeProgramSearch() {
 }
 
 function markProgramChanged() {
+  if (state.bundledSample) {
+    state.toolAssignments = {};
+    state.toolAssignmentRevision += 1;
+    state.stockProfileCache = null;
+  }
+  state.bundledSample = false;
   state.programDirty = true;
   state.highlightedSourceLine = null;
   positionProgramLineHighlight();
@@ -446,8 +466,9 @@ function persistSession() {
       preferences,
       fileName: elements.fileName.textContent,
       program: elements.input.value,
-      toolAssignments: state.toolAssignments,
+      toolAssignments: toolAssignmentsForPersistence(state.toolAssignments),
       toolAssignmentScope: state.toolAssignmentScope,
+      bundledSample: isExactBundledProgram(elements.input.value, sampleProgram, state.bundledSample),
     }));
   } catch {
     // Storage can be unavailable in hardened browsers; G-Code Studio remains fully usable.
@@ -472,6 +493,7 @@ function restoreSession() {
     if (typeof saved.program === "string" && saved.program.trim()) {
       elements.input.value = saved.program;
       elements.fileName.textContent = typeof saved.fileName === "string" ? saved.fileName : "restored-program.nc";
+      state.bundledSample = isExactBundledProgram(saved.program, sampleProgram, saved.bundledSample === true);
       if (saved.toolAssignments && typeof saved.toolAssignments === "object" && !Array.isArray(saved.toolAssignments)) {
         state.toolAssignments = Object.fromEntries(Object.entries(saved.toolAssignments).filter(([key, assignment]) => (
           /^T[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/i.test(key)
@@ -695,9 +717,10 @@ async function saveMachineEditor(event) {
   }
 }
 
-function loadProgram(name, content) {
+function loadProgram(name, content, {bundledSample = false} = {}) {
   state.toolAssignments = {};
   state.toolAssignmentScope = null;
+  state.bundledSample = bundledSample === true;
   state.toolAssignmentRevision += 1;
   state.stockProfileCache = null;
   elements.input.value = content;
@@ -1478,7 +1501,10 @@ function toolCallsForKey(toolKey) {
 
 function configuredToolAssembly2d(toolKey = activeProgramToolKey()) {
   const assignment = toolKey ? state.toolAssignments[toolKey] : null;
-  const definition = assignment?.toolId ? toolAssembly2dById(assignment.toolId) : null;
+  const assemblyRef = toolAssignmentAssemblyRef(assignment);
+  const definition = assemblyRef && assemblyRef.legacy !== true
+    ? resolveAssignableToolAssembly2d({id: assemblyRef.id, revision: assemblyRef.revision})
+    : null;
   if (!definition) return null;
   return {
     ...definition,
@@ -1492,7 +1518,7 @@ function configuredToolAssembly2d(toolKey = activeProgramToolKey()) {
 
 function toolAssignmentReadiness(toolKey) {
   const assignment = state.toolAssignments[toolKey];
-  if (!assignment?.toolId) return {status: "unassigned", ready: false, errors: ["No tool selected."]};
+  if (!toolAssignmentAssemblyRef(assignment)) return {status: "unassigned", ready: false, errors: ["No tool selected."]};
   const configured = configuredToolAssembly2d(toolKey);
   if (!configured) return {status: "blocked", ready: false, errors: ["The selected tool definition is unavailable."]};
   const model = buildToolAssembly2d(configured, {z: 0, x: 0});
@@ -1577,7 +1603,8 @@ function invalidateToolAssignments({renderControls = true} = {}) {
 }
 
 function toolChoiceLabel(definition) {
-  const status = TOOL_ASSEMBLY_2D_STATUS[definition.verification] || TOOL_ASSEMBLY_2D_STATUS.unverified;
+  const status = TOOL_ASSEMBLY_2D_STATUS[definition.displayVerification || definition.verification]
+    || TOOL_ASSEMBLY_2D_STATUS.unverified;
   return `${definition.name} · ${status} · 2D OUTLINE`;
 }
 
@@ -1624,6 +1651,7 @@ function renderProgramToolAssignments() {
     const firstSuggestion = toolCalls.flatMap((call) => call.suggestions || [])[0] || null;
     const card = document.createElement("section");
     card.className = `program-tool-card ${readiness.status}`;
+    card.dataset.toolKey = toolKey;
 
     const heading = document.createElement("div");
     heading.className = "program-tool-heading";
@@ -1645,7 +1673,10 @@ function renderProgramToolAssignments() {
 
     const controls = document.createElement("div");
     controls.className = "program-tool-controls";
-    const selectedDefinition = assignment.toolId ? toolAssembly2dById(assignment.toolId) : null;
+    const assignmentRef = toolAssignmentAssemblyRef(assignment);
+    const selectedDefinition = assignmentRef
+      ? toolAssembly2dById(assignmentRef.id, assignmentRef.legacy === true ? null : assignmentRef.revision)
+      : null;
     const toolChoices = library.map((definition) => [definition.id, toolChoiceLabel(definition)]);
     if (selectedDefinition && !library.some((definition) => definition.id === selectedDefinition.id)) {
       toolChoices.unshift([selectedDefinition.id, `${selectedDefinition.name} · NOT IMPLEMENTED — SELECT ANOTHER TOOL`, true]);
@@ -1653,19 +1684,25 @@ function renderProgramToolAssignments() {
     controls.append(selectField(
       "Tool assembly",
       toolChoices,
-      assignment.toolId,
+      assignmentRef?.id,
       firstSuggestion ? `Unassigned — suggestion: ${firstSuggestion.label}` : "Unassigned — select exact tool",
       (toolId) => {
-        const definition = toolAssembly2dById(toolId);
-        state.toolAssignments[toolKey] = toolId ? {
-          toolId,
-          confirmed: false,
+        const selected = library.find((entry) => entry.id === toolId) || null;
+        const definition = selected ? resolveAssignableToolAssembly2d({id: selected.id, revision: selected.revision}) : null;
+        state.toolAssignments[toolKey] = toolId ? createVersionedToolAssignment(definition, {
           tipDatum: definition?.cuttingModel?.tipDatum || null,
           axialDirection: definition?.cuttingModel?.axialDirection || null,
-        } : {};
+        }) : {};
         invalidateToolAssignments();
       },
     ));
+
+    const browseLibrary = document.createElement("button");
+    browseLibrary.type = "button";
+    browseLibrary.className = "program-tool-browse";
+    browseLibrary.textContent = selectedDefinition ? "Browse / change in Tool Library" : "Choose from Tool Library";
+    browseLibrary.addEventListener("click", () => openToolLibrary(toolKey, assignmentRef?.id || null));
+    controls.append(browseLibrary);
 
     const definition = selectedDefinition;
     const datumChoices = definition?.cuttingModel?.tipDatumChoices || [];
@@ -1709,8 +1746,8 @@ function renderProgramToolAssignments() {
     const confirmation = document.createElement("button");
     confirmation.type = "button";
     confirmation.className = "program-tool-confirmation";
-    const requiredConfigurationComplete = Boolean(assignment.toolId)
-      && library.some((entry) => entry.id === assignment.toolId)
+    const requiredConfigurationComplete = Boolean(assignmentRef)
+      && library.some((entry) => entry.id === assignmentRef.id && Number(entry.revision) === Number(assignmentRef.revision))
       && (!datumChoices.length || Boolean(assignment.tipDatum))
       && (!directionChoices.length || Boolean(assignment.axialDirection));
     confirmation.disabled = !requiredConfigurationComplete;
@@ -1721,7 +1758,10 @@ function renderProgramToolAssignments() {
       : "Confirm mounted holder, insert, hand, and programmed reference convention.";
     confirmation.addEventListener("click", () => {
       const confirmed = state.toolAssignments[toolKey]?.confirmed !== true;
-      state.toolAssignments[toolKey] = {...state.toolAssignments[toolKey], confirmed};
+      const nextAssignment = {...state.toolAssignments[toolKey], confirmed};
+      if (confirmed) nextAssignment.confirmationSource = "user";
+      else delete nextAssignment.confirmationSource;
+      state.toolAssignments[toolKey] = nextAssignment;
       confirmation.setAttribute("aria-pressed", String(confirmed));
       confirmation.textContent = confirmed
         ? "Mounted setup confirmed — click to clear confirmation."
@@ -1758,15 +1798,516 @@ function renderProgramToolAssignments() {
     if (definition?.geometryNotice) {
       const envelope = document.createElement("span");
       envelope.className = "program-tool-chip";
-      envelope.textContent = definition.renderingClaim === "catalog-scaled-envelope"
-        ? "2D CATALOG ENVELOPE · SEAT/HEAD OMITTED"
-        : "GEOMETRY UNVERIFIED";
+      envelope.textContent = definition.renderingClaim === "manufacturer-cad-projection"
+        ? "2D KENNAMETAL CAD PROJECTION"
+        : definition.renderingClaim === "catalog-connected-envelope"
+          ? "2D CONNECTED CATALOG ENVELOPE"
+        : definition.renderingClaim === "catalog-scaled-envelope"
+          ? "2D CATALOG ENVELOPE · SEAT/HEAD OMITTED"
+          : "GEOMETRY UNVERIFIED";
       envelope.title = definition.geometryNotice;
       meta.append(envelope);
     }
     card.append(meta);
     elements.programToolList.append(card);
   }
+}
+
+function toolLibraryRecordKey(record, tab = state.toolLibraryTab) {
+  return tab === "assemblies" ? record.id : record.revisionRef;
+}
+
+function toolLibraryRecordName(record, tab = state.toolLibraryTab) {
+  if (tab === "assemblies") return record.name;
+  const kind = tab === "holders" ? "Holder" : "Insert";
+  return `${record.manufacturer} ${record.catalogId?.iso || record.catalogId?.ansi || record.materialNumber} · ${kind}`;
+}
+
+function toolLibraryRecordShape(record, tab = state.toolLibraryTab) {
+  if (tab === "assemblies") return record.facets.shape;
+  if (tab === "holders") return record.cuttingGeometry?.insertShape || (record.cuttingGeometry?.application?.includes("groove") ? "groove" : null);
+  return record.cuttingGeometry?.shape || null;
+}
+
+function toolLibraryRecordFamily(record, tab = state.toolLibraryTab) {
+  if (tab === "assemblies") return record.facets.family === "turning" ? "turn" : "groove-profile";
+  const application = String(record.cuttingGeometry?.application || "");
+  return application.includes("groove") || application.includes("back-turn") ? "groove-profile" : "turn";
+}
+
+function toolLibraryRecordDisplayTier(record, tab = state.toolLibraryTab) {
+  if (tab !== "assemblies") return "catalog-only";
+  const stateValue = record.claims?.displayGeometry?.state;
+  if (stateValue === "manufacturer-cad-projection") return "manufacturer-cad-projection";
+  if (stateValue === "catalog-construction") return "catalog-construction";
+  return "catalog-only";
+}
+
+function toolLibraryRecordsForTab(tab = state.toolLibraryTab) {
+  if (tab === "holders") return [...TOOL_LIBRARY_CATALOG.holders];
+  if (tab === "inserts") return [...TOOL_LIBRARY_CATALOG.inserts];
+  return listToolLibraryAssemblies();
+}
+
+function toolLibrarySearchText(record, tab = state.toolLibraryTab) {
+  if (tab === "assemblies") {
+    const detail = toolLibraryAssemblyDetail(record.id);
+    return JSON.stringify({assembly: record, holder: detail?.holder, insert: detail?.insert, compatibility: detail?.compatibilityEdge}).toLowerCase();
+  }
+  const related = TOOL_LIBRARY_CATALOG.assemblies.filter((assembly) => (
+    tab === "holders" ? assembly.holderRevisionRef === record.revisionRef : assembly.insertRevisionRef === record.revisionRef
+  ));
+  return JSON.stringify({record, related}).toLowerCase();
+}
+
+function filteredToolLibraryRecords() {
+  const queryTokens = elements.toolLibrarySearch.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const family = elements.toolLibraryFamilyFilter.value;
+  const shape = elements.toolLibraryShapeFilter.value;
+  const authority = elements.toolLibraryAuthorityFilter.value;
+  return toolLibraryRecordsForTab().filter((record) => (
+    (!family || toolLibraryRecordFamily(record) === family)
+    && (!shape || toolLibraryRecordShape(record) === shape)
+    && (!authority || toolLibraryRecordDisplayTier(record) === authority)
+    && (!queryTokens.length || queryTokens.every((token) => toolLibrarySearchText(record).includes(token)))
+  ));
+}
+
+function authorityLabel(claim) {
+  return String(claim?.state || "unavailable").replaceAll("-", " ").toUpperCase();
+}
+
+function makeAuthority(name, claim) {
+  const item = document.createElement("div");
+  item.className = `tool-library-authority ${claim?.available ? "available" : "blocked"}`;
+  item.dataset.libraryAuthority = name;
+  const label = document.createElement("span");
+  label.textContent = name.toUpperCase();
+  const value = document.createElement("strong");
+  value.textContent = authorityLabel(claim);
+  if (claim?.blockedReason) item.title = claim.blockedReason;
+  item.append(label, value);
+  if (claim?.blockedReason) {
+    const reason = document.createElement("small");
+    reason.textContent = claim.blockedReason;
+    item.append(reason);
+  }
+  return item;
+}
+
+function svgNode(tag, attributes = {}) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, String(value));
+  return node;
+}
+
+function appendSvgPolyline(svg, points, {className = "", closed = true} = {}) {
+  if (!points?.length) return;
+  const node = svgNode(closed ? "polygon" : "polyline", {
+    points: points.map((point) => `${point.x},${point.y}`).join(" "),
+    class: className,
+    fill: "none",
+  });
+  svg.append(node);
+}
+
+function insertLibraryPreview(insert) {
+  const svg = svgNode("svg", {class: "tool-library-preview-svg", role: "img", "aria-label": `${insert.catalogId.iso} catalog-dimension insert plan`});
+  const dimensions = insert.dimensions || {};
+  if (insert.cuttingGeometry?.shape === "groove") {
+    const width = dimensions.cuttingWidth || 1;
+    const depth = dimensions.cuttingDepth || dimensions.profileMaximum || width;
+    const padding = Math.max(width, depth) * 0.2;
+    svg.setAttribute("viewBox", `${-padding} ${-padding} ${width + padding * 2} ${depth + padding * 2}`);
+    const outline = svgNode("rect", {x: 0, y: 0, width, height: depth, rx: dimensions.cornerRadius || 0, class: "insert-outline", fill: "none"});
+    svg.append(outline);
+    return svg;
+  }
+  const angle = insert.cuttingGeometry?.includedAngleDegrees;
+  const ic = dimensions.inscribedCircle;
+  if (!(angle > 0) || !(ic > 0)) return svg;
+  const points = catalogDiamondInsertOutline2d({
+    includedAngleDegrees: angle,
+    inscribedCircle: ic,
+    noseRadius: dimensions.noseRadius,
+  }).points;
+  const maximum = Math.max(...points.flatMap((point) => [Math.abs(point.x), Math.abs(point.y)]), dimensions.holeDiameter || 0);
+  const padding = maximum * 0.18;
+  svg.setAttribute("viewBox", `${-maximum - padding} ${-maximum - padding} ${(maximum + padding) * 2} ${(maximum + padding) * 2}`);
+  appendSvgPolyline(svg, points, {className: "insert-outline"});
+  if (dimensions.holeDiameter > 0) svg.append(svgNode("circle", {cx: 0, cy: 0, r: dimensions.holeDiameter / 2, class: "insert-hole", fill: "none"}));
+  svg.append(svgNode("circle", {cx: 0, cy: 0, r: ic / 2, class: "insert-ic", fill: "none"}));
+  return svg;
+}
+
+function holderLibraryPreview(holder) {
+  const svg = svgNode("svg", {class: "tool-library-preview-svg", role: "img", "aria-label": `${holder.catalogId.iso} published holder envelope dimensions`});
+  const dimensions = holder.dimensions || {};
+  const width = dimensions.shankWidth || 1;
+  const length = dimensions.overallLength || 1;
+  const headLength = Math.min(length, dimensions.headLength || 0);
+  const padding = width * 0.45;
+  svg.setAttribute("viewBox", `${-padding} ${-padding} ${width + padding * 2} ${length + padding * 2}`);
+  svg.append(svgNode("rect", {x: 0, y: 0, width, height: length, class: "holder-envelope", fill: "none"}));
+  if (headLength > 0) svg.append(svgNode("rect", {x: 0, y: length - headLength, width, height: headLength, class: "holder-head-zone", fill: "none"}));
+  return svg;
+}
+
+function mountedAssemblyPreview(detail) {
+  const definition = toolAssembly2dById(detail.assembly.id);
+  if (!definition || Number(definition.revision) !== Number(detail.assembly.revision)) return null;
+  const model = buildToolAssemblyDisplay2d(definition, {z: 0, x: 0}, {spindleDirection: "m4", spindleRunning: true});
+  if (!model.valid) return null;
+  const paths = model.components.flatMap((component) => (component.paths || [{points: component.outline, closed: true}]).map((path) => ({...path, role: component.role})));
+  const allPoints = paths.flatMap((path) => path.points || []).map((point) => ({x: point.z, y: -point.x}));
+  if (!allPoints.length) return null;
+  const minimumX = Math.min(...allPoints.map((point) => point.x));
+  const maximumX = Math.max(...allPoints.map((point) => point.x));
+  const minimumY = Math.min(...allPoints.map((point) => point.y));
+  const maximumY = Math.max(...allPoints.map((point) => point.y));
+  const padding = Math.max(maximumX - minimumX, maximumY - minimumY) * 0.06;
+  const svg = svgNode("svg", {class: "tool-library-preview-svg mounted", role: "img", "aria-label": `${detail.assembly.name} retained manufacturer CAD top-plan projection`});
+  svg.setAttribute("viewBox", `${minimumX - padding} ${minimumY - padding} ${maximumX - minimumX + padding * 2} ${maximumY - minimumY + padding * 2}`);
+  for (const path of paths) {
+    appendSvgPolyline(svg, (path.points || []).map((point) => ({x: point.z, y: -point.x})), {
+      className: path.role === "insert" ? "insert-outline" : "holder-envelope",
+      closed: path.closed !== false,
+    });
+  }
+  return svg;
+}
+
+function dimensionLabel(key) {
+  return ({
+    shankHeight: "Shank height H", shankWidth: "Shank width B", fDimension: "F dimension",
+    overallLength: "Overall length L1", headLength: "Head length LH", endChamfer: "End chamfer B4",
+    cuttingDepth: "Cutting depth", inscribedCircle: "Insert IC", cuttingEdgeLength: "Cutting edge L10",
+    thickness: "Thickness S", noseRadius: "Corner radius Rε", holeDiameter: "Hole diameter D1",
+    cuttingWidth: "Cutting width W", profileApMaximum: "Profile AP max", cornerRadius: "Corner radius RR",
+  })[key] || key.replace(/([a-z])([A-Z])/g, "$1 $2");
+}
+
+function dimensionValue(value) {
+  const millimeters = Number(value);
+  if (!Number.isFinite(millimeters)) return String(value);
+  const metric = String(millimeters);
+  const inches = (millimeters / 25.4).toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  return `${metric} mm · ${inches} in`;
+}
+
+function dimensionSection(title, record) {
+  const section = document.createElement("section");
+  section.className = "tool-library-section";
+  const heading = document.createElement("h4");
+  heading.textContent = title;
+  const grid = document.createElement("dl");
+  grid.className = "tool-library-dimensions";
+  for (const [key, value] of Object.entries(record?.dimensions || {})) {
+    if (key === "units" || value === null || value === undefined) continue;
+    const term = document.createElement("dt");
+    term.textContent = dimensionLabel(key);
+    const description = document.createElement("dd");
+    description.textContent = dimensionValue(value);
+    grid.append(term, description);
+  }
+  section.append(heading, grid);
+  return section;
+}
+
+function sourceLinkLabel(source) {
+  const sourceIdentity = source.id.split(":");
+  const componentIndex = sourceIdentity.findIndex((part) => part === "holder" || part === "insert");
+  const component = componentIndex >= 0
+    ? `${sourceIdentity[componentIndex] === "holder" ? "Holder" : "Insert"} ${sourceIdentity[componentIndex + 1] || "source"}`
+    : "Manufacturer source";
+  const kind = ({
+    "manufacturer-product-page": "official product dimensions / drawing",
+    "manufacturer-cad-step": "official CAD STEP",
+    "manufacturer-cad-manifest": "official CAD manifest",
+  })[source.kind] || source.kind.replaceAll("-", " ");
+  return `${component} · ${kind}`;
+}
+
+function sourceSection(sources) {
+  const section = document.createElement("section");
+  section.className = "tool-library-section";
+  const heading = document.createElement("h4");
+  heading.textContent = "Official retained sources";
+  const list = document.createElement("ul");
+  list.className = "tool-library-sources";
+  for (const source of sources) {
+    if (!source) continue;
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = source.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = sourceLinkLabel(source);
+    const meta = document.createElement("span");
+    meta.textContent = `${source.publisher} · retrieved ${source.retrievedOn}${source.sha256 ? ` · SHA-256 ${source.sha256.slice(0, 12)}…` : ""}`;
+    item.append(link, meta);
+    list.append(item);
+  }
+  section.append(heading, list);
+  return section;
+}
+
+function componentSources(record) {
+  return [...new Set(record?.sourceRefs || [])].map((sourceRef) => TOOL_LIBRARY_SOURCE_BY_ID.get(sourceRef)).filter(Boolean);
+}
+
+function relatedAssemblies(record, tab = state.toolLibraryTab) {
+  if (tab === "assemblies") return [record];
+  return TOOL_LIBRARY_CATALOG.assemblies.filter((assembly) => (
+    tab === "holders" ? assembly.holderRevisionRef === record.revisionRef : assembly.insertRevisionRef === record.revisionRef
+  ));
+}
+
+function compatibilitySection(record, tab = state.toolLibraryTab) {
+  const section = document.createElement("section");
+  section.className = "tool-library-section";
+  const heading = document.createElement("h4");
+  heading.textContent = tab === "assemblies" ? "Explicit compatibility" : "Mounted assembly records";
+  const list = document.createElement("div");
+  list.className = "tool-library-compatibility";
+  for (const assembly of relatedAssemblies(record, tab)) {
+    const detail = toolLibraryAssemblyDetail(assembly.id);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `${assembly.name} · ${detail?.compatibilityEdge?.state?.replaceAll("-", " ") || "recorded"}`;
+    button.addEventListener("click", () => {
+      resetToolLibraryFilters();
+      state.toolLibraryTab = "assemblies";
+      state.toolLibrarySelection = assembly.id;
+      syncToolLibraryTabs();
+      renderToolLibrary();
+      focusToolLibraryDetail();
+    });
+    list.append(button);
+  }
+  if (!list.childElementCount) {
+    const empty = document.createElement("span");
+    empty.textContent = "No explicit mounted compatibility edge is retained.";
+    list.append(empty);
+  }
+  section.append(heading, list);
+  return section;
+}
+
+function renderToolLibraryDetail(record) {
+  elements.toolLibraryDetail.replaceChildren();
+  if (!record) {
+    const empty = document.createElement("div");
+    empty.className = "tool-library-detail-empty";
+    const heading = document.createElement("h3");
+    heading.id = "toolLibraryDetailTitle";
+    heading.textContent = "No matching record selected";
+    const copy = document.createElement("span");
+    copy.textContent = "Clear one or more filters to inspect a sourced holder, insert, or mounted assembly record.";
+    empty.append(heading, copy);
+    elements.toolLibraryDetail.append(empty);
+    elements.toolLibraryAssign.disabled = true;
+    return;
+  }
+  const tab = state.toolLibraryTab;
+  const detail = tab === "assemblies" ? toolLibraryAssemblyDetail(record.id) : null;
+  const header = document.createElement("header");
+  const titleBlock = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  eyebrow.className = "eyebrow";
+  eyebrow.textContent = tab === "assemblies" ? "MOUNTED ASSEMBLY" : tab === "holders" ? "HOLDER COMPONENT" : "INSERT COMPONENT";
+  const title = document.createElement("h3");
+  title.id = "toolLibraryDetailTitle";
+  title.textContent = toolLibraryRecordName(record, tab);
+  titleBlock.append(eyebrow, title);
+  const revision = document.createElement("span");
+  revision.className = "tool-library-revision";
+  revision.textContent = `REV ${record.revision}`;
+  header.append(titleBlock, revision);
+  elements.toolLibraryDetail.append(header);
+
+  const copy = document.createElement("p");
+  copy.className = "tool-library-detail-copy";
+  copy.textContent = tab === "assemblies"
+    ? (detail.compatibilityEdge.evidence || record.assignment.blockedReason)
+    : `${record.catalogId.iso} · material ${record.materialNumber}. Component dimensions and identity are manufacturer published; mounted placement remains an independent assembly claim.`;
+  elements.toolLibraryDetail.append(copy);
+
+  const authorities = document.createElement("div");
+  authorities.className = "tool-library-authorities";
+  authorities.setAttribute("aria-label", "Selected record authority");
+  const unavailable = {state: "not established", available: false};
+  authorities.append(
+    makeAuthority("display", detail?.assembly.claims.displayGeometry || unavailable),
+    makeAuthority("reference", detail?.assembly.claims.mountedReference || unavailable),
+    makeAuthority("cutting", detail?.assembly.claims.cuttingModel || unavailable),
+    makeAuthority("collision", detail?.assembly.claims.collisionModel || unavailable),
+  );
+  elements.toolLibraryDetail.append(authorities);
+
+  const preview = document.createElement("figure");
+  preview.className = "tool-library-preview";
+  const previewSvg = detail?.assembly.claims.displayGeometry.available
+    ? mountedAssemblyPreview(detail)
+    : tab === "holders"
+      ? holderLibraryPreview(record)
+      : insertLibraryPreview(tab === "inserts" ? record : detail.insert);
+  if (previewSvg) preview.append(previewSvg);
+  const caption = document.createElement("figcaption");
+  const previewInsert = tab === "inserts" ? record : detail?.insert;
+  caption.textContent = detail?.assembly.claims.displayGeometry.available
+    ? "Retained manufacturer-CAD top-plan display projection at source scale."
+    : tab === "holders"
+      ? "Published shank envelope and head-length zone only — not a mounted holder-head outline."
+      : previewInsert?.cuttingGeometry?.shape === "groove"
+        ? "Standalone cutter envelope constructed from published cutting width, depth, and corner radius — not a mounted assembly transform."
+        : "Standalone insert plan constructed from published IC, included angle, nose radius, and hole dimensions — not a mounted assembly transform.";
+  preview.append(caption);
+  elements.toolLibraryDetail.append(preview);
+
+  if (tab === "assemblies") {
+    elements.toolLibraryDetail.append(
+      dimensionSection(`${detail.holder.catalogId.iso} holder dimensions`, detail.holder),
+      dimensionSection(`${detail.insert.catalogId.iso} insert dimensions`, detail.insert),
+      compatibilitySection(record, tab),
+      sourceSection(detail.sources),
+    );
+  } else {
+    elements.toolLibraryDetail.append(
+      dimensionSection(`${record.catalogId.iso} published dimensions`, record),
+      compatibilitySection(record, tab),
+      sourceSection(componentSources(record)),
+    );
+  }
+
+  const limitation = document.createElement("div");
+  limitation.className = "tool-library-limitation";
+  const limitationTitle = document.createElement("strong");
+  limitationTitle.textContent = detail?.assembly.assignment.assignable ? "Assignment boundary" : "Why assignment is blocked";
+  const limitationText = document.createElement("span");
+  limitationText.textContent = detail?.assembly.assignment.assignable
+    ? detail.assembly.assignment.blockedOutsideScope
+    : detail?.assembly.assignment.blockedReason || "A component record cannot be assigned without an explicit compatible mounted assembly.";
+  limitation.append(limitationTitle, limitationText);
+  elements.toolLibraryDetail.append(limitation);
+
+  const selectedTarget = elements.toolLibraryTarget.value;
+  elements.toolLibraryAssign.disabled = !(tab === "assemblies" && record.assignment.assignable && selectedTarget);
+  elements.toolLibraryAssign.textContent = tab === "assemblies" && record.assignment.assignable
+    ? "Assign mounted assembly"
+    : "Catalog record only";
+}
+
+function renderToolLibraryTargetOptions(preferredTarget = null) {
+  const previous = preferredTarget || elements.toolLibraryTarget.value;
+  elements.toolLibraryTarget.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Choose an executable T call";
+  elements.toolLibraryTarget.append(placeholder);
+  for (const toolKey of [...new Set((state.parsed.executableToolCalls || []).map((call) => call.key))]) {
+    const option = document.createElement("option");
+    option.value = toolKey;
+    option.textContent = `${toolKey} · line${toolCallsForKey(toolKey).length === 1 ? "" : "s"} ${toolCallsForKey(toolKey).map((call) => call.line).join(", ")}`;
+    elements.toolLibraryTarget.append(option);
+  }
+  if ([...elements.toolLibraryTarget.options].some((option) => option.value === previous)) elements.toolLibraryTarget.value = previous;
+  else if (elements.toolLibraryTarget.options.length === 2) elements.toolLibraryTarget.selectedIndex = 1;
+}
+
+function renderToolLibrary() {
+  const records = filteredToolLibraryRecords();
+  if (!records.some((record) => toolLibraryRecordKey(record) === state.toolLibrarySelection)) {
+    state.toolLibrarySelection = records.length ? toolLibraryRecordKey(records[0]) : null;
+  }
+  elements.toolLibraryResultsTitle.textContent = ({assemblies: "MOUNTED ASSEMBLIES", holders: "HOLDERS", inserts: "INSERTS"})[state.toolLibraryTab];
+  elements.toolLibraryResultCount.textContent = `${records.length} RESULT${records.length === 1 ? "" : "S"}`;
+  elements.toolLibraryResults.replaceChildren();
+  for (const record of records) {
+    const key = toolLibraryRecordKey(record);
+    const item = document.createElement("div");
+    item.setAttribute("role", "listitem");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `tool-library-result ${key === state.toolLibrarySelection ? "selected" : ""}`;
+    button.setAttribute("aria-pressed", String(key === state.toolLibrarySelection));
+    const heading = document.createElement("strong");
+    heading.textContent = toolLibraryRecordName(record);
+    const identity = document.createElement("span");
+    identity.textContent = state.toolLibraryTab === "assemblies"
+      ? `${record.revisionRef} · ${record.facets.shape} · ${record.facets.insertIcInches ? `${record.facets.insertIcInches} in IC` : "groove"}`
+      : `${record.revisionRef} · material ${record.materialNumber}`;
+    const badges = document.createElement("span");
+    badges.className = "tool-library-result-badges";
+    const sourceBadge = document.createElement("i");
+    sourceBadge.textContent = "MANUFACTURER SOURCE";
+    const authorityBadge = document.createElement("i");
+    authorityBadge.className = toolLibraryRecordDisplayTier(record) === "manufacturer-cad-projection" ? "verified" : "catalog";
+    authorityBadge.textContent = toolLibraryRecordDisplayTier(record) === "manufacturer-cad-projection" ? "CAD DISPLAY" : "CATALOG ONLY";
+    badges.append(sourceBadge, authorityBadge);
+    button.append(heading, identity, badges);
+    button.addEventListener("click", () => {
+      state.toolLibrarySelection = key;
+      renderToolLibrary();
+      focusToolLibraryDetail();
+    });
+    item.append(button);
+    elements.toolLibraryResults.append(item);
+  }
+  if (!records.length) {
+    const empty = document.createElement("div");
+    empty.className = "tool-library-empty";
+    empty.setAttribute("role", "listitem");
+    const title = document.createElement("strong");
+    title.textContent = "No matching records";
+    const copy = document.createElement("span");
+    copy.textContent = "Clear one or more filters to see the locally bundled manufacturer records.";
+    empty.append(title, copy);
+    elements.toolLibraryResults.append(empty);
+  }
+  const selected = records.find((record) => toolLibraryRecordKey(record) === state.toolLibrarySelection) || null;
+  renderToolLibraryDetail(selected);
+}
+
+function syncToolLibraryTabs() {
+  for (const tab of document.querySelectorAll(".tool-library-tab")) {
+    const active = tab.dataset.libraryTab === state.toolLibraryTab;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+  }
+}
+
+function setToolLibraryTab(tab) {
+  if (!["assemblies", "holders", "inserts"].includes(tab)) return;
+  state.toolLibraryTab = tab;
+  state.toolLibrarySelection = null;
+  syncToolLibraryTabs();
+  renderToolLibrary();
+}
+
+function resetToolLibraryFilters() {
+  elements.toolLibrarySearch.value = "";
+  elements.toolLibraryFamilyFilter.value = "";
+  elements.toolLibraryShapeFilter.value = "";
+  elements.toolLibraryAuthorityFilter.value = "";
+}
+
+function focusToolLibraryDetail() {
+  const stacked = window.matchMedia("(max-width: 740px)").matches;
+  elements.toolLibraryDetail.focus({preventScroll: !stacked});
+  if (stacked) elements.toolLibraryDetail.scrollIntoView({block: "start"});
+}
+
+function openToolLibrary(targetToolKey = null, selectedAssemblyId = null) {
+  if (selectedAssemblyId) resetToolLibraryFilters();
+  state.toolLibraryTab = "assemblies";
+  state.toolLibrarySelection = selectedAssemblyId || state.toolLibrarySelection || listToolLibraryAssemblies()[0]?.id || null;
+  syncToolLibraryTabs();
+  renderToolLibraryTargetOptions(targetToolKey);
+  renderToolLibrary();
+  elements.toolLibraryDialog.showModal();
+  requestAnimationFrame(() => elements.toolLibrarySearch.focus());
 }
 
 function toolPhysicalToScreen(point) {
@@ -1794,6 +2335,7 @@ function drawToolAssembly2d() {
   const configured = configuredToolAssembly2d(toolKey);
   const programmedReference = toolReferencePointForExecution(state.parsed.segments, state.visibleBlocks);
   const physicalReference = programmedReference ? {z: programmedReference.z, x: programmedReference.x * xScale()} : null;
+  const spindle = spindleStateAtLine(state.parsed.spindleEvents, state.programLine);
   const badgeStatus = elements.toolVerificationBadge.querySelector("strong");
   elements.toolVerificationBadge.hidden = false;
   if (!toolKey || !configured) {
@@ -1801,14 +2343,23 @@ function drawToolAssembly2d() {
     badgeStatus.textContent = toolKey ? `${toolKey} UNASSIGNED` : "NO ACTIVE TOOL";
     return;
   }
-  const model = buildToolAssemblyDisplay2d(configured, physicalReference);
+  const model = buildToolAssemblyDisplay2d(configured, physicalReference, {
+    spindleDirection: spindle.direction,
+    spindleRunning: spindle.running,
+  });
   if (!model.valid) {
     elements.toolVerificationBadge.classList.add("invalid");
     badgeStatus.textContent = `${toolKey} · OUTLINE UNAVAILABLE`;
     return;
   }
-  elements.toolVerificationBadge.classList.remove("invalid");
-  badgeStatus.textContent = `${toolKey} · 2D OUTLINE`;
+  const stoppedLabel = spindle.running === false ? " · STOPPED" : "";
+  const spindleLabel = spindle.direction === "m3"
+    ? `M3 FACE DOWN${stoppedLabel}`
+    : spindle.direction === "m4"
+      ? `M4 FACE UP${stoppedLabel}`
+      : "ROTATION UNKNOWN · DASHED";
+  elements.toolVerificationBadge.classList.toggle("invalid", spindle.direction === "unknown");
+  badgeStatus.textContent = `${toolKey} · ${spindleLabel}`;
 
   const tracePolygon = (points) => {
     points.forEach((point, index) => {
@@ -1821,13 +2372,17 @@ function drawToolAssembly2d() {
   ctx.lineCap = "round";
   const reference = toolPhysicalToScreen(model.referencePoint);
 
-  const strokePolygon = (points, stroke, lineWidth = 1.2) => {
+  const strokePath = (path, stroke, lineWidth = 1.2, dashed = false) => {
+    const points = path?.points || [];
+    if (points.length < 2) return;
     ctx.beginPath();
     tracePolygon(points);
-    ctx.closePath();
+    if (path.closed !== false) ctx.closePath();
     ctx.strokeStyle = stroke;
     ctx.lineWidth = lineWidth;
+    ctx.setLineDash(dashed ? [4, 3] : []);
     ctx.stroke();
+    ctx.setLineDash([]);
   };
 
   const componentStyle = {
@@ -1835,21 +2390,11 @@ function drawToolAssembly2d() {
     insert: ["#fde68a", 1.45],
     cutter: ["#fde68a", 1.45],
   };
-  const layerOrder = ["holder", "insert", "cutter"];
-  for (const role of layerOrder) {
-    const component = model.components.find((entry) => entry.role === role);
-    if (!component) continue;
-    const [stroke, lineWidth] = componentStyle[role];
-    strokePolygon(component.outline, stroke, lineWidth);
-  }
-
-  if (model.insert?.noseArc) {
-    const nose = sampleToolNoseArc(model.insert.noseArc, graphicsQuality().arcChordTolerance);
-    ctx.beginPath();
-    tracePolygon(nose);
-    ctx.strokeStyle = "#fff7d6";
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
+  const components = [...model.components].sort((left, right) => (left.renderOrder || 0) - (right.renderOrder || 0));
+  for (const component of components) {
+    const [stroke, lineWidth] = componentStyle[component.role] || ["#e5eefc", 1.2];
+    const paths = component.paths || [{points: component.outline, closed: true}];
+    for (const path of paths) strokePath(path, stroke, lineWidth, component.dashed === true || path.dashed === true);
   }
 
   ctx.strokeStyle = "#f8fafc";
@@ -1865,7 +2410,7 @@ function drawToolAssembly2d() {
   const labelAnchor = toolPhysicalToScreen(model.holder.outline.at(-2) || model.referencePoint);
   ctx.fillStyle = "rgba(253, 230, 138, .88)";
   ctx.font = '8px "Cascadia Code", Consolas, monospace';
-  ctx.fillText(`${toolKey} · ${model.name} · 2D OUTLINE`, labelAnchor.x + 5, labelAnchor.y - 5);
+  ctx.fillText(`${toolKey} · ${model.name} · ${spindleLabel}`, labelAnchor.x + 5, labelAnchor.y - 5);
   ctx.restore();
 }
 
@@ -2397,10 +2942,21 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
     previousScope: previousAssignmentScope,
     nextScope: nextAssignmentScope,
   });
+  state.toolAssignments = Object.fromEntries(Object.entries(state.toolAssignments).map(([toolKey, assignment]) => {
+    const assignmentRef = toolAssignmentAssemblyRef(assignment);
+    const currentCatalogAssembly = assignmentRef ? toolLibraryAssemblyById(assignmentRef.id) : null;
+    const resolvedAssembly = currentCatalogAssembly
+      ? resolveAssignableToolAssembly2d({id: currentCatalogAssembly.id, revision: currentCatalogAssembly.revision})
+      : null;
+    return [toolKey, normalizeVersionedToolAssignment(assignment, resolvedAssembly)];
+  }));
   state.toolAssignmentScope = nextAssignmentScope;
-  if (elements.input.value.trim() === sampleProgram.trim() && (state.parsed.toolCalls || []).some((call) => call.key === "T0101")) {
+  if (isExactBundledProgram(elements.input.value, sampleProgram, state.bundledSample)
+    && (state.parsed.executableToolCalls || []).some((call) => call.key === "T0101")) {
     state.toolAssignments.T0101 ||= {
-      toolId: DEFAULT_TOOL_ASSEMBLY_2D.id, confirmed: false, tipDatum: null, axialDirection: "negative-z",
+      ...createVersionedToolAssignment(DEFAULT_TOOL_ASSEMBLY_2D, {tipDatum: null, axialDirection: "negative-z"}),
+      confirmed: true,
+      confirmationSource: "bundled-sample",
     };
   }
   state.toolAssignmentRevision += 1;
@@ -2520,6 +3076,49 @@ elements.graphicsQuality.addEventListener("change", () => {
 });
 
 elements.editMachine.addEventListener("click", openMachineEditor);
+elements.toolLibraryButton.addEventListener("click", () => openToolLibrary());
+elements.toolLibraryClose.addEventListener("click", () => elements.toolLibraryDialog.close());
+elements.toolLibraryDialog.addEventListener("click", (event) => {
+  if (event.target === elements.toolLibraryDialog) elements.toolLibraryDialog.close();
+});
+for (const tab of document.querySelectorAll(".tool-library-tab")) {
+  tab.addEventListener("click", () => setToolLibraryTab(tab.dataset.libraryTab));
+  tab.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const tabs = [...document.querySelectorAll(".tool-library-tab")];
+    const next = event.key === "Home"
+      ? tabs[0]
+      : event.key === "End"
+        ? tabs[tabs.length - 1]
+        : tabs[(tabs.indexOf(tab) + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+    setToolLibraryTab(next.dataset.libraryTab);
+    next.focus();
+  });
+}
+elements.toolLibrarySearch.addEventListener("input", renderToolLibrary);
+elements.toolLibraryFamilyFilter.addEventListener("change", renderToolLibrary);
+elements.toolLibraryShapeFilter.addEventListener("change", renderToolLibrary);
+elements.toolLibraryAuthorityFilter.addEventListener("change", renderToolLibrary);
+elements.toolLibraryTarget.addEventListener("change", renderToolLibrary);
+elements.toolLibraryAssign.addEventListener("click", () => {
+  const toolKey = elements.toolLibraryTarget.value;
+  const assembly = state.toolLibraryTab === "assemblies" ? toolLibraryAssemblyById(state.toolLibrarySelection) : null;
+  const definition = assembly ? resolveAssignableToolAssembly2d({id: assembly.id, revision: assembly.revision}) : null;
+  if (!toolKey || !assembly?.assignment.assignable || !definition) return;
+  state.toolAssignments[toolKey] = createVersionedToolAssignment(definition, {
+    tipDatum: definition.cuttingModel?.tipDatum || null,
+    axialDirection: definition.cuttingModel?.axialDirection || null,
+  });
+  invalidateToolAssignments();
+  elements.programToolsSetup.open = true;
+  elements.toolLibraryDialog.close();
+  requestAnimationFrame(() => {
+    const card = [...elements.programToolList.querySelectorAll(".program-tool-card")]
+      .find((candidate) => candidate.dataset.toolKey === toolKey);
+    card?.querySelector(".program-tool-browse")?.focus();
+  });
+});
 elements.machineForm.addEventListener("submit", saveMachineEditor);
 elements.machineForm.elements.namedItem("status").addEventListener("change", (event) => updateMachineStatusBadge(event.target.value));
 $("closeMachineButton").addEventListener("click", () => elements.machineDialog.close());
@@ -2538,7 +3137,7 @@ elements.machine.addEventListener("change", () => {
 });
 
 $("plotButton").addEventListener("click", () => { plotProgram(); persistSession(); });
-$("loadSampleButton").addEventListener("click", () => loadProgram("sample-g71-rough.nc", sampleProgram));
+$("loadSampleButton").addEventListener("click", () => loadProgram("sample-g71-rough.nc", sampleProgram, {bundledSample: true}));
 $("openButton").addEventListener("click", openProgram);
 $("compareButton").addEventListener("click", openComparison);
 elements.save.addEventListener("click", saveProgram);
@@ -2938,12 +3537,14 @@ window.addEventListener("drop", async (event) => {
 });
 
 window.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented) return;
+  if (elements.toolLibraryDialog.open || elements.machineDialog.open || elements.compareDialog.open) return;
   if (event.ctrlKey || event.metaKey) {
-    if (event.key.toLowerCase() === "f" && !elements.machineDialog.open && !elements.compareDialog.open) {
+    if (event.key.toLowerCase() === "f") {
       event.preventDefault();
       openProgramSearch({replace: false});
     }
-    if (event.key.toLowerCase() === "h" && !elements.machineDialog.open && !elements.compareDialog.open) {
+    if (event.key.toLowerCase() === "h") {
       event.preventDefault();
       openProgramSearch({replace: true});
     }
@@ -2987,6 +3588,9 @@ activeUnitScale = unitScale();
 refreshUnitUi();
 updateProgramUnitsHint();
 updateToolControls();
-if (!restored) elements.input.value = sampleProgram;
+if (!restored) {
+  elements.input.value = sampleProgram;
+  state.bundledSample = true;
+}
 plotProgram();
 loadMachineProfiles();

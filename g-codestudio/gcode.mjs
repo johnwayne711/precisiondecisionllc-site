@@ -145,6 +145,7 @@ function timingSnapshot(state) {
     spindleSpeed: state.spindleSpeed ?? null,
     spindleLimit: state.spindleLimit ?? null,
     spindleRunning: state.spindleRunning ?? null,
+    spindleDirection: state.spindleDirection ?? "unknown",
     unitScale: state.unitScale ?? state.scale ?? 1,
     programUnits: state.programUnits ?? state.units ?? "mm",
   };
@@ -175,9 +176,43 @@ function updateModalState(record, state, warnings) {
   }
   for (const code of record.byLetter.get("M") || []) {
     const rounded = Math.round(code);
-    if (rounded === 3 || rounded === 4) state.spindleRunning = true;
-    else if (rounded === 5) state.spindleRunning = false;
+    if (rounded === 3) {
+      state.spindleRunning = true;
+      state.spindleDirection = "m3";
+    } else if (rounded === 4) {
+      state.spindleRunning = true;
+      state.spindleDirection = "m4";
+    } else if (rounded === 5) {
+      state.spindleRunning = false;
+    }
   }
+}
+
+function programSpindleEvents(records, definitionIndexes) {
+  const events = [];
+  let direction = "unknown";
+  let running = null;
+  for (const record of records) {
+    if (!record.byLetter.size || definitionIndexes.has(record.index)) continue;
+    const beforeDirection = direction;
+    const beforeRunning = running;
+    for (const code of record.byLetter.get("M") || []) {
+      const rounded = Math.round(code);
+      if (rounded === 3) {
+        direction = "m3";
+        running = true;
+      } else if (rounded === 4) {
+        direction = "m4";
+        running = true;
+      } else if (rounded === 5) {
+        running = false;
+      }
+    }
+    if (direction !== beforeDirection || running !== beforeRunning) {
+      events.push({line: record.line, direction, running});
+    }
+  }
+  return events;
 }
 
 function parseBasicRecord(record, state, xMode, warnings, {executeToolCall = true} = {}) {
@@ -344,10 +379,14 @@ function crossingPoint(points, level, key, outsideDirection) {
 function generatedSegment(type, start, end, cycle, line, pass, points = null, rapidState = null, xMode = "diameter", geometry = null) {
   const path = points || (type === "rapid" && rapidState ? rapidPath(start, end, rapidState, xMode) : [{...start}, {...end}]);
   const timingSource = geometry && type !== "rapid" ? geometry : rapidState;
+  const executionSpindle = timingSnapshot(rapidState || {});
   const segment = {
     type, start: {...start}, end: {...end}, points: path,
     line, raw: `${cycle} generated ${type}${pass ? ` pass ${pass}` : ""}`,
-    ...timingSnapshot(timingSource || {}), generated: true, cycle, pass,
+    ...timingSnapshot(timingSource || {}),
+    spindleRunning: executionSpindle.spindleRunning,
+    spindleDirection: executionSpindle.spindleDirection,
+    generated: true, cycle, pass,
     executionLine: line,
     sourceLine: Number.isInteger(geometry?.line) ? geometry.line : line,
     toolKey: rapidState?.activeToolKey ?? null,
@@ -469,7 +508,8 @@ export function parseGcode(source, {
     rapidBehavior, rapidXMax, rapidZMax, arcChordTolerance,
     absolute: true, scale: normalizedDefaultUnits === "in" ? 25.4 : 1, units: normalizedDefaultUnits,
     motion: "rapid", feed: null, feedMode: "unknown", spindleMode: "unknown", spindleSpeed: null,
-    spindleLimit: null, spindleRunning: null, sawPlane: false, sawUnitMode: false, assumedUnitsUsed: false,
+    spindleLimit: null, spindleRunning: null, spindleDirection: "unknown",
+    sawPlane: false, sawUnitMode: false, assumedUnitsUsed: false,
     activeToolKey: null, activeToolCallLine: null,
   };
   const segments = [];
@@ -488,6 +528,7 @@ export function parseGcode(source, {
       for (let index = startIndex; index <= endIndex; index += 1) definitionIndexes.add(index);
     }
   }
+  const spindleEvents = programSpindleEvents(records, definitionIndexes);
 
   const toolCalls = extractedToolCalls.map((call) => {
     const definitionOnly = definitionIndexes.has(call.line - 1);
@@ -584,6 +625,8 @@ export function parseGcode(source, {
           executionLine: record.line,
           toolKey: state.activeToolKey,
           toolCallLine: state.activeToolCallLine,
+          spindleRunning: state.spindleRunning,
+          spindleDirection: state.spindleDirection,
         });
       }
       state.x = contour.state.x;
@@ -606,9 +649,23 @@ export function parseGcode(source, {
   }
   return {
     segments, warnings, cycles, toolCalls, executableToolCalls, units: state.units, sourceLines: lines.length,
-    timingEvents, dwellSeconds: timingEvents.reduce((sum, event) => sum + event.seconds, 0),
+    timingEvents, spindleEvents, dwellSeconds: timingEvents.reduce((sum, event) => sum + event.seconds, 0),
     unitsSource: state.assumedUnitsUsed ? "assumed" : "program",
   };
+}
+
+export function spindleStateAtLine(events, sourceLine) {
+  const line = Math.max(0, Math.trunc(Number(sourceLine) || 0));
+  let state = {direction: "unknown", running: null};
+  for (const event of Array.isArray(events) ? events : []) {
+    if (!Number.isFinite(event?.line)) continue;
+    if (event.line > line) break;
+    state = {
+      direction: event.direction === "m3" || event.direction === "m4" ? event.direction : "unknown",
+      running: typeof event.running === "boolean" ? event.running : null,
+    };
+  }
+  return state;
 }
 
 export function segmentLength(segment, xScale = 1) {
