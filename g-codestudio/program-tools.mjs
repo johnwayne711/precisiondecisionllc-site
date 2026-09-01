@@ -97,7 +97,11 @@ export function suggestToolFamilies(comments) {
   if (/THREAD|UNJ|UNF|UNC|NPT|ACME/.test(source)) {
     add(suggestion("thread", "Threading tool", "medium", "Header text contains threading terminology."));
   }
-  if (/\bBORE|BORING|\bI\.D\.|\bID\b/.test(source)) {
+  const liveMilling = /LIVE\s*-?\s*TOOL|END\s*-?\s*MILL|MILLING|DRIVEN\s+(?:TOOL|CUTTER)/.test(source);
+  if (liveMilling) {
+    add(suggestion("live-milling", "Live-tool milling cutter", "medium", "Header text identifies live-tool or milling work."));
+  }
+  if (!liveMilling && /\bBORE|BORING|\bI\.D\.|\bID\b/.test(source)) {
     add(suggestion("id-bore", "Boring / ID turning tool", "medium", "Header text contains boring or inside-diameter terminology."));
   }
   if (/DRILL|REAM|TAP(?:PING)?/.test(source)) {

@@ -1,8 +1,8 @@
 import {parseGcode, programBounds, segmentLength, spindleStateAtLine} from "./gcode.mjs";
 import {cycleTimeAtPosition, estimateCycleTime, formatCycleTime} from "./runtime.mjs";
 import {
-  buildStockProfile, collisionPointForSegment, extendStockProfile, findCollisions, stockContourPoints,
-  stockPlacement, stockVerificationColumns,
+  buildStockProfile, collisionPointForSegment, evaluateCollisions, extendStockProfile, isLiveToolSegment,
+  stockContourPoints, stockPlacement, stockVerificationColumns,
 } from "./simulation.mjs";
 import {convertUnitValue, scaleForUnits} from "./units.mjs";
 import {comparePrograms, compareSegmentGeometry, diffLineTokens, geometryItemsForFit, overlayGeometryLayers} from "./compare.mjs";
@@ -10,12 +10,21 @@ import {graphicsQualityPreset, renderGraphicsQualityPreset} from "./graphics-qua
 import {createFrameScheduler} from "./render-scheduler.mjs";
 import {
   buildToolAssembly2d, buildToolAssemblyDisplay2d, DEFAULT_TOOL_ASSEMBLY_2D, listSelectableToolAssemblies2d,
-  resolveAssignableToolAssembly2d, TOOL_ASSEMBLY_2D_STATUS, toolAssembly2dById, toolReferencePointForExecution,
+  resolveAssignableToolAssembly2d, TOOL_ASSEMBLY_2D_STATUS, toolAssembly2dById,
+  toolPhysicalReferencePointForExecution,
 } from "./tool-assembly.mjs";
 import {
   TOOL_LIBRARY_CATALOG, catalogDiamondInsertOutline2d, listToolLibraryAssemblies,
   toolLibraryAssemblyById, toolLibraryAssemblyDetail,
 } from "./tool-library.mjs";
+import {LIVE_TOOL_LIBRARY_CATALOG, listLiveToolLibraryRecords} from "./live-tool-library.mjs";
+import {renderLiveFace2d} from "./live-view.mjs";
+import {buildAxialFlatBoreStock, LIVE_STOCK_STATUS, summarizeAxialFlatBoreStock} from "./live-stock.mjs";
+import {
+  MILLING_TOOL_LIBRARY_CATALOG, listMillingToolLibraryRecords, millingToolLibraryRecordById,
+} from "./milling-tool-library.mjs";
+import {millingToolPreviewClaimLabels, millingToolPreviewViewModel} from "./milling-tool-preview.mjs";
+import {plottedProgramStart} from "./machine-semantics.mjs";
 import {
   activeToolKeyAtLine, createVersionedToolAssignment, isExactBundledProgram, normalizeVersionedToolAssignment,
   programAssignmentScope, reconcileToolAssignments, reviseToolAssignmentSetup, toolAssignmentAssemblyRef,
@@ -66,6 +75,34 @@ M05
 M30
 %`;
 
+const liveBoreSampleProgram = `%
+O9003 (G-CODE STUDIO AXIAL LIVE-TOOL BORE DEMO)
+G20 G390 G18
+M5
+T0202
+G0 X3.000 Z2.100 (DEMO PLOTTED START - NOT MACHINE HOME)
+G0 Z-0.400
+G0 X2.000
+M154
+G0 C0.
+M133 P3000
+G17 G98 G112
+G0 X0.500 Y0.000 Z-0.400
+G1 Z-0.650 F5.0
+G0 Z-0.400
+G113
+M135
+M155
+M30
+%`;
+
+const LIVE_BORE_SAMPLE_CUTTER_ID = "milling-tool:harvey-tool:771416";
+
+function isExactBundledSample(source, bundledOrigin = false) {
+  return isExactBundledProgram(source, sampleProgram, bundledOrigin)
+    || isExactBundledProgram(source, liveBoreSampleProgram, bundledOrigin);
+}
+
 const DEFAULT_MACHINE_PROFILES = [
   {
     id: "hardinge-conquest-t42", name: "Hardinge Conquest T42 · Fanuc 18-T", manufacturer: "Hardinge",
@@ -73,14 +110,33 @@ const DEFAULT_MACHINE_PROFILES = [
     status: "draft", templateRevision: 1, units: "inch", xProgramming: "diameter", orientation: "left",
     xTravelMin: -6.37, xTravelMax: 0, zTravelMin: -16, zTravelMax: 0, homeX: 0, homeZ: 0,
     startMode: "home", startX: 12.74, startZ: 16, rapidBehavior: "dogleg", rapidXMax: 945, rapidZMax: 1200,
+    liveToolDialect: "unconfigured", liveToolCapability: "unknown", cAxisCapability: "unknown",
+    yAxisCapability: "unknown", cAxisEngagement: "unknown", rapidYMax: null, rapidCMax: null,
+    liveToolMaxRpm: null, haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown", liveToolEvidence: "",
     toolChangeX: 0, toolChangeZ: 0, safeIndexX: 0, safeIndexZ: 0, turretStations: 12,
     notes: "BEST-EFFORT DRAFT — NOT VERIFIED. Travel and rapid estimates come from Hardinge T-Series brochure 1312-1E; applicability to this older Conquest is unconfirmed. The 12-station turret is a guess from the 10/12-station options in Conquest parts list PL-60A. Assumes machine reference X0/Z0, negative machine travel, diameter-mode plotted home X12.74/Z16, and independent-axis rapid motion. Check every value at the machine before relying on it.",
     updatedAt: null,
   },
   {
+    id: "haas-ngc-live-tool-syntax", name: "Haas NGC lathe · live-tool syntax", manufacturer: "Haas Automation",
+    model: "Lathe with live tooling", serialNumber: "", controlMake: "Haas", controlModel: "NGC",
+    status: "draft", templateRevision: 1, units: "inch", xProgramming: "diameter", orientation: "left",
+    startMode: "unknown", rapidBehavior: "unknown", rapidXMax: null, rapidYMax: null, rapidZMax: null, rapidCMax: null,
+    liveToolDialect: "haas-lathe-ngc", liveToolCapability: "equipped", cAxisCapability: "available",
+    yAxisCapability: "unavailable", cAxisEngagement: "automatic", liveToolMaxRpm: null, haasDefaultToFloat: "unknown",
+    haasIntegerFeedScale: "unknown",
+    liveToolEvidence: "https://www.haascnc.com/service/codes-settings.type%3Dmcode.machine%3Dlathe.value%3DM134.html",
+    notes: "DRAFT SYNTAX PROFILE ONLY — official Haas NGC live-tool command documentation is linked as evidence. This profile does not establish a specific machine's installed options, travels, rapid rates, spindle limit, offsets, or mounted-tool geometry.",
+    updatedAt: null,
+  },
+  {
     id: "generic-lathe", name: "Generic lathe", manufacturer: "", model: "", serialNumber: "",
     controlMake: "", controlModel: "", status: "draft", templateRevision: 0, units: "inch", xProgramming: "diameter",
-    orientation: "left", startMode: "unknown", rapidBehavior: "unknown", notes: "", updatedAt: null,
+    orientation: "left", startMode: "unknown", rapidBehavior: "unknown", rapidXMax: null, rapidYMax: null,
+    rapidZMax: null, rapidCMax: null, liveToolDialect: "unconfigured", liveToolCapability: "unknown",
+    cAxisCapability: "unknown", yAxisCapability: "unknown", cAxisEngagement: "unknown", liveToolMaxRpm: null, haasDefaultToFloat: "unknown",
+    haasIntegerFeedScale: "unknown",
+    liveToolEvidence: "", notes: "", updatedAt: null,
   },
 ];
 const MACHINE_PROFILE_CACHE_KEY = "verify.machineProfiles.v1";
@@ -88,11 +144,14 @@ const MACHINE_PROFILE_FIELDS = [
   "name", "manufacturer", "model", "serialNumber", "controlMake", "controlModel", "status", "units",
   "xProgramming", "orientation", "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ",
   "startMode", "startX", "startZ", "rapidBehavior", "rapidXMax", "rapidZMax", "toolChangeX", "toolChangeZ",
-  "safeIndexX", "safeIndexZ", "turretStations", "notes",
+  "safeIndexX", "safeIndexZ", "turretStations", "liveToolDialect", "liveToolCapability", "cAxisCapability",
+  "yAxisCapability", "cAxisEngagement", "rapidYMax", "rapidCMax", "liveToolMaxRpm", "haasDefaultToFloat",
+  "haasIntegerFeedScale", "liveToolEvidence", "notes",
 ];
 const NUMERIC_MACHINE_FIELDS = new Set([
   "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ", "startX", "startZ",
-  "rapidXMax", "rapidZMax", "toolChangeX", "toolChangeZ", "safeIndexX", "safeIndexZ", "turretStations",
+  "rapidXMax", "rapidYMax", "rapidZMax", "rapidCMax", "liveToolMaxRpm", "toolChangeX", "toolChangeZ",
+  "safeIndexX", "safeIndexZ", "turretStations",
 ]);
 
 const $ = (id) => document.getElementById(id);
@@ -126,18 +185,19 @@ const elements = {
   compareSplitLayout: $("compareSplitLayout"), compareOverlayLayout: $("compareOverlayLayout"), graphicsViewportNote: $("graphicsViewportNote"),
   fitGeometryDifferences: $("fitGeometryDifferences"), fitGeometryPart: $("fitGeometryPart"), compareNavigation: $("compareNavigation"),
   graphicsInfoButton: $("graphicsInfoButton"), graphicsInfoPanel: $("graphicsInfoPanel"),
-  view2d: $("view2dButton"), view3d: $("view3dButton"),
+  view2d: $("view2dButton"), viewFace: $("viewFaceButton"), view3d: $("view3dButton"), faceViewStatus: $("faceViewStatus"),
   toolOverlay: $("toolOverlayButton"), toolVerificationBadge: $("toolVerificationBadge"),
   programToolsSetup: $("programToolsSetup"), programToolSummary: $("programToolSummary"), programToolList: $("programToolList"),
   toolLibraryButton: $("toolLibraryButton"), toolLibraryDialog: $("toolLibraryDialog"), toolLibraryClose: $("toolLibraryClose"),
   toolLibrarySearch: $("toolLibrarySearch"), toolLibraryFamilyFilter: $("toolLibraryFamilyFilter"),
   toolLibraryShapeFilter: $("toolLibraryShapeFilter"), toolLibraryAuthorityFilter: $("toolLibraryAuthorityFilter"),
+  toolLibraryFamilyFilterLabel: $("toolLibraryFamilyFilterLabel"), toolLibraryShapeFilterLabel: $("toolLibraryShapeFilterLabel"),
   toolLibraryResults: $("toolLibraryResults"), toolLibraryResultsTitle: $("toolLibraryResultsTitle"),
   toolLibraryResultCount: $("toolLibraryResultCount"), toolLibraryDetail: $("toolLibraryDetail"),
   toolLibraryTarget: $("toolLibraryTarget"), toolLibraryAssign: $("toolLibraryAssign"),
   viewCube: $("viewCube"), viewCubeCanvas: $("viewCubeCanvas"), viewCubeHome: $("viewCubeHome"),
   graphicsQuality: $("graphicsQuality"), graphicsQualityHint: $("graphicsQualityHint"),
-  toolpathToggle: $("toolpathToggle"),
+  toolpathToggle: $("toolpathToggle"), liveToolStatus: $("liveToolStatus"),
   dimensionButton: $("dimensionButton"), clearDimensionsButton: $("clearDimensionsButton"),
   geometryInspector: $("geometryInspector"), clearGeometrySelection: $("clearGeometrySelection"),
 };
@@ -182,6 +242,8 @@ const programTextMeasureContext = document.createElement("canvas").getContext("2
 const STOCK_FRAME_CACHE_LIMIT = 64;
 const THREE_D_SETTLE_MS = 850;
 const TOOL_LIBRARY_SOURCE_BY_ID = new Map(TOOL_LIBRARY_CATALOG.sources.map((source) => [source.id, source]));
+const LIVE_TOOL_LIBRARY_SOURCE_BY_ID = new Map(LIVE_TOOL_LIBRARY_CATALOG.sources.map((source) => [source.id, source]));
+const MILLING_TOOL_LIBRARY_SOURCE_BY_ID = new Map(MILLING_TOOL_LIBRARY_CATALOG.sources.map((source) => [source.id, source]));
 
 function programEditorMetrics() {
   const style = getComputedStyle(elements.input);
@@ -468,7 +530,7 @@ function persistSession() {
       program: elements.input.value,
       toolAssignments: toolAssignmentsForPersistence(state.toolAssignments),
       toolAssignmentScope: state.toolAssignmentScope,
-      bundledSample: isExactBundledProgram(elements.input.value, sampleProgram, state.bundledSample),
+      bundledSample: isExactBundledSample(elements.input.value, state.bundledSample),
     }));
   } catch {
     // Storage can be unavailable in hardened browsers; G-Code Studio remains fully usable.
@@ -493,7 +555,7 @@ function restoreSession() {
     if (typeof saved.program === "string" && saved.program.trim()) {
       elements.input.value = saved.program;
       elements.fileName.textContent = typeof saved.fileName === "string" ? saved.fileName : "restored-program.nc";
-      state.bundledSample = isExactBundledProgram(saved.program, sampleProgram, saved.bundledSample === true);
+      state.bundledSample = isExactBundledSample(saved.program, saved.bundledSample === true);
       if (saved.toolAssignments && typeof saved.toolAssignments === "object" && !Array.isArray(saved.toolAssignments)) {
         state.toolAssignments = Object.fromEntries(Object.entries(saved.toolAssignments).filter(([key, assignment]) => (
           /^T[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/i.test(key)
@@ -634,23 +696,31 @@ function machinePlotOptions(profile) {
   const point = (x, z) => hasNumber(x) && hasNumber(z)
     ? {x: machineLengthMm(x, profile), z: machineLengthMm(z, profile)}
     : null;
-  let referencePosition = profile.startMode === "home" ? point(profile.startX, profile.startZ) : null;
-  if (!referencePosition) {
-    const radialTravel = Math.abs(Number(profile.xTravelMax) - Number(profile.xTravelMin));
-    const axialTravel = Math.abs(Number(profile.zTravelMax) - Number(profile.zTravelMin));
-    if (radialTravel > 0 && axialTravel > 0) {
-      referencePosition = point(profile.xProgramming === "diameter" ? radialTravel * 2 : radialTravel, axialTravel);
-    }
-  }
-  const initialPosition = profile.startMode === "unknown" ? null : (point(profile.startX, profile.startZ) || referencePosition);
+  const configuredStart = plottedProgramStart(profile);
+  const initialPosition = configuredStart.point
+    ? point(configuredStart.point.x, configuredStart.point.z)
+    : null;
+  const referencePosition = configuredStart.mode === "home" ? initialPosition : null;
   return {
     initialPosition,
     referencePosition,
+    initialPositionMode: configuredStart.mode,
+    initialPositionIssue: configuredStart.reason,
     defaultUnits: selectedProgramUnits(profile),
     warnOnAssumedUnits: true,
     rapidBehavior: profile.rapidBehavior,
     rapidXMax: hasNumber(profile.rapidXMax) ? machineLengthMm(profile.rapidXMax, profile) : null,
+    rapidYMax: hasNumber(profile.rapidYMax) ? machineLengthMm(profile.rapidYMax, profile) : null,
     rapidZMax: hasNumber(profile.rapidZMax) ? machineLengthMm(profile.rapidZMax, profile) : null,
+    rapidCMax: hasNumber(profile.rapidCMax) ? Number(profile.rapidCMax) : null,
+    liveToolDialect: profile.liveToolDialect || "unconfigured",
+    liveToolCapability: profile.liveToolCapability || "unknown",
+    cAxisCapability: profile.cAxisCapability || "unknown",
+    yAxisCapability: profile.yAxisCapability || "unknown",
+    cAxisEngagement: profile.cAxisEngagement || "unknown",
+    liveToolMaxRpm: hasNumber(profile.liveToolMaxRpm) ? Number(profile.liveToolMaxRpm) : null,
+    haasDefaultToFloat: profile.haasDefaultToFloat || "unknown",
+    haasIntegerFeedScale: profile.haasIntegerFeedScale || "unknown",
   };
 }
 
@@ -732,6 +802,34 @@ function loadProgram(name, content, {bundledSample = false} = {}) {
   programSearch.kind = "empty";
   elements.searchHighlights.replaceChildren();
   plotProgram();
+  persistSession();
+}
+
+function loadLiveBoreSample() {
+  const machineId = "haas-ngc-live-tool-syntax";
+  if ([...elements.machine.options].some((option) => option.value === machineId)) elements.machine.value = machineId;
+  elements.orientation.value = "left";
+  elements.xMode.value = "diameter";
+  elements.programUnits.value = "machine";
+  elements.displayUnits.value = "inch";
+  activeUnitScale = 25.4;
+  elements.stockDiameter.value = "2.05";
+  elements.stockLength.value = "3.15";
+  elements.stockGripLength.value = "0.50";
+  elements.chuckFaceZ.value = "-3.15";
+  elements.jawDiameter.value = "2.75";
+  elements.clearance.value = "0.12";
+  elements.stockToggle.checked = true;
+  elements.toolpathToggle.checked = true;
+  refreshUnitUi();
+  updateProgramUnitsHint(currentMachineProfile());
+  loadProgram("sample-live-bore.nc", liveBoreSampleProgram, {bundledSample: true});
+  state.programLine = state.parsed.sourceLines || programLineCount();
+  state.visibleBlocks = state.parsed.segments.length;
+  setGraphicsDimension("3d");
+  updateTransport({scrollProgram: true});
+  fitView();
+  elements.status.textContent = "Axial live-tool bore demo · final stock shown";
   persistSession();
 }
 
@@ -990,7 +1088,12 @@ function renderComparisonGraphics() {
   const options = {xMode: elements.xMode.value, arcChordTolerance: graphicsQuality().arcChordTolerance, ...machinePlotOptions(machine)};
   const originalParsed = parseGcode(state.comparisonOriginal.content, options);
   const revisedParsed = parseGcode(elements.input.value, options);
-  const geometry = compareSegmentGeometry(originalParsed.segments, revisedParsed.segments);
+  const geometry = compareSegmentGeometry(originalParsed.segments, revisedParsed.segments, {
+    originalCAxisMotions: originalParsed.cAxisMotions,
+    revisedCAxisMotions: revisedParsed.cAxisMotions,
+    originalUnresolvedOperations: originalParsed.liveToolAttempts,
+    revisedUnresolvedOperations: revisedParsed.liveToolAttempts,
+  });
   state.comparisonGeometry = geometry;
   const originalLabel = `${geometry.originalOnly} original-only move${geometry.originalOnly === 1 ? "" : "s"}`;
   const revisedLabel = `${geometry.revisedOnly} new or altered move${geometry.revisedOnly === 1 ? "" : "s"}`;
@@ -998,9 +1101,11 @@ function renderComparisonGraphics() {
   $("revisedGeometryCount").textContent = revisedLabel;
   $("graphicsInfoDifferenceCount").textContent = `${geometry.revisedOnly} difference${geometry.revisedOnly === 1 ? "" : "s"}`;
   const noMotion = !geometry.original.length && !geometry.revised.length;
-  $("graphicsVerdict").textContent = noMotion
-    ? "No comparable motion was parsed"
-    : (geometry.originalOnly || geometry.revisedOnly ? `${geometry.revisedOnly} revised toolpath difference${geometry.revisedOnly === 1 ? "" : "s"}` : "Toolpaths match geometrically");
+  $("graphicsVerdict").textContent = geometry.verificationUnresolved
+    ? `PATH ONLY · ${geometry.unresolvedOriginal + geometry.unresolvedRevised} unresolved operation${geometry.unresolvedOriginal + geometry.unresolvedRevised === 1 ? "" : "s"}`
+    : (noMotion
+      ? "No comparable motion was parsed"
+      : (geometry.originalOnly || geometry.revisedOnly ? `${geometry.revisedOnly} revised toolpath difference${geometry.revisedOnly === 1 ? "" : "s"}` : "Toolpaths match geometrically"));
 
   const fitMode = elements.fitGeometryPart.checked ? "part" : (elements.fitGeometryDifferences.checked ? "changed" : "all");
   const bounds = comparisonGeometryBounds(geometry, fitMode);
@@ -1122,6 +1227,92 @@ function formatDistance(mm, decimals = null) {
   const places = decimals ?? (elements.displayUnits.value === "inch" ? 3 : 1);
   return `${displayValue(mm).toFixed(places)} ${unitName()}`;
 }
+function isRapidMotion(segment) {
+  return segment?.type === "rapid" || segment?.type === "live-rapid";
+}
+function liveToolSegments(segments = state.parsed.segments) {
+  return (segments || []).filter((segment) => isLiveToolSegment(segment));
+}
+function liveToolOperations(parsed = state.parsed) {
+  const attempts = Array.isArray(parsed?.liveToolAttempts) ? parsed.liveToolAttempts : [];
+  if (attempts.length) return attempts;
+  return liveToolSegments(parsed?.segments).map((segment) => ({
+    line: segment.executionLine || segment.line || null,
+    rapid: isRapidMotion(segment),
+    displayed: true,
+    blocked: Boolean(segment.verificationBlocked || segment.liveToolBlocked),
+  }));
+}
+function liveToolOperationSummary(parsed = state.parsed) {
+  const operations = liveToolOperations(parsed);
+  return {
+    operations,
+    displayed: operations.filter((operation) => operation.displayed === true),
+    blocked: operations.filter((operation) => operation.blocked === true),
+    notDisplayed: operations.filter((operation) => operation.displayed !== true),
+  };
+}
+function hasLiveToolCut(segments = state.parsed.segments) {
+  if (segments === state.parsed.segments) {
+    return liveToolOperations().some((operation) => operation.rapid !== true)
+      || (state.parsed.cAxisMotions || []).some((motion) => motion?.type !== "rapid-index");
+  }
+  return liveToolSegments(segments).some((segment) => !isRapidMotion(segment));
+}
+function updateLiveToolStatus(profile = currentMachineProfile()) {
+  const {operations, displayed, blocked, notDisplayed} = liveToolOperationSummary();
+  const status = elements.liveToolStatus;
+  status.className = "muted-value";
+  if (operations.length) {
+    const parts = [`${displayed.length} PATH${displayed.length === 1 ? "" : "S"}`];
+    if (blocked.length) parts.push(`${blocked.length} BLOCKED`);
+    if (notDisplayed.length) parts.push(`${notDisplayed.length} NOT DRAWN`);
+    status.textContent = parts.join(" · ");
+    status.className = blocked.length ? "danger-value" : (notDisplayed.length ? "warning-value" : "live-value");
+    status.title = `${displayed.length} programmed live-tool centerline path${displayed.length === 1 ? " is" : "s are"} drawable. ${blocked.length} operation${blocked.length === 1 ? " is" : "s are"} blocked; ${notDisplayed.length} operation${notDisplayed.length === 1 ? " has" : "s have"} no drawable segment. Supported axial-bore stock removal is reported separately; full driven-tool collision sweeps remain path-only.`;
+    return;
+  }
+  if (profile?.liveToolCapability === "not-equipped") {
+    status.textContent = "NOT EQUIPPED";
+    status.title = "The selected machine profile says live tooling is not equipped.";
+  } else if (profile?.liveToolCapability === "equipped" && profile?.liveToolDialect !== "unconfigured") {
+    status.textContent = "0 PATHS";
+    status.className = "live-value";
+    status.title = "The selected machine profile has a configured live-tool dialect; this program has no live-tool paths.";
+  } else {
+    status.textContent = "UNKNOWN";
+    status.title = "Live-tool capability or controller dialect is not configured for the selected machine profile.";
+  }
+}
+function updateStockRemovedStatus(stock, fallback = null) {
+  const output = $("stockRemoved");
+  output.className = "";
+  if (fallback) {
+    output.textContent = fallback;
+    output.title = fallback === "OFF" ? "Stock removal simulation is off." : "Stock removal simulation is blocked.";
+    if (fallback === "BLOCKED") output.className = "danger-value";
+    return;
+  }
+  const removed = `${stock.removedPercent.toFixed(1)}%`;
+  const liveSummary = summarizeAxialFlatBoreStock(stock.liveStock);
+  if (liveSummary.status === LIVE_STOCK_STATUS.MODELED) {
+    const livePercent = `${Math.max(0, Number(stock.liveRemovedPercent) || 0).toFixed(2)}%`;
+    output.textContent = `${removed} TURN · ${livePercent} LIVE BORE`;
+    output.className = "live-value";
+    output.title = `${liveSummary.label}. Turning and live-bore percentages are reported separately against the original cylindrical stock; no cutter-holder collision claim is included.`;
+    return;
+  }
+  if (hasLiveToolCut() || liveSummary.status === LIVE_STOCK_STATUS.PATH_ONLY) {
+    output.textContent = `${removed} · PATH ONLY`;
+    output.className = "warning-value";
+    output.title = liveSummary.axialBoreCount
+      ? `${liveSummary.label}. Supported bores are displayed, but at least one live cut remains outside the bounded analytic model.`
+      : "The percentage includes supported axisymmetric turning removal only. Live-tool centerlines are displayed, but this live operation is outside the bounded axial-bore model.";
+    return;
+  }
+  output.textContent = removed;
+  output.title = "Estimated axisymmetric stock removed by supported, confirmed turning tools.";
+}
 function collisionOptions() {
   return {
     chuckFaceZ: setupValue(elements.chuckFaceZ),
@@ -1165,6 +1356,10 @@ function fitView() {
   if (state.viewMode === "3d") {
     state.camera3d = {...state.camera3d, zoom: 1, panX: 0, panY: 0};
     request3dNavigationDraw();
+    return;
+  }
+  if (state.viewMode === "face") {
+    draw();
     return;
   }
   const rect = elements.wrap.getBoundingClientRect();
@@ -1253,7 +1448,30 @@ function screenRect(z0, z1, radius0, radius1) {
   return {x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), width: Math.abs(b.x - a.x), height: Math.abs(b.y - a.y)};
 }
 
-function stockProfileFor(stockDiameter, stockLength) {
+function stockWithLiveBores(stock, visibleCount, visibleSourceLine = state.programLine) {
+  if (!stock) return stock;
+  const liveStock = buildAxialFlatBoreStock(state.parsed.segments, {
+    stock,
+    visibleCount,
+    cutterResolver: resolvedCuttingModel,
+    unresolvedOperations: state.parsed.liveToolAttempts || [],
+    visibleSourceLine,
+  });
+  const initialVolume = Math.PI * stock.radius * stock.radius * stock.length;
+  return {
+    ...stock,
+    axialBores: liveStock.axialBores,
+    liveStock,
+    liveRemovedPercent: initialVolume > 0 ? liveStock.removedVolume / initialVolume * 100 : 0,
+  };
+}
+
+function stockProfileFor(
+  stockDiameter,
+  stockLength,
+  visibleCount = state.visibleBlocks,
+  visibleSourceLine = state.programLine,
+) {
   const axial = configuredStockBounds(stockLength);
   let verificationColumns = null;
   try {
@@ -1289,9 +1507,9 @@ function stockProfileFor(stockDiameter, stockLength) {
     state.stockProfileCache = {key, frames: new Map([[0, base]])};
   }
 
-  const target = Math.max(0, Math.min(state.parsed.segments.length, state.visibleBlocks));
+  const target = Math.max(0, Math.min(state.parsed.segments.length, visibleCount));
   const frames = state.stockProfileCache.frames;
-  if (frames.has(target)) return frames.get(target);
+  if (frames.has(target)) return stockWithLiveBores(frames.get(target), target, visibleSourceLine);
   let startIndex = 0;
   let startingStock = frames.get(0);
   for (const [visibleCount, frame] of frames) {
@@ -1312,7 +1530,7 @@ function stockProfileFor(stockDiameter, stockLength) {
     if (oldest === undefined) break;
     frames.delete(oldest);
   }
-  return stock;
+  return stockWithLiveBores(stock, target, visibleSourceLine);
 }
 
 function stockRadiusAt(stock, z) {
@@ -1444,9 +1662,38 @@ function drawKeepout() {
   ctx.setLineDash([]);
 }
 
+function drawAxialBoreSections2d(stock) {
+  for (const bore of stock?.axialBores || []) {
+    const offset = Math.abs(Number(bore.centerY) || 0);
+    const radius = Number(bore.radius) || 0;
+    if (!(radius > 0) || offset >= radius) continue;
+    const halfSection = Math.sqrt(Math.max(0, radius * radius - offset * offset));
+    const section = screenRect(
+      bore.bottomZ,
+      bore.frontZ,
+      bore.centerX - halfSection,
+      bore.centerX + halfSection,
+    );
+    ctx.fillStyle = "rgba(2, 11, 14, .98)";
+    ctx.fillRect(section.x, section.y, section.width, section.height);
+    const upperFront = worldToScreen({z: bore.frontZ, x: (bore.centerX + halfSection) / xScale()});
+    const upperBottom = worldToScreen({z: bore.bottomZ, x: (bore.centerX + halfSection) / xScale()});
+    const lowerFront = worldToScreen({z: bore.frontZ, x: (bore.centerX - halfSection) / xScale()});
+    const lowerBottom = worldToScreen({z: bore.bottomZ, x: (bore.centerX - halfSection) / xScale()});
+    ctx.beginPath();
+    ctx.moveTo(upperFront.x, upperFront.y);
+    ctx.lineTo(upperBottom.x, upperBottom.y);
+    ctx.lineTo(lowerBottom.x, lowerBottom.y);
+    ctx.lineTo(lowerFront.x, lowerFront.y);
+    ctx.strokeStyle = "#7ce5dc";
+    ctx.lineWidth = 1.15;
+    ctx.stroke();
+  }
+}
+
 function drawStock() {
   if (!elements.stockToggle.checked) {
-    $("stockRemoved").textContent = "OFF";
+    updateStockRemovedStatus(null, "OFF");
     return;
   }
   const stockDiameter = Math.max(0, setupValue(elements.stockDiameter));
@@ -1455,10 +1702,10 @@ function drawStock() {
   if (!radius || !length) return;
   const stock = stockProfileFor(stockDiameter, length);
   if (!stock) {
-    $("stockRemoved").textContent = "BLOCKED";
+    updateStockRemovedStatus(null, "BLOCKED");
     return;
   }
-  $("stockRemoved").textContent = `${stock.removedPercent.toFixed(1)}%`;
+  updateStockRemovedStatus(stock);
 
   const envelope = screenRect(stock.startZ, stock.endZ, -radius, radius);
   ctx.fillStyle = "rgba(245, 158, 11, 0.025)";
@@ -1489,6 +1736,7 @@ function drawStock() {
   ctx.setLineDash([5, 4]);
   ctx.strokeRect(envelope.x, envelope.y, envelope.width, envelope.height);
   ctx.setLineDash([]);
+  drawAxialBoreSections2d(stock);
 }
 
 function activeProgramToolKey() {
@@ -1555,7 +1803,7 @@ function assignmentWarnings() {
       });
     }
   }
-  const firstUnassignedMotion = (state.parsed.segments || []).find((segment) => segment.type !== "rapid" && !segment.toolKey);
+  const firstUnassignedMotion = (state.parsed.segments || []).find((segment) => !isRapidMotion(segment) && !isLiveToolSegment(segment) && !segment.toolKey);
   if (firstUnassignedMotion) {
     warnings.push({
       line: firstUnassignedMotion.executionLine || firstUnassignedMotion.line || null,
@@ -1563,7 +1811,10 @@ function assignmentWarnings() {
       message: "A cutting move occurs before any executable T call. Its tool-dependent stock removal is blocked.",
     });
   }
-  warnings.push(...[...new Set((state.parsed.executableToolCalls || []).map((call) => call.key))].flatMap((toolKey) => {
+  const turningToolKeys = new Set((state.parsed.segments || [])
+    .filter((segment) => !isLiveToolSegment(segment) && !isRapidMotion(segment) && segment.toolKey)
+    .map((segment) => segment.toolKey));
+  warnings.push(...[...new Set((state.parsed.executableToolCalls || []).map((call) => call.key))].filter((toolKey) => turningToolKeys.has(toolKey)).flatMap((toolKey) => {
     const readiness = toolAssignmentReadiness(toolKey);
     if (readiness.ready) {
       const model = readiness.model.cuttingModel;
@@ -1605,7 +1856,7 @@ function invalidateToolAssignments({renderControls = true} = {}) {
 function toolChoiceLabel(definition) {
   const status = TOOL_ASSEMBLY_2D_STATUS[definition.displayVerification || definition.verification]
     || TOOL_ASSEMBLY_2D_STATUS.unverified;
-  return `${definition.name} · ${status} · 2D OUTLINE`;
+  return `${definition.name} · ${status} · ${definition.geometryKind === "axial-milling-cutter" ? "CUTTER ONLY" : "2D OUTLINE"}`;
 }
 
 function selectField(labelText, values, selected, placeholder, onChange) {
@@ -1752,10 +2003,17 @@ function renderProgramToolAssignments() {
       && (!directionChoices.length || Boolean(assignment.axialDirection));
     confirmation.disabled = !requiredConfigurationComplete;
     confirmation.setAttribute("aria-pressed", String(assignment.confirmed === true));
-    confirmation.setAttribute("aria-label", `Confirm ${toolKey} mounted holder, insert, hand, and programmed reference convention`);
-    confirmation.textContent = assignment.confirmed === true
-      ? "Mounted setup confirmed — click to clear confirmation."
+    const cutterOnly = definition?.geometryKind === "axial-milling-cutter";
+    const unconfirmedLabel = cutterOnly
+      ? "Confirm exact cutter and flat-tip program reference for bounded axial-bore demo."
       : "Confirm mounted holder, insert, hand, and programmed reference convention.";
+    const confirmedLabel = cutterOnly
+      ? "Cutter and flat-tip reference confirmed — click to clear confirmation."
+      : "Mounted setup confirmed — click to clear confirmation.";
+    confirmation.setAttribute("aria-label", cutterOnly
+      ? `Confirm ${toolKey} exact cutter and flat-tip program reference`
+      : `Confirm ${toolKey} mounted holder, insert, hand, and programmed reference convention`);
+    confirmation.textContent = assignment.confirmed === true ? confirmedLabel : unconfirmedLabel;
     confirmation.addEventListener("click", () => {
       const confirmed = state.toolAssignments[toolKey]?.confirmed !== true;
       const nextAssignment = {...state.toolAssignments[toolKey], confirmed};
@@ -1763,9 +2021,7 @@ function renderProgramToolAssignments() {
       else delete nextAssignment.confirmationSource;
       state.toolAssignments[toolKey] = nextAssignment;
       confirmation.setAttribute("aria-pressed", String(confirmed));
-      confirmation.textContent = confirmed
-        ? "Mounted setup confirmed — click to clear confirmation."
-        : "Confirm mounted holder, insert, hand, and programmed reference convention.";
+      confirmation.textContent = confirmed ? confirmedLabel : unconfirmedLabel;
       invalidateToolAssignments({renderControls: false});
       const nextReadiness = toolAssignmentReadiness(toolKey);
       const confirmedCount = keys.filter((key) => toolAssignmentReadiness(key).ready).length;
@@ -1814,28 +2070,37 @@ function renderProgramToolAssignments() {
 }
 
 function toolLibraryRecordKey(record, tab = state.toolLibraryTab) {
+  if (tab === "driven" || tab === "cutters") return record.id;
   return tab === "assemblies" ? record.id : record.revisionRef;
 }
 
 function toolLibraryRecordName(record, tab = state.toolLibraryTab) {
+  if (tab === "driven") return `${record.manufacturer} ${record.catalogNumber} · ${record.type}`;
+  if (tab === "cutters") return `${record.manufacturer} ${record.catalogNumber} · ${record.name}`;
   if (tab === "assemblies") return record.name;
   const kind = tab === "holders" ? "Holder" : "Insert";
   return `${record.manufacturer} ${record.catalogId?.iso || record.catalogId?.ansi || record.materialNumber} · ${kind}`;
 }
 
 function toolLibraryRecordShape(record, tab = state.toolLibraryTab) {
+  if (tab === "driven") return null;
+  if (tab === "cutters") return record.profile;
   if (tab === "assemblies") return record.facets.shape;
   if (tab === "holders") return record.cuttingGeometry?.insertShape || (record.cuttingGeometry?.application?.includes("groove") ? "groove" : null);
   return record.cuttingGeometry?.shape || null;
 }
 
 function toolLibraryRecordFamily(record, tab = state.toolLibraryTab) {
+  if (tab === "driven") return record.type;
+  if (tab === "cutters") return record.family;
   if (tab === "assemblies") return record.facets.family === "turning" ? "turn" : "groove-profile";
   const application = String(record.cuttingGeometry?.application || "");
   return application.includes("groove") || application.includes("back-turn") ? "groove-profile" : "turn";
 }
 
 function toolLibraryRecordDisplayTier(record, tab = state.toolLibraryTab) {
+  if (tab === "driven") return "catalog-only";
+  if (tab === "cutters") return record.claims?.parametricCuttingGeometry ? "catalog-construction" : "catalog-only";
   if (tab !== "assemblies") return "catalog-only";
   const stateValue = record.claims?.displayGeometry?.state;
   if (stateValue === "manufacturer-cad-projection") return "manufacturer-cad-projection";
@@ -1844,12 +2109,22 @@ function toolLibraryRecordDisplayTier(record, tab = state.toolLibraryTab) {
 }
 
 function toolLibraryRecordsForTab(tab = state.toolLibraryTab) {
+  if (tab === "driven") return [...listLiveToolLibraryRecords()];
+  if (tab === "cutters") return [...listMillingToolLibraryRecords()];
   if (tab === "holders") return [...TOOL_LIBRARY_CATALOG.holders];
   if (tab === "inserts") return [...TOOL_LIBRARY_CATALOG.inserts];
   return listToolLibraryAssemblies();
 }
 
 function toolLibrarySearchText(record, tab = state.toolLibraryTab) {
+  if (tab === "driven") {
+    const sources = (record.sourceRefs || []).map((sourceRef) => LIVE_TOOL_LIBRARY_SOURCE_BY_ID.get(sourceRef)).filter(Boolean);
+    return JSON.stringify({record, sources, catalogNumberCompact: record.catalogNumber.replace(/\s+/g, "")}).toLowerCase();
+  }
+  if (tab === "cutters") {
+    const sources = (record.sourceRefs || []).map((sourceRef) => MILLING_TOOL_LIBRARY_SOURCE_BY_ID.get(sourceRef)).filter(Boolean);
+    return JSON.stringify({record, sources, catalogNumberCompact: record.catalogNumber.replace(/\s+/g, "")}).toLowerCase();
+  }
   if (tab === "assemblies") {
     const detail = toolLibraryAssemblyDetail(record.id);
     return JSON.stringify({assembly: record, holder: detail?.holder, insert: detail?.insert, compatibility: detail?.compatibilityEdge}).toLowerCase();
@@ -1865,9 +2140,10 @@ function filteredToolLibraryRecords() {
   const family = elements.toolLibraryFamilyFilter.value;
   const shape = elements.toolLibraryShapeFilter.value;
   const authority = elements.toolLibraryAuthorityFilter.value;
+  const unclassified = state.toolLibraryTab === "driven" || state.toolLibraryTab === "cutters";
   return toolLibraryRecordsForTab().filter((record) => (
-    (!family || toolLibraryRecordFamily(record) === family)
-    && (!shape || toolLibraryRecordShape(record) === shape)
+    (unclassified || !family || toolLibraryRecordFamily(record) === family)
+    && (unclassified || !shape || toolLibraryRecordShape(record) === shape)
     && (!authority || toolLibraryRecordDisplayTier(record) === authority)
     && (!queryTokens.length || queryTokens.every((token) => toolLibrarySearchText(record).includes(token)))
   ));
@@ -2056,6 +2332,292 @@ function componentSources(record) {
   return [...new Set(record?.sourceRefs || [])].map((sourceRef) => TOOL_LIBRARY_SOURCE_BY_ID.get(sourceRef)).filter(Boolean);
 }
 
+function drivenUnitSources(record) {
+  return [...new Set(record?.sourceRefs || [])].map((sourceRef) => LIVE_TOOL_LIBRARY_SOURCE_BY_ID.get(sourceRef)).filter(Boolean);
+}
+
+function millingCutterSources(record) {
+  return [...new Set(record?.sourceRefs || [])].map((sourceRef) => MILLING_TOOL_LIBRARY_SOURCE_BY_ID.get(sourceRef)).filter(Boolean);
+}
+
+function millingCutterPreview(record) {
+  const model = millingToolPreviewViewModel(record);
+  const {x, y, width, height} = model.viewBox;
+  const svg = svgNode("svg", {
+    class: "tool-library-preview-svg milling-cutter",
+    role: "img",
+    "aria-label": `${model.title} dimension-driven cutter schematic`,
+    viewBox: `${x} ${y} ${width} ${height}`,
+  });
+  for (const primitive of model.primitives) {
+    const className = `milling-${primitive.role}`;
+    if (primitive.type === "line") {
+      svg.append(svgNode("line", {
+        x1: primitive.start.x, y1: primitive.start.y,
+        x2: primitive.end.x, y2: primitive.end.y,
+        class: className,
+        "stroke-dasharray": primitive.dash?.join(" ") || "",
+      }));
+      continue;
+    }
+    appendSvgPolyline(svg, primitive.points, {
+      className,
+      closed: primitive.type === "polygon" || primitive.closed === true,
+    });
+  }
+  return {svg, model};
+}
+
+function definitionListSection(title, entries) {
+  const section = document.createElement("section");
+  section.className = "tool-library-section";
+  const heading = document.createElement("h4");
+  heading.textContent = title;
+  const grid = document.createElement("dl");
+  grid.className = "tool-library-dimensions";
+  for (const [label, value] of entries.filter(([, value]) => value !== null && value !== undefined && value !== "")) {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = String(value);
+    grid.append(term, description);
+  }
+  section.append(heading, grid);
+  return section;
+}
+
+function drivenUnitFactEntries(record) {
+  const mount = [record.mount?.family, record.mount?.shankDiameterMm ? `Ø${record.mount.shankDiameterMm} mm shank` : null].filter(Boolean).join(" · ");
+  const output = [record.output?.colletSystem, record.output?.diameterMm ? `Ø${record.output.diameterMm} mm output` : null].filter(Boolean).join(" · ");
+  const orientation = record.orientation?.reversible
+    ? `Reversible · ${record.orientation.adjustmentDegrees}° adjustment`
+    : null;
+  const features = [
+    record.operatingFeatures?.dryRunPermitted ? "Dry run permitted" : null,
+    record.operatingFeatures?.bearing ? `${record.operatingFeatures.bearing} bearing` : null,
+  ].filter(Boolean).join(" · ");
+  return [
+    ["Manufacturer", record.manufacturer],
+    ["Catalog number", record.catalogNumber],
+    ["Unit type", record.type],
+    ["Mount", mount],
+    ["Mass", Number.isFinite(record.massKg) ? `${record.massKg} kg` : null],
+    ["Output", output],
+    ["Orientation", orientation],
+    ["Drive ratio", record.drive?.ratio],
+    ["Output rotation", record.drive?.rotationRelationship],
+    ["Maximum torque", Number.isFinite(record.drive?.maximumTorqueNm) ? `${record.drive.maximumTorqueNm} Nm` : null],
+    ["Maximum speed", Number.isFinite(record.drive?.maximumSpeedRpm) ? `${record.drive.maximumSpeedRpm.toLocaleString("en-US")} rpm` : null],
+    ["Coolant", record.coolant?.modes?.join(" / ")],
+    ["Maximum coolant pressure", Number.isFinite(record.coolant?.maximumPressureBar) ? `${record.coolant.maximumPressureBar} bar` : null],
+    ["Published features", features],
+  ];
+}
+
+function drivenUnitDrawingEntries(record) {
+  const drawing = record.publishedDrawing;
+  if (!drawing) return [];
+  const range = (value) => value ? `${value.minimum} to ${value.maximum} mm` : null;
+  const millimeters = (value) => Number.isFinite(value) ? `${value} mm` : null;
+  const millimeterList = (value) => Array.isArray(value) && value.length ? value.map((entry) => `${entry} mm`).join(" · ") : null;
+  const degreeList = (value) => Array.isArray(value) && value.length ? value.map((entry) => `${entry}°`).join(" · ") : null;
+  return [
+    ["Drawing publication", drawing.publishedOn],
+    ["X range", range(drawing.xRange)],
+    ["Y range", range(drawing.yRange)],
+    ["Body range", range(drawing.bodyRange)],
+    ["Overall length", millimeters(drawing.overallLength)],
+    ["Width", millimeters(drawing.width)],
+    ["Height", millimeters(drawing.height)],
+    ["Center distance", millimeters(drawing.centerDistance)],
+    ["Drive / machine diameter", millimeters(drawing.driveDiameter ?? drawing.machineDiameter)],
+    ["Output diameter", millimeters(drawing.outputDiameter)],
+    ["Tool-end diameters", millimeterList(drawing.toolEndDiameters)],
+    ["Axial dimensions", millimeterList(drawing.axialDimensions)],
+    ["Linear dimension chain", millimeterList(drawing.linearChain)],
+    ["Horizontal reference dimensions", millimeterList(drawing.horizontalReferenceDimensions)],
+    ["Vertical reference dimensions", millimeterList(drawing.verticalReferenceDimensions)],
+    ["Published radius", Number.isFinite(drawing.radius) ? `R${drawing.radius} mm` : null],
+    ["Published angles", degreeList(drawing.anglesDegrees)],
+  ];
+}
+
+function renderDrivenUnitDetail(record) {
+  const header = document.createElement("header");
+  const titleBlock = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  eyebrow.className = "eyebrow";
+  eyebrow.textContent = "DRIVEN UNIT · BROWSE ONLY";
+  const title = document.createElement("h3");
+  title.id = "toolLibraryDetailTitle";
+  title.textContent = toolLibraryRecordName(record, "driven");
+  titleBlock.append(eyebrow, title);
+  const revision = document.createElement("span");
+  revision.className = "tool-library-revision";
+  revision.textContent = `REV ${record.revision}`;
+  header.append(titleBlock, revision);
+  elements.toolLibraryDetail.append(header);
+
+  const copy = document.createElement("p");
+  copy.className = "tool-library-detail-copy";
+  copy.textContent = `${record.revisionRef}. Manufacturer-published factual metadata and outbound source links are retained; no mounted transform or program reference is established.`;
+  elements.toolLibraryDetail.append(copy);
+
+  const unavailable = {
+    state: "catalog only",
+    available: false,
+    blockedReason: record.assignment.blockedReason,
+  };
+  const authorities = document.createElement("div");
+  authorities.className = "tool-library-authorities";
+  authorities.setAttribute("aria-label", "Driven-unit authority boundaries");
+  authorities.append(
+    makeAuthority("display", unavailable),
+    makeAuthority("reference", unavailable),
+    makeAuthority("cutting", unavailable),
+    makeAuthority("collision", unavailable),
+  );
+  elements.toolLibraryDetail.append(authorities);
+
+  const noPreview = document.createElement("div");
+  noPreview.className = "tool-library-no-preview";
+  const noPreviewTitle = document.createElement("strong");
+  noPreviewTitle.textContent = "No copied or derived outline";
+  const noPreviewText = document.createElement("span");
+  noPreviewText.textContent = "This browse-only record intentionally shows no manufacturer drawing, CAD-derived shape, mounted pose, or constructed envelope.";
+  noPreview.append(noPreviewTitle, noPreviewText);
+  elements.toolLibraryDetail.append(noPreview);
+
+  elements.toolLibraryDetail.append(definitionListSection("Published catalog facts", drivenUnitFactEntries(record)));
+  const drawingEntries = drivenUnitDrawingEntries(record);
+  if (drawingEntries.length) {
+    elements.toolLibraryDetail.append(definitionListSection("Published drawing dimensions", drawingEntries));
+  } else {
+    const missingDrawing = document.createElement("div");
+    missingDrawing.className = "tool-library-detail-empty";
+    const missingTitle = document.createElement("strong");
+    missingTitle.textContent = "No current dimensioned drawing retained";
+    const missingText = document.createElement("span");
+    missingText.textContent = "Only the manufacturer product record and official STEP download are linked; no dimensions were inferred from CAD bounds.";
+    missingDrawing.append(missingTitle, missingText);
+    elements.toolLibraryDetail.append(missingDrawing);
+  }
+  elements.toolLibraryDetail.append(sourceSection(drivenUnitSources(record)));
+
+  const boundary = document.createElement("div");
+  boundary.className = "tool-library-catalog-boundary";
+  const boundaryTitle = document.createElement("strong");
+  boundaryTitle.textContent = "Licensing boundary";
+  const boundaryText = document.createElement("span");
+  boundaryText.textContent = LIVE_TOOL_LIBRARY_CATALOG.licensingBoundary.note;
+  boundary.append(boundaryTitle, boundaryText);
+  elements.toolLibraryDetail.append(boundary);
+
+  const limitation = document.createElement("div");
+  limitation.className = "tool-library-limitation";
+  const limitationTitle = document.createElement("strong");
+  limitationTitle.textContent = "Catalog-only / unassignable";
+  const limitationText = document.createElement("span");
+  limitationText.textContent = record.assignment.blockedReason;
+  limitation.append(limitationTitle, limitationText);
+  elements.toolLibraryDetail.append(limitation);
+  elements.toolLibraryAssign.disabled = true;
+  elements.toolLibraryAssign.textContent = "Catalog record only";
+}
+
+function renderMillingCutterDetail(record) {
+  const preview = millingCutterPreview(record);
+  const eligible = record.demoCuttingEligibility?.eligible === true;
+  const header = document.createElement("header");
+  const titleBlock = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  eyebrow.className = "eyebrow";
+  eyebrow.textContent = eligible ? "MILLING CUTTER · BOUNDED DEMO" : "MILLING CUTTER · BROWSE ONLY";
+  const title = document.createElement("h3");
+  title.id = "toolLibraryDetailTitle";
+  title.textContent = toolLibraryRecordName(record, "cutters");
+  titleBlock.append(eyebrow, title);
+  const revision = document.createElement("span");
+  revision.className = "tool-library-revision";
+  revision.textContent = `REV ${record.revision}`;
+  header.append(titleBlock, revision);
+  elements.toolLibraryDetail.append(header);
+
+  const copy = document.createElement("p");
+  copy.className = "tool-library-detail-copy";
+  copy.textContent = `${record.revisionRef}. The profile below is an original parametric schematic built from manufacturer-published dimensions; no manufacturer artwork or CAD is bundled.`;
+  elements.toolLibraryDetail.append(copy);
+
+  const authorities = document.createElement("div");
+  authorities.className = "tool-library-authorities";
+  authorities.setAttribute("aria-label", "Milling cutter authority boundaries");
+  const unavailable = {state: "unavailable", available: false, blockedReason: "No driven holder, mounted transform, or collision envelope is established."};
+  const bounded = {
+    state: eligible ? "bounded axial bore" : "browse only",
+    available: eligible,
+    blockedReason: eligible ? record.demoCuttingEligibility.blockedOutsideScope : record.demoCuttingEligibility.blockedReason,
+  };
+  authorities.append(
+    makeAuthority("display", {state: "catalog construction", available: true}),
+    makeAuthority("reference", bounded),
+    makeAuthority("cutting", bounded),
+    makeAuthority("collision", unavailable),
+  );
+  elements.toolLibraryDetail.append(authorities);
+
+  const figure = document.createElement("figure");
+  figure.className = "tool-library-preview";
+  figure.append(preview.svg);
+  const caption = document.createElement("figcaption");
+  caption.textContent = `Source-scale cutter cross-section: Ø${preview.model.dimensions.cutterDiameterMm} mm cutter, ${preview.model.dimensions.cuttingLengthMm} mm ${preview.model.dimensions.cuttingLengthKind.replaceAll("-", " ")}, Ø${preview.model.dimensions.shankDiameterMm} mm shank, ${preview.model.dimensions.overallLengthMm} mm OAL.`;
+  figure.append(caption);
+  elements.toolLibraryDetail.append(figure);
+
+  const point = preview.model.dimensions.point || {};
+  elements.toolLibraryDetail.append(
+    definitionListSection("Published cutter facts", [
+      ["Manufacturer", record.manufacturer],
+      ["Catalog number", record.catalogNumber],
+      ["Family / profile", `${record.family} · ${record.profile}`],
+      ["Flutes", record.flutes],
+      ["Cutter diameter", `${preview.model.dimensions.cutterDiameterMm} mm · ${(preview.model.dimensions.cutterDiameterMm / 25.4).toFixed(4)} in`],
+      [preview.model.dimensions.cuttingLengthKind === "flute-length" ? "Flute length" : "Length of cut", `${preview.model.dimensions.cuttingLengthMm} mm · ${(preview.model.dimensions.cuttingLengthMm / 25.4).toFixed(4)} in`],
+      ["Shank diameter", `${preview.model.dimensions.shankDiameterMm} mm · ${(preview.model.dimensions.shankDiameterMm / 25.4).toFixed(4)} in`],
+      ["Overall length", `${preview.model.dimensions.overallLengthMm} mm · ${(preview.model.dimensions.overallLengthMm / 25.4).toFixed(4)} in`],
+      ["Point", point.pointAngleDegrees ? `${point.pointAngleDegrees}° included` : point.type],
+      ["Center cutting", record.centerCutting === null ? "Not retained" : record.centerCutting ? "Yes" : "No"],
+      ["Material / coating", [record.material, record.coating?.name].filter(Boolean).join(" · ")],
+    ]),
+    definitionListSection("Independent authority labels", millingToolPreviewClaimLabels(record).map((claim) => [claim.id, claim.label])),
+    sourceSection(millingCutterSources(record)),
+  );
+
+  const boundary = document.createElement("div");
+  boundary.className = "tool-library-catalog-boundary";
+  const boundaryTitle = document.createElement("strong");
+  boundaryTitle.textContent = "Licensing boundary";
+  const boundaryText = document.createElement("span");
+  boundaryText.textContent = MILLING_TOOL_LIBRARY_CATALOG.licensingBoundary.note;
+  boundary.append(boundaryTitle, boundaryText);
+  elements.toolLibraryDetail.append(boundary);
+
+  const limitation = document.createElement("div");
+  limitation.className = "tool-library-limitation";
+  const limitationTitle = document.createElement("strong");
+  limitationTitle.textContent = eligible ? "Bounded assignment scope" : "Why assignment is blocked";
+  const limitationText = document.createElement("span");
+  limitationText.textContent = eligible
+    ? record.demoCuttingEligibility.blockedOutsideScope
+    : record.demoCuttingEligibility.blockedReason;
+  limitation.append(limitationTitle, limitationText);
+  elements.toolLibraryDetail.append(limitation);
+
+  const selectedTarget = elements.toolLibraryTarget.value;
+  elements.toolLibraryTarget.disabled = false;
+  elements.toolLibraryAssign.disabled = !(eligible && selectedTarget);
+  elements.toolLibraryAssign.textContent = eligible ? "Assign cutter-only demo" : "Catalog record only";
+}
+
 function relatedAssemblies(record, tab = state.toolLibraryTab) {
   if (tab === "assemblies") return [record];
   return TOOL_LIBRARY_CATALOG.assemblies.filter((assembly) => (
@@ -2107,9 +2669,18 @@ function renderToolLibraryDetail(record) {
     empty.append(heading, copy);
     elements.toolLibraryDetail.append(empty);
     elements.toolLibraryAssign.disabled = true;
+    elements.toolLibraryAssign.textContent = state.toolLibraryTab === "driven" || state.toolLibraryTab === "cutters" ? "Catalog record only" : "Assign mounted assembly";
     return;
   }
   const tab = state.toolLibraryTab;
+  if (tab === "driven") {
+    renderDrivenUnitDetail(record);
+    return;
+  }
+  if (tab === "cutters") {
+    renderMillingCutterDetail(record);
+    return;
+  }
   const detail = tab === "assemblies" ? toolLibraryAssemblyDetail(record.id) : null;
   const header = document.createElement("header");
   const titleBlock = document.createElement("div");
@@ -2192,6 +2763,7 @@ function renderToolLibraryDetail(record) {
   elements.toolLibraryDetail.append(limitation);
 
   const selectedTarget = elements.toolLibraryTarget.value;
+  elements.toolLibraryTarget.disabled = false;
   elements.toolLibraryAssign.disabled = !(tab === "assemblies" && record.assignment.assignable && selectedTarget);
   elements.toolLibraryAssign.textContent = tab === "assemblies" && record.assignment.assignable
     ? "Assign mounted assembly"
@@ -2220,7 +2792,7 @@ function renderToolLibrary() {
   if (!records.some((record) => toolLibraryRecordKey(record) === state.toolLibrarySelection)) {
     state.toolLibrarySelection = records.length ? toolLibraryRecordKey(records[0]) : null;
   }
-  elements.toolLibraryResultsTitle.textContent = ({assemblies: "MOUNTED ASSEMBLIES", holders: "HOLDERS", inserts: "INSERTS"})[state.toolLibraryTab];
+  elements.toolLibraryResultsTitle.textContent = ({assemblies: "MOUNTED ASSEMBLIES", holders: "HOLDERS", inserts: "INSERTS", cutters: "MILLING CUTTERS", driven: "DRIVEN UNITS"})[state.toolLibraryTab];
   elements.toolLibraryResultCount.textContent = `${records.length} RESULT${records.length === 1 ? "" : "S"}`;
   elements.toolLibraryResults.replaceChildren();
   for (const record of records) {
@@ -2236,14 +2808,20 @@ function renderToolLibrary() {
     const identity = document.createElement("span");
     identity.textContent = state.toolLibraryTab === "assemblies"
       ? `${record.revisionRef} · ${record.facets.shape} · ${record.facets.insertIcInches ? `${record.facets.insertIcInches} in IC` : "groove"}`
-      : `${record.revisionRef} · material ${record.materialNumber}`;
+      : state.toolLibraryTab === "driven"
+        ? `${record.revisionRef} · ${record.output?.colletSystem || "output unknown"} · ${record.drive?.ratio || "ratio unknown"}`
+        : state.toolLibraryTab === "cutters"
+          ? `${record.revisionRef} · ${record.profile} · Ø${record.publishedDimensions.cutterDiameter} ${record.publishedDimensions.units}`
+        : `${record.revisionRef} · material ${record.materialNumber}`;
     const badges = document.createElement("span");
     badges.className = "tool-library-result-badges";
     const sourceBadge = document.createElement("i");
-    sourceBadge.textContent = "MANUFACTURER SOURCE";
+    sourceBadge.textContent = state.toolLibraryTab === "driven" ? "HEIMATEC SOURCE" : "MANUFACTURER SOURCE";
     const authorityBadge = document.createElement("i");
-    authorityBadge.className = toolLibraryRecordDisplayTier(record) === "manufacturer-cad-projection" ? "verified" : "catalog";
-    authorityBadge.textContent = toolLibraryRecordDisplayTier(record) === "manufacturer-cad-projection" ? "CAD DISPLAY" : "CATALOG ONLY";
+    authorityBadge.className = toolLibraryRecordDisplayTier(record) === "manufacturer-cad-projection" || record.demoCuttingEligibility?.eligible ? "verified" : "catalog";
+    authorityBadge.textContent = state.toolLibraryTab === "cutters" && record.demoCuttingEligibility?.eligible
+      ? "BOUNDED BORE"
+      : toolLibraryRecordDisplayTier(record) === "manufacturer-cad-projection" ? "CAD DISPLAY" : toolLibraryRecordDisplayTier(record) === "catalog-construction" ? "SCALED SCHEMATIC" : "CATALOG ONLY";
     badges.append(sourceBadge, authorityBadge);
     button.append(heading, identity, badges);
     button.addEventListener("click", () => {
@@ -2276,10 +2854,27 @@ function syncToolLibraryTabs() {
     tab.setAttribute("aria-selected", String(active));
     tab.tabIndex = active ? 0 : -1;
   }
+  const simplified = state.toolLibraryTab === "driven" || state.toolLibraryTab === "cutters";
+  const driven = state.toolLibraryTab === "driven";
+  elements.toolLibraryFamilyFilterLabel.hidden = simplified;
+  elements.toolLibraryShapeFilterLabel.hidden = simplified;
+  elements.toolLibraryFamilyFilter.disabled = simplified;
+  elements.toolLibraryShapeFilter.disabled = simplified;
+  elements.toolLibraryTarget.disabled = driven;
+  if (simplified) {
+    elements.toolLibraryFamilyFilter.value = "";
+    elements.toolLibraryShapeFilter.value = "";
+    elements.toolLibraryAuthorityFilter.value = "";
+  }
+  elements.toolLibrarySearch.placeholder = driven
+    ? "Heimatec catalog number, axial, radial, ER32, BMT…"
+    : state.toolLibraryTab === "cutters"
+      ? "Manufacturer, cutter number, flat, ball, drill…"
+      : "Manufacturer, catalog number, ISO code, family…";
 }
 
 function setToolLibraryTab(tab) {
-  if (!["assemblies", "holders", "inserts"].includes(tab)) return;
+  if (!["assemblies", "holders", "inserts", "cutters", "driven"].includes(tab)) return;
   state.toolLibraryTab = tab;
   state.toolLibrarySelection = null;
   syncToolLibraryTabs();
@@ -2301,7 +2896,7 @@ function focusToolLibraryDetail() {
 
 function openToolLibrary(targetToolKey = null, selectedAssemblyId = null) {
   if (selectedAssemblyId) resetToolLibraryFilters();
-  state.toolLibraryTab = "assemblies";
+  state.toolLibraryTab = selectedAssemblyId && millingToolLibraryRecordById(selectedAssemblyId) ? "cutters" : "assemblies";
   state.toolLibrarySelection = selectedAssemblyId || state.toolLibrarySelection || listToolLibraryAssemblies()[0]?.id || null;
   syncToolLibraryTabs();
   renderToolLibraryTargetOptions(targetToolKey);
@@ -2333,8 +2928,11 @@ function drawToolAssembly2d() {
   }
   const toolKey = activeProgramToolKey();
   const configured = configuredToolAssembly2d(toolKey);
-  const programmedReference = toolReferencePointForExecution(state.parsed.segments, state.visibleBlocks);
-  const physicalReference = programmedReference ? {z: programmedReference.z, x: programmedReference.x * xScale()} : null;
+  const physicalReference = toolPhysicalReferencePointForExecution(
+    state.parsed.segments,
+    state.visibleBlocks,
+    xScale(),
+  );
   const spindle = spindleStateAtLine(state.parsed.spindleEvents, state.programLine);
   const badgeStatus = elements.toolVerificationBadge.querySelector("strong");
   elements.toolVerificationBadge.hidden = false;
@@ -2343,6 +2941,10 @@ function drawToolAssembly2d() {
     badgeStatus.textContent = toolKey ? `${toolKey} UNASSIGNED` : "NO ACTIVE TOOL";
     return;
   }
+  const liveCutter = configured.geometryKind === "axial-milling-cutter";
+  const liveSpindle = (state.parsed.liveToolEvents || [])
+    .filter((event) => Number(event.line) <= state.programLine)
+    .at(-1) || null;
   const model = buildToolAssemblyDisplay2d(configured, physicalReference, {
     spindleDirection: spindle.direction,
     spindleRunning: spindle.running,
@@ -2353,12 +2955,16 @@ function drawToolAssembly2d() {
     return;
   }
   const stoppedLabel = spindle.running === false ? " · STOPPED" : "";
-  const spindleLabel = spindle.direction === "m3"
-    ? `M3 FACE DOWN${stoppedLabel}`
-    : spindle.direction === "m4"
-      ? `M4 FACE UP${stoppedLabel}`
-      : "ROTATION UNKNOWN · DASHED";
-  elements.toolVerificationBadge.classList.toggle("invalid", spindle.direction === "unknown");
+  const spindleLabel = liveCutter
+    ? liveSpindle?.running === true
+      ? `${String(liveSpindle.command || liveSpindle.direction || "LIVE").toUpperCase()} · ${Number(liveSpindle.speed).toLocaleString("en-US")} RPM`
+      : "LIVE SPINDLE STOPPED"
+    : spindle.direction === "m3"
+      ? `M3 FACE DOWN${stoppedLabel}`
+      : spindle.direction === "m4"
+        ? `M4 FACE UP${stoppedLabel}`
+        : "ROTATION UNKNOWN · DASHED";
+  elements.toolVerificationBadge.classList.toggle("invalid", !liveCutter && spindle.direction === "unknown");
   badgeStatus.textContent = `${toolKey} · ${spindleLabel}`;
 
   const tracePolygon = (points) => {
@@ -2415,16 +3021,25 @@ function drawToolAssembly2d() {
 }
 
 function segmentScreenPoints(segment) {
-  return segment.points.map((point) => worldToScreen(point));
+  const effectiveXScale = segment?.xCoordinateMode === "radius" ? 1 : xScale();
+  return segment.points.map((point) => worldToScreen({
+    ...point,
+    x: point.x * effectiveXScale / xScale(),
+  }));
 }
 
 function strokeSegment(segment, pending = false) {
   const colors = {rapid: "#f59e0b", rough: "#22c55e", "cycle-profile": "#67e8f9", finish: "#e5eefc", linear: "#38bdf8", "arc-cw": "#a78bfa", "arc-ccw": "#a78bfa"};
-  const collision = !pending && collisionPointForSegment(segment, collisionOptions());
-  ctx.strokeStyle = pending ? "#64748b" : (collision ? "#fb7185" : (colors[segment.type] || "#94a3b8"));
-  ctx.lineWidth = collision ? 2.8 : (segment.type === "rapid" ? 1.2 : (pending ? 1.35 : 2.15));
-  ctx.globalAlpha = pending ? 0.38 : 0.98;
-  ctx.setLineDash(segment.type === "rapid" ? [6, 5] : []);
+  const live = isLiveToolSegment(segment);
+  const rapid = isRapidMotion(segment);
+  const blocked = Boolean(segment.verificationBlocked || segment.liveToolBlocked);
+  const collision = !pending && !live && collisionPointForSegment(segment, collisionOptions());
+  ctx.strokeStyle = pending
+    ? (blocked ? "#7f1d1d" : (live ? "#80506e" : "#64748b"))
+    : (blocked || collision ? "#fb7185" : (live ? "#f472b6" : (colors[segment.type] || "#94a3b8")));
+  ctx.lineWidth = blocked || collision ? 2.8 : (rapid ? 1.2 : (pending ? 1.35 : 2.15));
+  ctx.globalAlpha = pending ? (live ? 0.48 : 0.38) : 0.98;
+  ctx.setLineDash(blocked ? [2, 2] : (live ? (rapid ? [7, 4, 2, 4] : [3, 2]) : (rapid ? [6, 5] : [])));
   ctx.beginPath();
   segmentScreenPoints(segment).forEach((screen, index) => {
     if (index === 0) ctx.moveTo(screen.x, screen.y); else ctx.lineTo(screen.x, screen.y);
@@ -2467,15 +3082,15 @@ function drawToolpath() {
   }
   drawProgramPointMarkers2d(count);
   if (!count) return;
-  const finalPoint = state.parsed.segments[count - 1].end;
-  const marker = worldToScreen(finalPoint);
+  const finalSegment = state.parsed.segments[count - 1];
+  const marker = segmentScreenPoints(finalSegment).at(-1);
   ctx.fillStyle = "#e5eefc";
   ctx.shadowColor = "#56e39f";
   ctx.shadowBlur = 10;
   ctx.beginPath(); ctx.arc(marker.x, marker.y, 3.5, 0, Math.PI * 2); ctx.fill();
   ctx.shadowBlur = 0;
 
-  const collisions = findCollisions(state.parsed.segments.slice(0, count), collisionOptions());
+  const {collisions} = evaluateCollisions(state.parsed.segments.slice(0, count), collisionOptions());
   for (const collision of collisions) {
     const point = worldToScreen({z: collision.point.z, x: collision.point.x});
     ctx.strokeStyle = "#fb7185";
@@ -2719,10 +3334,10 @@ function draw3d(rect) {
     const stockLength = Math.max(0, setupValue(elements.stockLength));
     if (stockDiameter && stockLength) {
       stock = stockProfileFor(stockDiameter, stockLength);
-      $("stockRemoved").textContent = stock ? `${stock.removedPercent.toFixed(1)}%` : "BLOCKED";
+      if (stock) updateStockRemovedStatus(stock); else updateStockRemovedStatus(null, "BLOCKED");
     }
   } else {
-    $("stockRemoved").textContent = "OFF";
+    updateStockRemovedStatus(null, "OFF");
   }
   renderLathe3d(ctx, {
     width: rect.width,
@@ -2740,11 +3355,57 @@ function draw3d(rect) {
   drawViewCube();
 }
 
+function drawFace(rect) {
+  const stockRadius = elements.stockToggle.checked ? Math.max(0, setupValue(elements.stockDiameter)) / 2 : 0;
+  const segments = elements.toolpathToggle.checked ? state.parsed.segments : [];
+  const stockDiameter = Math.max(0, setupValue(elements.stockDiameter));
+  const stockLength = Math.max(0, setupValue(elements.stockLength));
+  const stock = elements.stockToggle.checked && stockDiameter && stockLength
+    ? stockProfileFor(stockDiameter, stockLength)
+    : null;
+  renderLiveFace2d(ctx, {
+    width: rect.width,
+    height: rect.height,
+    segments,
+    visibleCount: elements.toolpathToggle.checked ? state.visibleBlocks : 0,
+    xScale: xScale(),
+    stockRadius,
+    axialBores: stock?.axialBores || [],
+    lengthScale: unitScale(),
+    lengthUnit: unitName(),
+    lengthDecimals: elements.displayUnits.value === "inch" ? 4 : 3,
+  });
+  const faceHeading = elements.faceViewStatus.querySelector("strong");
+  const faceCopy = elements.faceViewStatus.querySelector("span");
+  const liveSummary = summarizeAxialFlatBoreStock(stock?.liveStock);
+  if (liveSummary.status === LIVE_STOCK_STATUS.MODELED) {
+    faceHeading.textContent = "FACE VIEW · AXIAL BORE MODELED";
+    faceCopy.textContent = `${liveSummary.label}. Circle diameter and depth come from the assigned cutter and exact plunge; holder and collision remain path-only.`;
+  } else {
+    faceHeading.textContent = "FACE VIEW · PATH ONLY";
+    faceCopy.textContent = "Programmed live-tool centerlines and stock face only. No unsupported material-removal or cutter/holder collision claim.";
+  }
+  state.graphicsHits = [];
+  state.componentGeometry = [];
+  state.geometryHover = null;
+  state.geometrySelection = null;
+  elements.toolVerificationBadge.hidden = true;
+  if (!elements.stockToggle.checked) {
+    updateStockRemovedStatus(null, "OFF");
+  } else {
+    if (stockDiameter && stockLength) {
+      if (stock) updateStockRemovedStatus(stock); else updateStockRemovedStatus(null, "BLOCKED");
+    }
+  }
+}
+
 function draw() {
   const rect = elements.wrap.getBoundingClientRect();
   ctx.clearRect(0, 0, rect.width, rect.height);
   if (state.viewMode === "3d") {
     draw3d(rect);
+  } else if (state.viewMode === "face") {
+    drawFace(rect);
   } else {
     drawGrid(rect.width, rect.height);
     drawKeepout();
@@ -2756,24 +3417,70 @@ function draw() {
   }
   renderGeometryInspector();
   updateDimensionControls();
+  const liveAttempts = liveToolOperations();
   elements.empty.hidden = state.parsed.segments.length > 0;
+  elements.empty.textContent = liveAttempts.length
+    ? (liveAttempts.some((attempt) => attempt.blocked)
+      ? "No drawable live-tool path — motion is blocked; see Program notes"
+      : "Live-tool position established; the operation has no drawable path")
+    : "No motion blocks found";
+}
+
+function updateBoundsReadout(bounds) {
+  const output = $("boundsReadout");
+  const decimals = elements.displayUnits.value === "inch" ? 3 : 1;
+  const liveSummary = liveToolOperationSummary();
+  const hasYBounds = Number.isFinite(bounds?.minY) && Number.isFinite(bounds?.maxY);
+  const unresolvedLive = liveSummary.notDisplayed.length > 0;
+  const pathOnly = hasYBounds
+    || liveSummary.operations.length > 0
+    || (state.parsed.cAxisMotions || []).length > 0;
+  output.className = "";
+  if (!bounds) {
+    output.textContent = pathOnly ? "PATH ONLY · UNRESOLVED" : "—";
+    output.className = pathOnly ? "warning-value" : "";
+    output.title = pathOnly
+      ? "Live-tool or C-axis operations are present, but no complete drawable dimensional bounds are available."
+      : "No drawable program bounds are available.";
+    return;
+  }
+  const zSpan = displayValue(bounds.maxZ - bounds.minZ).toFixed(decimals);
+  const xSpan = displayValue(bounds.maxX - bounds.minX).toFixed(decimals);
+  if (hasYBounds) {
+    const ySpan = displayValue(bounds.maxY - bounds.minY).toFixed(decimals);
+    output.textContent = `X ${xSpan} × Y ${ySpan} × Z ${zSpan} ${unitName()} · PATH ONLY${unresolvedLive ? " · UNRESOLVED" : ""}`;
+  } else {
+    output.textContent = `${zSpan} × ${xSpan} ${unitName()}${pathOnly ? ` · PATH ONLY${unresolvedLive ? " · UNRESOLVED" : ""}` : ""}`;
+  }
+  output.className = pathOnly ? "warning-value" : "";
+  output.title = pathOnly
+    ? `${unresolvedLive ? "One or more live-tool operations have no drawable segment. " : ""}Displayed centerline bounds only; non-axisymmetric stock removal and full driven-tool clearance are not modeled.`
+    : "Drawable program Z × X bounds.";
 }
 
 function updateStats() {
   const segments = state.parsed.segments;
   const rapid = segments.filter((segment) => segment.type === "rapid").reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
-  const cut = segments.filter((segment) => segment.type !== "rapid").reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
+  const cut = segments.filter((segment) => !isRapidMotion(segment) && !isLiveToolSegment(segment)).reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
   const bounds = programBounds(segments, xScale());
-  const collisions = findCollisions(segments, collisionOptions());
+  const collisionEvaluation = evaluateCollisions(segments, {
+    ...collisionOptions(),
+    unresolvedOperations: state.parsed.liveToolAttempts,
+    cAxisMotions: state.parsed.cAxisMotions,
+  });
+  const {collisions} = collisionEvaluation;
   $("motionCount").textContent = String(segments.length);
   $("cycleCount").textContent = String(state.parsed.cycles.length);
+  updateLiveToolStatus();
   $("rapidDistance").textContent = formatDistance(rapid);
   $("cutDistance").textContent = formatDistance(cut);
   const machineOptions = machinePlotOptions(currentMachineProfile());
   const cycleTime = estimateCycleTime(state.parsed, {
     xScale: xScale(),
     rapidXMax: machineOptions.rapidXMax,
+    rapidYMax: machineOptions.rapidYMax,
     rapidZMax: machineOptions.rapidZMax,
+    rapidCMax: machineOptions.rapidCMax,
   });
   state.cycleTime = cycleTime;
   const timeText = cycleTime.hasEstimate
@@ -2792,16 +3499,55 @@ function updateStats() {
     element.classList.toggle("partial-time", cycleTime.quality === "partial");
     element.classList.toggle("assumed-time", cycleTime.quality === "assumed");
   }
-  $("boundsReadout").textContent = bounds ? `${displayValue(bounds.maxZ - bounds.minZ).toFixed(elements.displayUnits.value === "inch" ? 3 : 1)} × ${displayValue(bounds.maxX - bounds.minX).toFixed(elements.displayUnits.value === "inch" ? 3 : 1)} ${unitName()}` : "—";
+  updateBoundsReadout(bounds);
   const collisionStatus = $("collisionStatus");
-  collisionStatus.textContent = collisions.length ? `${collisions.length} HIT${collisions.length === 1 ? "" : "S"}` : "CLEAR";
-  collisionStatus.className = collisions.length ? "danger-value" : "safe-value";
+  const pathOnlyCollisions = collisionEvaluation.warnings.length > 0
+    || liveToolOperations().length > 0
+    || (state.parsed.cAxisMotions || []).length > 0;
+  collisionStatus.textContent = collisions.length
+    ? `${collisions.length} HIT${collisions.length === 1 ? "" : "S"}${pathOnlyCollisions ? " · PATH ONLY" : ""}`
+    : pathOnlyCollisions ? "PATH ONLY" : "CLEAR";
+  collisionStatus.className = collisions.length ? "danger-value" : (pathOnlyCollisions ? "warning-value" : "safe-value");
+  collisionStatus.title = pathOnlyCollisions
+    ? "The configured 2D chuck keep-out was evaluated for turning paths only. Live-tool 3D cutter/holder sweeps are not modeled."
+    : "Configured 2D chuck keep-out status for supported turning paths.";
   const notes = [...state.parsed.warnings, ...assignmentWarnings()];
   const rapidAssumption = cycleTime.limitations.find((limitation) => limitation.includes("rapid timing assumes"));
   if (rapidAssumption) notes.unshift({line: null, info: true, message: rapidAssumption});
   if (collisions.length) {
     const lines = [...new Set(collisions.map((collision) => collision.segment.line).filter(Boolean))];
     notes.unshift({line: lines[0] || null, danger: true, message: `${collisions.length} toolpath move${collisions.length === 1 ? "" : "s"} enter the configured chuck keep-out envelope.`});
+  }
+  for (const warning of collisionEvaluation.warnings) {
+    notes.unshift({...warning, verificationBlocked: true});
+  }
+  const stockDiameter = elements.stockToggle.checked ? Math.max(0, setupValue(elements.stockDiameter)) : 0;
+  const stockLength = elements.stockToggle.checked ? Math.max(0, setupValue(elements.stockLength)) : 0;
+  const analyzedStock = stockDiameter && stockLength
+    ? stockProfileFor(stockDiameter, stockLength, state.parsed.segments.length, state.parsed.sourceLines)
+    : null;
+  const analyzedLiveStock = analyzedStock?.liveStock || null;
+  const analyzedLiveSummary = summarizeAxialFlatBoreStock(analyzedLiveStock);
+  const firstLiveCut = liveToolOperations().find((operation) => !operation.rapid);
+  if (firstLiveCut) {
+    if (analyzedLiveSummary.status === LIVE_STOCK_STATUS.MODELED) {
+      const [firstBore] = analyzedLiveStock.axialBores;
+      const boreLine = firstBore?.sourceLines?.[0] || firstLiveCut.line || null;
+      const boreDetail = firstBore
+        ? `: Ø${formatDistance(firstBore.radius * 2, elements.displayUnits.value === "inch" ? 4 : 3)} × ${formatDistance(firstBore.depth, elements.displayUnits.value === "inch" ? 4 : 3)} deep`
+        : "";
+      notes.unshift({
+        line: boreLine,
+        info: true,
+        message: `Axial bore stock removal modeled${boreDetail}. Cutter-holder collision remains PATH ONLY.`,
+      });
+    } else {
+      notes.unshift({
+        line: firstLiveCut.line || null,
+        verificationBlocked: true,
+        message: "Live-tool stock removal is PATH ONLY: the programmed centerline is displayed, but this operation is outside the bounded axial-bore model.",
+      });
+    }
   }
   for (const cycle of state.parsed.cycles) {
     if (cycle.code === "G70") continue;
@@ -2815,7 +3561,7 @@ function updateStats() {
   } else {
     notes.slice(0, 12).forEach((warning) => {
       const item = document.createElement("li");
-      if (warning.danger) item.className = "danger";
+      if (warning.danger || warning.verificationBlocked) item.className = "danger";
       else if (warning.info) item.className = "muted";
       item.textContent = `${warning.line ? `Line ${warning.line}: ` : ""}${warning.message}`; list.append(item);
     });
@@ -2927,14 +3673,29 @@ function stepProgram(direction) {
 
 function plotProgram({fit = true, clearDimensions = true} = {}) {
   const machine = currentMachineProfile();
+  const plotOptions = machinePlotOptions(machine);
   const previousAssignments = state.toolAssignments;
   const previousAssignmentScope = state.toolAssignmentScope;
   const nextAssignmentScope = programAssignmentScope(elements.input.value, {fileName: elements.fileName.textContent});
   state.parsed = parseGcode(elements.input.value, {
     xMode: elements.xMode.value,
     arcChordTolerance: graphicsQuality().arcChordTolerance,
-    ...machinePlotOptions(machine),
+    ...plotOptions,
   });
+  if (plotOptions.initialPosition) {
+    const source = String(plotOptions.initialPositionMode || "custom").replaceAll("-", " ").toUpperCase();
+    state.parsed.warnings.unshift({
+      line: null,
+      info: true,
+      message: `Initial rapid begins at the configured ${source} plotted tool-reference point. Turret, holder, and machine-coordinate transforms are not modeled by this point.`,
+    });
+  } else if (plotOptions.initialPositionMode !== "unknown" && plotOptions.initialPositionIssue === "incomplete") {
+    state.parsed.warnings.unshift({
+      line: null,
+      info: true,
+      message: `The selected ${String(plotOptions.initialPositionMode).replaceAll("-", " ")} start needs both plotted program-coordinate Initial X and Initial Z values; no incoming approach was invented.`,
+    });
+  }
   if (machine?.status === "draft") {
     state.parsed.warnings.unshift({line: null, info: true, message: `${machine.name} draft estimates are active; verify the machine definition before relying on approach or rapid geometry.`});
   }
@@ -2944,9 +3705,8 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
   });
   state.toolAssignments = Object.fromEntries(Object.entries(state.toolAssignments).map(([toolKey, assignment]) => {
     const assignmentRef = toolAssignmentAssemblyRef(assignment);
-    const currentCatalogAssembly = assignmentRef ? toolLibraryAssemblyById(assignmentRef.id) : null;
-    const resolvedAssembly = currentCatalogAssembly
-      ? resolveAssignableToolAssembly2d({id: currentCatalogAssembly.id, revision: currentCatalogAssembly.revision})
+    const resolvedAssembly = assignmentRef && assignmentRef.legacy !== true
+      ? resolveAssignableToolAssembly2d({id: assignmentRef.id, revision: assignmentRef.revision})
       : null;
     return [toolKey, normalizeVersionedToolAssignment(assignment, resolvedAssembly)];
   }));
@@ -2958,6 +3718,17 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
       confirmed: true,
       confirmationSource: "bundled-sample",
     };
+  }
+  if (isExactBundledProgram(elements.input.value, liveBoreSampleProgram, state.bundledSample)
+    && (state.parsed.executableToolCalls || []).some((call) => call.key === "T0202")) {
+    const cutter = resolveAssignableToolAssembly2d({id: LIVE_BORE_SAMPLE_CUTTER_ID, revision: 1});
+    if (cutter) {
+      state.toolAssignments.T0202 ||= {
+        ...createVersionedToolAssignment(cutter),
+        confirmed: true,
+        confirmationSource: "bundled-sample",
+      };
+    }
   }
   state.toolAssignmentRevision += 1;
   state.stockProfileCache = null;
@@ -2972,12 +3743,18 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
   renderProgramLineNumbers();
   renderProgramToolAssignments();
   const cycleStatus = state.parsed.cycles.filter((cycle) => cycle.code !== "G70").map((cycle) => `${cycle.code} ${cycle.passes} passes`).join(" • ");
-  elements.status.textContent = state.parsed.segments.length ? `${state.parsed.segments.length} motion blocks${cycleStatus ? ` • ${cycleStatus}` : ""}` : "No motion found";
+  const liveSummary = liveToolOperationSummary();
+  elements.status.textContent = state.parsed.segments.length
+    ? `${state.parsed.segments.length} motion blocks${cycleStatus ? ` • ${cycleStatus}` : ""}`
+    : liveSummary.operations.length
+      ? `No drawable live-tool path · ${liveSummary.blocked.length} blocked · ${liveSummary.notDisplayed.length} not drawn`
+      : "No motion found";
   updateStats(); updateTransport();
   if (fit) fitView(); else draw();
 }
 
 function zoomAt(factor, x = elements.wrap.clientWidth / 2, y = elements.wrap.clientHeight / 2) {
+  if (state.viewMode === "face") return;
   if (state.viewMode === "3d") {
     state.camera3d = zoomCameraAt(state.camera3d, factor, {x, y}, {
       width: elements.wrap.clientWidth,
@@ -3104,8 +3881,14 @@ elements.toolLibraryTarget.addEventListener("change", renderToolLibrary);
 elements.toolLibraryAssign.addEventListener("click", () => {
   const toolKey = elements.toolLibraryTarget.value;
   const assembly = state.toolLibraryTab === "assemblies" ? toolLibraryAssemblyById(state.toolLibrarySelection) : null;
-  const definition = assembly ? resolveAssignableToolAssembly2d({id: assembly.id, revision: assembly.revision}) : null;
-  if (!toolKey || !assembly?.assignment.assignable || !definition) return;
+  const cutter = state.toolLibraryTab === "cutters" ? millingToolLibraryRecordById(state.toolLibrarySelection) : null;
+  const assignableRecord = assembly?.assignment?.assignable === true
+    ? assembly
+    : cutter?.demoCuttingEligibility?.eligible === true ? cutter : null;
+  const definition = assignableRecord
+    ? resolveAssignableToolAssembly2d({id: assignableRecord.id, revision: assignableRecord.revision})
+    : null;
+  if (!toolKey || !assignableRecord || !definition) return;
   state.toolAssignments[toolKey] = createVersionedToolAssignment(definition, {
     tipDatum: definition.cuttingModel?.tipDatum || null,
     axialDirection: definition.cuttingModel?.axialDirection || null,
@@ -3138,6 +3921,7 @@ elements.machine.addEventListener("change", () => {
 
 $("plotButton").addEventListener("click", () => { plotProgram(); persistSession(); });
 $("loadSampleButton").addEventListener("click", () => loadProgram("sample-g71-rough.nc", sampleProgram, {bundledSample: true}));
+$("loadLiveBoreSampleButton").addEventListener("click", loadLiveBoreSample);
 $("openButton").addEventListener("click", openProgram);
 $("compareButton").addEventListener("click", openComparison);
 elements.save.addEventListener("click", saveProgram);
@@ -3179,8 +3963,11 @@ $("fitButton").addEventListener("click", fitView);
 $("zoomInButton").addEventListener("click", () => zoomAt(1.25));
 $("zoomOutButton").addEventListener("click", () => zoomAt(0.8));
 function setGraphicsDimension(mode) {
+  if (!["2d", "face", "3d"].includes(mode)) return;
   state.viewMode = mode;
   const threeDimensional = mode === "3d";
+  const face = mode === "face";
+  const twoDimensional = mode === "2d";
   if (!threeDimensional) {
     cancel3dPrecisionRedraw();
     navigation3dRenderer.cancel();
@@ -3189,23 +3976,36 @@ function setGraphicsDimension(mode) {
   state.hoverBlockIndex = null;
   state.geometryHover = null;
   state.graphicsHits = [];
-  elements.view2d.classList.toggle("active", !threeDimensional);
+  elements.view2d.classList.toggle("active", twoDimensional);
+  elements.viewFace.classList.toggle("active", face);
   elements.view3d.classList.toggle("active", threeDimensional);
-  elements.view2d.setAttribute("aria-pressed", String(!threeDimensional));
+  elements.view2d.setAttribute("aria-pressed", String(twoDimensional));
+  elements.viewFace.setAttribute("aria-pressed", String(face));
   elements.view3d.setAttribute("aria-pressed", String(threeDimensional));
-  elements.canvas.style.cursor = threeDimensional ? "grab" : "crosshair";
+  elements.canvas.setAttribute("aria-label", face
+    ? "Machine-oriented live-tool face view from the free end toward the chuck, with positive X up and positive Y left. Shows programmed X/Y centerlines and any supported analytic axial bores; unsupported material removal and complete cutter-holder collision remain path-only."
+    : threeDimensional
+      ? "Interactive three-dimensional lathe backplot."
+      : "Interactive lathe backplot. Click component geometry to inspect it, or use Dimension to pin exact line and radius measurements.");
+  elements.canvas.style.cursor = threeDimensional ? "grab" : (face ? "default" : "crosshair");
   elements.viewCube.hidden = !threeDimensional;
-  if (threeDimensional) {
+  elements.faceViewStatus.hidden = !face;
+  if (!twoDimensional) {
     state.geometrySelection = null;
     state.dimensionMode = false;
   }
   elements.wrap.classList.toggle("three-d", threeDimensional);
+  elements.wrap.classList.toggle("face-view", face);
+  $("fitButton").disabled = face;
+  $("zoomInButton").disabled = face;
+  $("zoomOutButton").disabled = face;
   state.drag = null;
   updateDimensionControls();
   updateToolControls();
   fitView();
 }
 elements.view2d.addEventListener("click", () => setGraphicsDimension("2d"));
+elements.viewFace.addEventListener("click", () => setGraphicsDimension("face"));
 elements.view3d.addEventListener("click", () => setGraphicsDimension("3d"));
 elements.toolOverlay.addEventListener("click", () => {
   if (state.viewMode !== "2d") return;
@@ -3321,6 +4121,12 @@ function geometryHitForEvent(event) {
   );
 }
 function updateGraphicsHover(event) {
+  if (state.viewMode === "face") {
+    state.hoverBlockIndex = null;
+    state.geometryHover = null;
+    elements.canvas.style.cursor = "default";
+    return null;
+  }
   if (state.viewMode === "2d") {
     const geometryHit = geometryHitForEvent(event);
     if (geometryHit) {
@@ -3378,6 +4184,7 @@ function selectGraphicsAt(event) {
   return true;
 }
 elements.canvas.addEventListener("pointerdown", (event) => {
+  if (state.viewMode === "face") return;
   if (state.viewMode === "3d") {
     const navigationMode = navigationDragMode(event.button, event.pointerType);
     if (!navigationMode) return;
@@ -3395,6 +4202,10 @@ elements.canvas.addEventListener("pointerdown", (event) => {
   elements.canvas.style.cursor = "grabbing";
 });
 elements.canvas.addEventListener("pointermove", (event) => {
+  if (state.viewMode === "face") {
+    elements.canvas.style.cursor = "default";
+    return;
+  }
   if (state.drag && Math.hypot(event.clientX - state.drag.x, event.clientY - state.drag.y) > 3) state.drag.moved = true;
   if (state.viewMode === "3d") {
     if (state.drag?.mode === "3d-orbit" && state.drag.moved) {
@@ -3446,7 +4257,7 @@ function finishCanvasDrag(event, cancelled = false) {
     return;
   }
   const hasHover = state.hoverBlockIndex !== null || state.geometryHover !== null;
-  elements.canvas.style.cursor = hasHover ? "pointer" : (state.viewMode === "3d" ? "grab" : "crosshair");
+  elements.canvas.style.cursor = state.viewMode === "face" ? "default" : (hasHover ? "pointer" : (state.viewMode === "3d" ? "grab" : "crosshair"));
   if (restorePrecision) request3dNavigationDraw();
 }
 elements.canvas.addEventListener("pointerup", (event) => finishCanvasDrag(event));
@@ -3459,7 +4270,7 @@ elements.canvas.addEventListener("pointerleave", () => {
     state.geometryHover = null;
     draw();
   }
-  elements.canvas.style.cursor = state.viewMode === "3d" ? "grab" : "crosshair";
+  elements.canvas.style.cursor = state.viewMode === "face" ? "default" : (state.viewMode === "3d" ? "grab" : "crosshair");
   updateTransport();
 });
 elements.input.addEventListener("scroll", () => {

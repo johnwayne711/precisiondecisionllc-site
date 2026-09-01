@@ -1,4 +1,4 @@
-import {stockContourPoints} from "./simulation.mjs";
+import {isLiveToolSegment, stockContourPoints} from "./simulation.mjs";
 
 const PATH_COLORS = {
   rapid: "#f59e0b",
@@ -9,6 +9,8 @@ const PATH_COLORS = {
   "arc-cw": "#a78bfa",
   "arc-ccw": "#a78bfa",
 };
+const LIVE_PATH_COLOR = "#f472b6";
+const LIVE_PENDING_PATH_COLOR = "#80506e";
 
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
@@ -343,10 +345,11 @@ export function renderViewCube(context, {
 }
 
 function sceneBounds(segments, stock, xScale, orientationSign) {
-  const points = segments.flatMap((segment) => segment.points || []).map((point) => ({
-    x: point.z * orientationSign,
-    y: point.x * xScale,
-  }));
+  const worldPoints = segments.flatMap((segment) => segmentWorldPoints(segment, xScale, orientationSign));
+  const points = worldPoints.flatMap((point) => [
+    {x: point.x, y: point.y},
+    {x: point.x, y: point.z},
+  ]);
   if (stock?.length) {
     const [stockStart, stockEnd] = stockAxialExtent(stock, orientationSign);
     points.push(
@@ -504,10 +507,10 @@ function surfaceFacets(rings, radialSlices, project) {
   return facets.sort((a, b) => a.depth - b.depth);
 }
 
-function projectedCircleGeometry(axial, radius, project) {
-  const center = project({x: axial, y: 0, z: 0});
-  const radialY = project({x: axial, y: radius, z: 0});
-  const radialZ = project({x: axial, y: 0, z: radius});
+function projectedRadialCircleGeometry(axial, centerY, centerZ, radius, project) {
+  const center = project({x: axial, y: centerY, z: centerZ});
+  const radialY = project({x: axial, y: centerY + radius, z: centerZ});
+  const radialZ = project({x: axial, y: centerY, z: centerZ + radius});
   const ux = radialY.x - center.x;
   const uy = radialY.y - center.y;
   const vx = radialZ.x - center.x;
@@ -521,6 +524,10 @@ function projectedCircleGeometry(axial, radius, project) {
   const minorRadius = Math.sqrt(Math.max(0, (trace - discriminant) / 2));
   const rotation = 0.5 * Math.atan2(2 * covarianceXY, covarianceX - covarianceY);
   return {center, majorRadius, minorRadius, rotation};
+}
+
+function projectedCircleGeometry(axial, radius, project) {
+  return projectedRadialCircleGeometry(axial, 0, 0, radius, project);
 }
 
 function traceProjectedCircle(context, geometry) {
@@ -543,6 +550,75 @@ function drawProjectedCircle(context, axial, radius, project, {color, width = 1,
   context.stroke();
   context.setLineDash([]);
   context.globalAlpha = 1;
+}
+
+export function axialBoreWorldRings(bore, orientationSign = 1, slices = 48) {
+  const count = Math.max(12, Math.floor(Number(slices) || 48));
+  const centerY = Number(bore?.centerX);
+  const centerZ = Number(bore?.centerY);
+  const radius = Number(bore?.radius);
+  const front = Number(bore?.frontZ) * orientationSign;
+  const bottom = Number(bore?.bottomZ) * orientationSign;
+  if (![centerY, centerZ, radius, front, bottom].every(Number.isFinite) || radius <= 0) return null;
+  const ring = (axial) => Array.from({length: count}, (_, index) => {
+    const angle = index / count * Math.PI * 2;
+    return {
+      x: axial,
+      y: centerY + radius * Math.cos(angle),
+      z: centerZ + radius * Math.sin(angle),
+    };
+  });
+  return {front: ring(front), bottom: ring(bottom), centerY, centerZ, radius, frontX: front, bottomX: bottom};
+}
+
+function drawAxialBores(context, stock, orientationSign, project, quality) {
+  const bores = Array.isArray(stock?.axialBores) ? stock.axialBores : [];
+  for (const bore of bores) {
+    const rings = axialBoreWorldRings(bore, orientationSign, Math.min(96, Math.max(24, quality.radialSlices || 48)));
+    if (!rings) continue;
+    const frontCenter = project({x: rings.frontX, y: rings.centerY, z: rings.centerZ});
+    const bottomCenter = project({x: rings.bottomX, y: rings.centerY, z: rings.centerZ});
+    // The open end is hidden when the bore points away from the camera. This
+    // keeps the analytic feature from being painted through the solid stock.
+    if (frontCenter.depth + 1e-9 < bottomCenter.depth) continue;
+
+    const wallFacets = [];
+    for (let index = 0; index < rings.front.length; index += 1) {
+      const next = (index + 1) % rings.front.length;
+      const screen = [rings.front[index], rings.bottom[index], rings.bottom[next], rings.front[next]].map(project);
+      wallFacets.push({screen, depth: screen.reduce((sum, point) => sum + point.depth, 0) / screen.length});
+    }
+    wallFacets.sort((left, right) => left.depth - right.depth);
+    for (const facet of wallFacets) {
+      context.beginPath();
+      facet.screen.forEach((point, index) => {
+        if (index) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y);
+      });
+      context.closePath();
+      context.fillStyle = "rgba(3, 18, 22, .92)";
+      context.fill();
+    }
+
+    const bottomGeometry = projectedRadialCircleGeometry(
+      rings.bottomX, rings.centerY, rings.centerZ, rings.radius, project,
+    );
+    traceProjectedCircle(context, bottomGeometry);
+    context.fillStyle = "rgba(11, 49, 55, .98)";
+    context.fill();
+    context.strokeStyle = "rgba(102, 215, 209, .62)";
+    context.lineWidth = 0.9;
+    context.stroke();
+
+    const frontGeometry = projectedRadialCircleGeometry(
+      rings.frontX, rings.centerY, rings.centerZ, rings.radius, project,
+    );
+    traceProjectedCircle(context, frontGeometry);
+    context.fillStyle = "rgba(2, 11, 14, .76)";
+    context.fill();
+    context.strokeStyle = "#7ce5dc";
+    context.lineWidth = 1.35;
+    context.stroke();
+  }
 }
 
 function drawEndStock(context, rings, project, camera) {
@@ -631,26 +707,71 @@ function drawStockSurface(context, stock, orientationSign, project, camera, qual
   }
 }
 
-function segmentWorldPoints(segment, xScale, orientationSign) {
-  return (segment.points || []).map((point) => ({x: point.z * orientationSign, y: point.x * xScale, z: 0}));
+/**
+ * Map canonical lathe axes into the renderer's world frame. Z is the spindle
+ * axis. X and optional Y form the transverse plane, and C is degrees of
+ * rotation about the spindle axis. G112 face coordinates are already physical
+ * XY and therefore are not rotated by their retained C state a second time.
+ * Parser-produced direct C interpolation must provide sufficiently sampled
+ * points; this mapper never invents a sweep.
+ */
+export function segmentWorldPoints(segment, xScale = 1, orientationSign = 1) {
+  const points = Array.isArray(segment?.points) && segment.points.length
+    ? segment.points
+    : [segment?.start, segment?.end].filter(Boolean);
+  const effectiveXScale = segment?.xCoordinateMode === "radius" ? 1 : xScale;
+  const programmedFaceCoordinates = segment?.coordinateMode === "g112-face";
+  return points.map((point) => {
+    const axial = Number(point.z);
+    const localX = Number(point.x) * effectiveXScale;
+    const localY = typeof point.y === "number" && Number.isFinite(point.y) ? point.y : 0;
+    const cDegrees = typeof point.c === "number" && Number.isFinite(point.c) ? point.c : 0;
+    const angle = cDegrees * Math.PI / 180;
+    return {
+      x: axial * orientationSign,
+      y: programmedFaceCoordinates ? localX : localX * Math.cos(angle) - localY * Math.sin(angle),
+      z: programmedFaceCoordinates ? localY : localX * Math.sin(angle) + localY * Math.cos(angle),
+    };
+  });
+}
+
+export function toolpathStyleForSegment(segment, {pending = false} = {}) {
+  const live = isLiveToolSegment(segment);
+  const rapid = segment?.type === "rapid" || segment?.type === "live-rapid";
+  const blocked = Boolean(segment?.verificationBlocked || segment?.liveToolBlocked);
+  return {
+    color: blocked
+      ? (pending ? "#7f1d1d" : "#fb7185")
+      : (pending ? (live ? LIVE_PENDING_PATH_COLOR : "#64748b") : (live ? LIVE_PATH_COLOR : (PATH_COLORS[segment?.type] || "#94a3b8"))),
+    width: blocked ? (pending ? 1.4 : 2.8) : (pending ? 1.1 : (rapid ? 1.35 : 2.1)),
+    dash: blocked ? [2, 2] : (live ? (rapid ? [7, 4, 2, 4] : [3, 2]) : (rapid ? [6, 5] : [])),
+    alpha: pending ? (blocked ? 0.48 : 0.28) : 0.98,
+    glow: pending ? 0 : (blocked ? 7 : 5),
+  };
 }
 
 function drawToolpaths(context, segments, visibleCount, xScale, orientationSign, project) {
   for (const segment of segments) {
-    drawPolyline(context, segmentWorldPoints(segment, xScale, orientationSign), project, {
-      color: "#64748b", width: 1.1, dash: segment.type === "rapid" ? [6, 5] : [], alpha: 0.28,
-    });
+    drawPolyline(
+      context,
+      segmentWorldPoints(segment, xScale, orientationSign),
+      project,
+      toolpathStyleForSegment(segment, {pending: true}),
+    );
   }
   for (const segment of segments.slice(0, visibleCount)) {
-    const color = PATH_COLORS[segment.type] || "#94a3b8";
-    drawPolyline(context, segmentWorldPoints(segment, xScale, orientationSign), project, {
-      color, width: segment.type === "rapid" ? 1.35 : 2.1, dash: segment.type === "rapid" ? [6, 5] : [], alpha: 0.98, glow: 5,
-    });
+    drawPolyline(
+      context,
+      segmentWorldPoints(segment, xScale, orientationSign),
+      project,
+      toolpathStyleForSegment(segment),
+    );
   }
   if (!visibleCount) return;
-  const point = segments[Math.min(visibleCount, segments.length) - 1]?.end;
+  const finalSegment = segments[Math.min(visibleCount, segments.length) - 1];
+  const point = segmentWorldPoints(finalSegment, xScale, orientationSign).at(-1);
   if (!point) return;
-  const marker = project({x: point.z * orientationSign, y: point.x * xScale, z: 0});
+  const marker = project(point);
   context.fillStyle = "#ffffff";
   context.shadowColor = "#56e39f";
   context.shadowBlur = 10;
@@ -692,6 +813,7 @@ export function renderLathe3d(context, {
   const scene = makeProjector({width, height, segments, stock, xScale, orientationSign, camera});
   drawAxes(context, scene.project, scene.bounds, stock?.radius);
   drawStockSurface(context, stock, orientationSign, scene.project, camera, quality);
+  drawAxialBores(context, stock, orientationSign, scene.project, quality);
   if (showToolpaths) drawToolpaths(context, segments, Math.min(visibleCount, segments.length), xScale, orientationSign, scene.project);
 
   context.fillStyle = "rgba(145, 166, 171, .66)";

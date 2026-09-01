@@ -1,4 +1,8 @@
 import {toolLibraryAssemblyById} from "./tool-library.mjs";
+import {
+  listMillingToolLibraryRecords, millingToolLibraryRecordById,
+} from "./milling-tool-library.mjs";
+import {adaptEligibleMillingToolTo2dAssembly} from "./milling-tool-preview.mjs";
 
 const EPSILON = 1e-9;
 
@@ -24,8 +28,8 @@ function frozenDefinition(definition) {
   return deepFreeze(deepClone({...definition, sources: definition.sources || []}));
 }
 
-const SUPPORTED_GEOMETRY_KINDS = new Set(["diamond-turning", "groove"]);
-const SUPPORTED_CUTTING_MODES = new Set(["point", "axial-band"]);
+const SUPPORTED_GEOMETRY_KINDS = new Set(["diamond-turning", "groove", "axial-milling-cutter"]);
+const SUPPORTED_CUTTING_MODES = new Set(["point", "axial-band", "axial-flat-endmill"]);
 const CONFIRMED_AXIAL_DIRECTIONS = new Set(["positive-z", "negative-z", "radial-only", "both"]);
 const CATALOG_ENVELOPE_NOTICE = "Constructed connected catalog-scaled holder envelope with analytic cutter geometry. Exact seat, pocket, clamp, and mounting-hardware geometry is not represented; this is a display aid, not manufacturer CAD.";
 const MCLNR164D_CAD_NOTICE = "Stroke-only top-plan projection of the official Kennametal MCLNR164D GTM holder body and its mounted CNMG432 insert, referenced to the GTM cutting-reference point. Clamp, screw, lock-pin, and shim detail is intentionally omitted. The tessellated projection is display geometry, not configured program-tip validation, stock-removal approval, collision authority, or trusted external dimensional validation.";
@@ -203,18 +207,26 @@ export const TOOL_ASSEMBLY_2D_LIBRARY = Object.freeze([
   unverifiedTemplate("custom-drill", "Custom drill / holemaking tool", "holemaking", "drill"),
 ]);
 
+export const MILLING_CUTTER_2D_LIBRARY = Object.freeze(
+  listMillingToolLibraryRecords().map(adaptEligibleMillingToolTo2dAssembly).filter(Boolean),
+);
+
+function allToolDefinitions2d() {
+  return [...TOOL_ASSEMBLY_2D_LIBRARY, ...MILLING_CUTTER_2D_LIBRARY];
+}
+
 export function listToolAssemblies2d() {
-  return [...TOOL_ASSEMBLY_2D_LIBRARY];
+  return allToolDefinitions2d();
 }
 
 export function listSelectableToolAssemblies2d() {
-  return TOOL_ASSEMBLY_2D_LIBRARY.filter((entry) => (
+  return allToolDefinitions2d().filter((entry) => (
     resolveAssignableToolAssembly2d({id: entry.id, revision: entry.revision}) === entry
   ));
 }
 
 export function toolAssembly2dById(id, revision = null) {
-  const entry = TOOL_ASSEMBLY_2D_LIBRARY.find((candidate) => candidate.id === id) || null;
+  const entry = allToolDefinitions2d().find((candidate) => candidate.id === id) || null;
   if (!entry || (revision !== null && Number(entry.revision) !== Number(revision))) return null;
   return entry;
 }
@@ -224,6 +236,13 @@ export function resolveAssignableToolAssembly2d(assemblyRef) {
   const {id, revision} = assemblyRef;
   if (typeof id !== "string" || !id.length || id.trim() !== id || !Number.isInteger(revision) || revision < 1) {
     return null;
+  }
+  const millingRecord = millingToolLibraryRecordById(id);
+  if (millingRecord) {
+    if (millingRecord.revision !== revision || millingRecord.demoCuttingEligibility?.eligible !== true) return null;
+    const definition = MILLING_CUTTER_2D_LIBRARY.find((entry) => entry.id === id && entry.revision === revision) || null;
+    if (!definition || toolAssembly2dDisplayCapability(definition).available !== true) return null;
+    return definition;
   }
   const catalogAssembly = toolLibraryAssemblyById(id);
   const displayClaim = catalogAssembly?.claims?.displayGeometry;
@@ -266,13 +285,27 @@ function validateToolAssembly2dGeometry(assembly, {requirePlacement = true} = {}
   if (!SUPPORTED_GEOMETRY_KINDS.has(assembly.geometryKind)) {
     errors.push(`Geometry kind ${assembly.geometryKind || "unknown"} does not have a supported 2D builder.`);
   }
-  for (const [label, value] of [
-    ["Holder overall length", assembly.holderLength],
-    ["Holder shank width", assembly.holderShankWidth],
-    ["Holder F dimension", assembly.holderFDimension],
-    ["Holder head length", assembly.holderHeadLength],
-  ]) {
-    if (!finite(value) || value <= 0) errors.push(`${label} must be confirmed and greater than zero.`);
+  if (assembly.geometryKind === "axial-milling-cutter") {
+    for (const [label, value] of [
+      ["Cutter diameter", assembly.cutterDiameter],
+      ["Length of cut", assembly.lengthOfCut],
+      ["Shank diameter", assembly.shankDiameter],
+      ["Overall length", assembly.overallLength],
+    ]) {
+      if (!finite(value) || value <= 0) errors.push(`${label} must be published and greater than zero.`);
+    }
+    if (finite(assembly.lengthOfCut) && finite(assembly.overallLength) && assembly.lengthOfCut > assembly.overallLength) {
+      errors.push("Length of cut cannot exceed cutter overall length.");
+    }
+  } else {
+    for (const [label, value] of [
+      ["Holder overall length", assembly.holderLength],
+      ["Holder shank width", assembly.holderShankWidth],
+      ["Holder F dimension", assembly.holderFDimension],
+      ["Holder head length", assembly.holderHeadLength],
+    ]) {
+      if (!finite(value) || value <= 0) errors.push(`${label} must be confirmed and greater than zero.`);
+    }
   }
   if (assembly.geometryKind === "diamond-turning") {
     for (const [label, value] of [
@@ -309,11 +342,11 @@ function validateToolAssembly2dGeometry(assembly, {requirePlacement = true} = {}
     }
     if (requirePlacement && !cuttingOffsets(assembly.cuttingModel || {})) errors.push("The programmed Z datum edge must be confirmed to place this outline.");
   }
-  if (finite(assembly.holderHeadLength) && finite(assembly.holderLength) && assembly.holderHeadLength >= assembly.holderLength) {
-    errors.push("Holder head length must be shorter than the overall length.");
+  if (assembly.geometryKind !== "axial-milling-cutter" && finite(assembly.holderHeadLength) && finite(assembly.holderLength) && assembly.holderHeadLength >= assembly.holderLength) {
+      errors.push("Holder head length must be shorter than the overall length.");
   }
-  if (finite(assembly.holderFDimension) && finite(assembly.holderShankWidth) && assembly.holderFDimension < assembly.holderShankWidth) {
-    errors.push("Holder F dimension must be at least the shank width for this connected envelope.");
+  if (assembly.geometryKind !== "axial-milling-cutter" && finite(assembly.holderFDimension) && finite(assembly.holderShankWidth) && assembly.holderFDimension < assembly.holderShankWidth) {
+      errors.push("Holder F dimension must be at least the shank width for this connected envelope.");
   }
   return errors;
 }
@@ -340,6 +373,9 @@ export function validateToolAssembly2d(assembly) {
   if (assembly.geometryKind === "groove" && cuttingMode !== "axial-band") {
     errors.push("Groove geometry requires the finite axial-band cutting model.");
   }
+  if (assembly.geometryKind === "axial-milling-cutter" && cuttingMode !== "axial-flat-endmill") {
+    errors.push("The eligible square milling cutter requires the axial-flat-endmill cutting model.");
+  }
   if (assembly.geometryKind === "diamond-turning") {
     if (assembly.cuttingModel?.referenceSemantics !== "programmed-contact-point") {
       errors.push("The turning model must explicitly use programmed-contact-point reference semantics.");
@@ -350,6 +386,11 @@ export function validateToolAssembly2d(assembly) {
   }
   if (assembly.geometryKind === "groove" && !CONFIRMED_AXIAL_DIRECTIONS.has(assembly.cuttingModel?.axialDirection)) {
     errors.push("The permitted Z cutting direction must be confirmed.");
+  }
+  if (assembly.geometryKind === "axial-milling-cutter") {
+    if (assembly.cuttingModel?.referenceSemantics !== "flat-end-mill-tip") errors.push("The milling cutter must use flat-end-mill-tip reference semantics.");
+    if (assembly.cuttingModel?.centerCutting !== true) errors.push("Axial plunge removal requires a manufacturer-identified center-cutting tool.");
+    if (assembly.cuttingModel?.dimensionsExact !== true) errors.push("Axial plunge removal requires exact published cutter dimensions.");
   }
   return errors;
 }
@@ -547,15 +588,55 @@ function grooveModel(assembly, referencePoint) {
   };
 }
 
+function axialMillingCutterModel(assembly, referencePoint) {
+  const cutterRadius = assembly.cutterDiameter / 2;
+  const shankRadius = assembly.shankDiameter / 2;
+  const cuttingEndZ = referencePoint.z + assembly.lengthOfCut;
+  const shankEndZ = referencePoint.z + assembly.overallLength;
+  const cutterOutline = [
+    {z: referencePoint.z, x: referencePoint.x - cutterRadius},
+    {z: cuttingEndZ, x: referencePoint.x - cutterRadius},
+    {z: cuttingEndZ, x: referencePoint.x + cutterRadius},
+    {z: referencePoint.z, x: referencePoint.x + cutterRadius},
+  ];
+  const shankOutline = [
+    {z: cuttingEndZ, x: referencePoint.x - shankRadius},
+    {z: shankEndZ, x: referencePoint.x - shankRadius},
+    {z: shankEndZ, x: referencePoint.x + shankRadius},
+    {z: cuttingEndZ, x: referencePoint.x + shankRadius},
+  ];
+  return {
+    insert: null,
+    cutter: {outline: cutterOutline, diameter: assembly.cutterDiameter, lengthOfCut: assembly.lengthOfCut},
+    holder: {
+      outline: shankOutline,
+      bodyOutline: shankOutline,
+      shankOutline,
+      envelopeKind: "cutter-shank-only",
+    },
+    components: [
+      {role: "cutter", outline: cutterOutline, renderOrder: 2},
+      {role: "holder", outline: shankOutline, renderOrder: 1, dashed: true},
+    ],
+  };
+}
+
 function resolvedCuttingModel(assembly) {
   const model = {...assembly.cuttingModel};
   const directionReady = CONFIRMED_AXIAL_DIRECTIONS.has(model.axialDirection);
   const simulationReady = model.mode === "point"
     ? directionReady && model.referenceSemantics === "programmed-contact-point"
     : model.mode === "axial-band"
-      && model.stockRemovalVerified === true
-      && directionReady
-      && Boolean(cuttingOffsets(model));
+      ? model.stockRemovalVerified === true
+        && directionReady
+        && Boolean(cuttingOffsets(model))
+      : model.mode === "axial-flat-endmill"
+        && model.stockRemovalVerified === true
+        && model.centerCutting === true
+        && model.dimensionsExact === true
+        && model.referenceSemantics === "flat-end-mill-tip"
+        && Number(model.diameter) > EPSILON
+        && Number(model.lengthOfCut) > EPSILON;
   return {...model, simulationReady};
 }
 
@@ -570,6 +651,7 @@ function buildToolAssemblyWithValidation(assembly, referencePoint, validator, di
       : turningModel(assembly, referencePoint, displayState);
   }
   else if (assembly.geometryKind === "groove") geometry = grooveModel(assembly, referencePoint);
+  else if (assembly.geometryKind === "axial-milling-cutter") geometry = axialMillingCutterModel(assembly, referencePoint);
   else {
     return {
       valid: false,
@@ -624,10 +706,27 @@ export function sampleToolNoseArc(noseArc, maximumChord = 0.05) {
   });
 }
 
-export function toolReferencePointForExecution(segments, visibleBlocks) {
+function toolReferenceForExecution(segments, visibleBlocks) {
   if (!Array.isArray(segments) || !segments.length) return null;
   const count = Math.max(0, Math.min(segments.length, Math.floor(Number(visibleBlocks) || 0)));
-  const point = count > 0 ? segments[count - 1]?.end : segments[0]?.start;
+  const segment = count > 0 ? segments[count - 1] : segments[0];
+  const point = count > 0 ? segment?.end : segment?.start;
   if (!point || !finite(point.z) || !finite(point.x)) return null;
+  return {point, segment};
+}
+
+export function toolReferencePointForExecution(segments, visibleBlocks) {
+  const reference = toolReferenceForExecution(segments, visibleBlocks);
+  if (!reference) return null;
+  const {point} = reference;
   return {z: point.z, x: point.x};
+}
+
+export function toolPhysicalReferencePointForExecution(segments, visibleBlocks, programmedXScale) {
+  const reference = toolReferenceForExecution(segments, visibleBlocks);
+  if (!reference) return null;
+  const {point, segment} = reference;
+  const scale = segment?.xCoordinateMode === "radius" ? 1 : Number(programmedXScale);
+  if (!finite(scale) || scale <= 0) return null;
+  return {z: point.z, x: point.x * scale};
 }

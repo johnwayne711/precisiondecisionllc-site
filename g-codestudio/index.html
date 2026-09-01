@@ -83,7 +83,10 @@
         </div>
         <div class="editor-footer">
           <span>Graphics selection follows the source line</span>
-          <button id="loadSampleButton" class="text-button">Reset sample</button>
+          <span class="editor-sample-actions">
+            <button id="loadLiveBoreSampleButton" class="text-button">Live bore sample</button>
+            <button id="loadSampleButton" class="text-button">Reset turning sample</button>
+          </span>
         </div>
       </aside>
 
@@ -97,6 +100,7 @@
             </div>
             <div class="segmented dimension-toggle" aria-label="Graphics dimension">
               <button id="view2dButton" class="active" type="button" aria-pressed="true">2D</button>
+              <button id="viewFaceButton" type="button" aria-pressed="false" title="Show live-tool programmed centerlines projected onto the stock face">Face</button>
               <button id="view3dButton" type="button" aria-pressed="false">3D</button>
             </div>
             <button id="toolOverlayButton" class="toolbar-tool tool-overlay-button" type="button" aria-pressed="false" title="Show the dimension-driven tool outline in the 2D view">Tool</button>
@@ -114,10 +118,15 @@
             <span><i class="rough"></i>Rough</span>
             <span><i class="cut"></i>Cut</span>
             <span><i class="arc"></i>Arc</span>
+            <span><i class="live"></i>Live tool</span>
           </div>
         </div>
         <div id="canvasWrap" class="canvas-wrap">
           <canvas id="plotCanvas" role="img" aria-label="Interactive lathe backplot. In 2D, click component geometry to inspect it, or use Dimension to pin exact line and radius measurements." title="In 2D, click component geometry to measure it. Turn on Dimension to pin exact line and radius measurements."></canvas>
+          <div id="faceViewStatus" class="face-view-status" role="status" aria-live="polite" hidden>
+            <strong>FACE VIEW · PATH ONLY</strong>
+            <span>Programmed live-tool centerlines and stock face only. No material-removal or cutter/holder collision claim.</span>
+          </div>
           <div id="viewCube" class="view-cube" role="group" aria-label="3D view navigation" hidden>
             <canvas id="viewCubeCanvas" role="img" aria-label="Clickable view cube. Select a face, edge, or corner to orient the model."></canvas>
             <button id="viewCubeHome" type="button" aria-label="Return to home isometric view" title="Home isometric view">⌂</button>
@@ -248,6 +257,7 @@
         <div class="stats-grid">
           <div><span>BLOCKS</span><strong id="motionCount">0</strong></div>
           <div><span>CYCLES</span><strong id="cycleCount">0</strong></div>
+          <div><span>LIVE TOOL</span><strong id="liveToolStatus" class="muted-value" aria-live="polite">UNKNOWN</strong></div>
           <div class="runtime-stat"><span>PROGRAM CYCLE TIME</span><strong id="cycleTimeStat" aria-live="polite">—</strong></div>
           <div><span>CUT DIST.</span><strong id="cutDistance">0 mm</strong></div>
           <div><span>RAPID DIST.</span><strong id="rapidDistance">0 mm</strong></div>
@@ -310,11 +320,11 @@
           </section>
 
           <section class="machine-form-section">
-            <div class="machine-section-heading"><span>03</span><div><h3>Program start & rapid motion</h3><p>How G-Code Studio should interpret the position before the first programmed move.</p></div></div>
+            <div class="machine-section-heading"><span>03</span><div><h3>Program start & rapid motion</h3><p>The explicit program-coordinate tool-reference position before the first move. This is not a turret-body or raw machine-coordinate transform.</p></div></div>
             <div class="machine-form-grid">
               <label class="wide">Initial position assumption<select name="startMode"><option value="unknown">Unknown — do not invent an approach</option><option value="home">Machine home / reference</option><option value="tool-change">Tool-change position</option><option value="safe-index">Safe-index position</option><option value="custom">Custom coordinates</option></select></label>
-              <label>Initial X<input name="startX" type="number" step="any" placeholder="Unknown"></label>
-              <label>Initial Z<input name="startZ" type="number" step="any" placeholder="Unknown"></label>
+              <label>Initial plotted X<input name="startX" type="number" step="any" placeholder="Unknown"></label>
+              <label>Initial plotted Z<input name="startZ" type="number" step="any" placeholder="Unknown"></label>
               <label class="wide">Rapid interpolation<select name="rapidBehavior"><option value="unknown">Unknown / not confirmed</option><option value="linear">Linear vector path</option><option value="dogleg">Independent-axis / dogleg</option><option value="parameter-dependent">Control-parameter dependent</option></select></label>
               <label>Maximum X rapid<input name="rapidXMax" type="number" min="0" step="any" placeholder="Unknown"></label>
               <label>Maximum Z rapid<input name="rapidZMax" type="number" min="0" step="any" placeholder="Unknown"></label>
@@ -322,7 +332,24 @@
           </section>
 
           <section class="machine-form-section">
-            <div class="machine-section-heading"><span>04</span><div><h3>Safe positions</h3><p>Known machine-coordinate positions for tool changes and turret indexing.</p></div></div>
+            <div class="machine-section-heading"><span>04</span><div><h3>Live tooling & rotary axes</h3><p>Controller dialect, installed capabilities, documented limits, and retained evidence. Unknown values fail closed.</p></div></div>
+            <div class="machine-form-grid">
+              <label class="wide">Live-tool syntax dialect<select name="liveToolDialect"><option value="unconfigured">Unconfigured / unknown</option><option value="haas-lathe-ngc">Haas lathe (NGC)</option></select></label>
+              <label>Live-tool capability<select name="liveToolCapability"><option value="unknown">Unknown</option><option value="not-equipped">Not equipped</option><option value="equipped">Equipped</option></select></label>
+              <label>C-axis capability<select name="cAxisCapability"><option value="unknown">Unknown</option><option value="unavailable">Unavailable</option><option value="available">Available</option></select></label>
+              <label>Y-axis capability<select name="yAxisCapability"><option value="unknown">Unknown</option><option value="unavailable">Unavailable</option><option value="available">Available</option></select></label>
+              <label>C-axis engagement<select name="cAxisEngagement"><option value="unknown">Unknown</option><option value="required">Explicit command required</option><option value="automatic">Automatic for supported modes</option></select></label>
+              <label>Haas Setting 162<select name="haasDefaultToFloat"><option value="unknown">Unknown</option><option value="on">ON · integers are whole values</option><option value="off">OFF · machinist notation</option></select></label>
+              <label>Haas Setting 77<select name="haasIntegerFeedScale"><option value="unknown">Unknown · integer F is unresolved</option><option value="default">DEFAULT · control-unit scale</option><option value="integer">INTEGER · whole value</option><option value=".1">.1 · scale by 0.1</option><option value=".01">.01 · scale by 0.01</option><option value=".001">.001 · scale by 0.001</option><option value=".0001">.0001 · scale by 0.0001</option></select></label>
+              <label>Maximum Y rapid<input name="rapidYMax" type="number" min="0" step="any" placeholder="Unknown · machine units/min"></label>
+              <label>Maximum C rapid<input name="rapidCMax" type="number" min="0" step="any" placeholder="Unknown · degrees/min"></label>
+              <label>Maximum live-tool speed<input name="liveToolMaxRpm" type="number" min="0" step="any" placeholder="Unknown · rpm"></label>
+              <label class="wide">Live-tool evidence<textarea name="liveToolEvidence" rows="3" maxlength="2000" placeholder="Official manual or manufacturer URL, revision, and option verification…"></textarea></label>
+            </div>
+          </section>
+
+          <section class="machine-form-section">
+            <div class="machine-section-heading"><span>05</span><div><h3>Safe positions</h3><p>Retained machine-coordinate metadata only. These values are not projected into the part view without an approved machine-to-work transform.</p></div></div>
             <div class="machine-form-grid numeric-grid">
               <label>Tool-change X<input name="toolChangeX" type="number" step="any" placeholder="Unknown"></label>
               <label>Tool-change Z<input name="toolChangeZ" type="number" step="any" placeholder="Unknown"></label>
@@ -349,7 +376,7 @@
           <div>
             <span class="eyebrow">SOURCE-LINKED TOOLING</span>
             <h2 id="toolLibraryTitle">Tool Library</h2>
-            <p id="toolLibraryDescription">Browse holders, inserts, and explicitly compatible mounted assemblies. Catalog-only records may establish identity, dimensions, or compatibility without proving a mounted outline, programmed reference, cutting model, or collision authority.</p>
+            <p id="toolLibraryDescription">Browse holders, inserts, milling cutters, explicitly compatible mounted assemblies, and source-linked driven units. Each record separates published dimensions, display geometry, cutting scope, mounting, and collision authority.</p>
           </div>
           <button id="toolLibraryClose" type="button" class="dialog-close close-icon" aria-label="Close tool library"></button>
         </header>
@@ -363,11 +390,13 @@
             <button id="toolLibraryTabAssemblies" type="button" class="tool-library-tab active" data-library-tab="assemblies" role="tab" aria-selected="true" aria-controls="toolLibraryTabPanel">Mounted assemblies</button>
             <button id="toolLibraryTabHolders" type="button" class="tool-library-tab" data-library-tab="holders" role="tab" aria-selected="false" aria-controls="toolLibraryTabPanel" tabindex="-1">Holders</button>
             <button id="toolLibraryTabInserts" type="button" class="tool-library-tab" data-library-tab="inserts" role="tab" aria-selected="false" aria-controls="toolLibraryTabPanel" tabindex="-1">Inserts</button>
+            <button id="toolLibraryTabCutters" type="button" class="tool-library-tab" data-library-tab="cutters" role="tab" aria-selected="false" aria-controls="toolLibraryTabPanel" tabindex="-1">Mill cutters</button>
+            <button id="toolLibraryTabDriven" type="button" class="tool-library-tab" data-library-tab="driven" role="tab" aria-selected="false" aria-controls="toolLibraryTabPanel" tabindex="-1">Driven units</button>
           </div>
           <fieldset class="tool-library-filters">
             <legend>Filter tool library</legend>
-            <label for="toolLibraryFamilyFilter"><span>Family</span><select id="toolLibraryFamilyFilter"><option value="">All families</option><option value="turn">Turning</option><option value="groove-profile">Groove / profile</option><option value="parting">Parting / cutoff</option></select></label>
-            <label for="toolLibraryShapeFilter"><span>Shape</span><select id="toolLibraryShapeFilter"><option value="">All shapes</option><option value="C">C · 80°</option><option value="D">D · 55°</option><option value="V">V · 35°</option><option value="groove">Groove / profile</option><option value="parting">Parting / cutoff</option></select></label>
+            <label id="toolLibraryFamilyFilterLabel" for="toolLibraryFamilyFilter"><span>Family</span><select id="toolLibraryFamilyFilter"><option value="">All families</option><option value="turn">Turning</option><option value="groove-profile">Groove / profile</option><option value="parting">Parting / cutoff</option></select></label>
+            <label id="toolLibraryShapeFilterLabel" for="toolLibraryShapeFilter"><span>Shape</span><select id="toolLibraryShapeFilter"><option value="">All shapes</option><option value="C">C · 80°</option><option value="D">D · 55°</option><option value="V">V · 35°</option><option value="groove">Groove / profile</option><option value="parting">Parting / cutoff</option></select></label>
             <label for="toolLibraryAuthorityFilter"><span>Display authority</span><select id="toolLibraryAuthorityFilter"><option value="">All display tiers</option><option value="manufacturer-cad-projection">Manufacturer CAD projection</option><option value="catalog-construction">Catalog construction</option><option value="catalog-only">Catalog record only</option></select></label>
           </fieldset>
         </div>
@@ -394,13 +423,13 @@
             </div>
             <div class="tool-library-detail-empty">
               <strong>No record selected</strong>
-              <span>Select a mounted assembly, holder, or insert to inspect its catalog identity, compatible records, source evidence, dimensions, and limitations.</span>
+              <span>Select a mounted assembly, holder, insert, milling cutter, or driven unit to inspect its catalog identity, source evidence, dimensions, and limitations.</span>
             </div>
           </article>
         </div>
 
         <footer class="tool-library-footer">
-          <p>Assigning a catalog record never confirms its programmed datum, cutting direction, stock-removal model, or collision clearance.</p>
+          <p>Assignment is revision-pinned. Cutter-only demo scope never establishes the driven holder, mounted transform, or collision clearance.</p>
           <label for="toolLibraryTarget"><span>Assignment target</span><select id="toolLibraryTarget"><option value="">Choose an executable T call</option></select></label>
           <button id="toolLibraryAssign" type="button" class="button primary" disabled>Assign mounted assembly</button>
         </footer>

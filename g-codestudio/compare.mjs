@@ -225,9 +225,24 @@ export function comparePrograms(originalSource, revisedSource, {ignoreFormatting
 
 function geometrySignature(segment, tolerance) {
   const precision = Math.max(0, Math.ceil(-Math.log10(tolerance)));
-  const coordinate = (value) => Number(value).toFixed(precision);
+  const coordinate = (value) => Number.isFinite(Number(value)) ? Number(value).toFixed(precision) : "_";
   const points = (segment.points?.length ? segment.points : [segment.start, segment.end]).filter(Boolean);
-  return `${segment.type}|${points.map((point) => `${coordinate(point.x)},${coordinate(point.z)}`).join(";")}`;
+  const cAxisMotion = segment.cAxisMotion;
+  const cAxisSemantics = cAxisMotion
+    ? [cAxisMotion.type || "index", coordinate(cAxisMotion.start), coordinate(cAxisMotion.end), cAxisMotion.blocked ? "blocked" : "clear"].join(",")
+    : "none";
+  const verificationIssues = [...new Set(segment.verificationIssues || [])].sort().join(",");
+  const semantics = [
+    segment.type,
+    segment.liveTool ? "live" : "turn",
+    segment.coordinateMode || "xz",
+    segment.plane || "G18",
+    segment.verificationBlocked ? "blocked" : "clear",
+    verificationIssues,
+    cAxisSemantics,
+    segment.unresolvedOperation || "resolved",
+  ];
+  return `${semantics.join("|")}|${points.map((point) => ["x", "y", "z", "c"].map((axis) => coordinate(point[axis])).join(",")).join(";")}`;
 }
 
 function markGeometryDifferences(source, comparison, tolerance) {
@@ -244,14 +259,56 @@ function markGeometryDifferences(source, comparison, tolerance) {
   });
 }
 
-export function compareSegmentGeometry(originalSegments, revisedSegments, {tolerance = 0.001} = {}) {
-  const original = markGeometryDifferences(originalSegments, revisedSegments, tolerance);
-  const revised = markGeometryDifferences(revisedSegments, originalSegments, tolerance);
+function standaloneCAxisSegments(motions) {
+  return (Array.isArray(motions) ? motions : [])
+    .filter((motion) => !motion?.combinedWithLinearAxes)
+    .map((motion) => ({
+      type: "c-axis-index",
+      coordinateMode: "c-axis-index",
+      cAxisMotion: {...motion},
+      verificationBlocked: Boolean(motion?.blocked),
+      verificationIssues: motion?.reason ? [motion.reason] : [],
+      points: [],
+      line: motion?.line ?? null,
+    }));
+}
+
+function unresolvedOperationSegments(operations) {
+  return (Array.isArray(operations) ? operations : [])
+    .filter((operation) => operation?.blocked && !operation?.displayed)
+    .map((operation) => ({
+      type: "unresolved-live-operation",
+      liveTool: true,
+      coordinateMode: "unresolved-live-operation",
+      verificationBlocked: true,
+      verificationIssues: [operation.motion || "unresolved-live-operation"],
+      unresolvedOperation: `${operation.motion || "unknown"}|${operation.raw || ""}`,
+      points: [],
+      line: operation.line ?? null,
+    }));
+}
+
+export function compareSegmentGeometry(originalSegments, revisedSegments, {
+  tolerance = 0.001,
+  originalCAxisMotions = [],
+  revisedCAxisMotions = [],
+  originalUnresolvedOperations = [],
+  revisedUnresolvedOperations = [],
+} = {}) {
+  const originalUnresolved = unresolvedOperationSegments(originalUnresolvedOperations);
+  const revisedUnresolved = unresolvedOperationSegments(revisedUnresolvedOperations);
+  const originalComparable = [...originalSegments, ...standaloneCAxisSegments(originalCAxisMotions), ...originalUnresolved];
+  const revisedComparable = [...revisedSegments, ...standaloneCAxisSegments(revisedCAxisMotions), ...revisedUnresolved];
+  const original = markGeometryDifferences(originalComparable, revisedComparable, tolerance);
+  const revised = markGeometryDifferences(revisedComparable, originalComparable, tolerance);
   return {
     original,
     revised,
     originalOnly: original.filter((item) => item.different).length,
     revisedOnly: revised.filter((item) => item.different).length,
+    unresolvedOriginal: originalUnresolved.length,
+    unresolvedRevised: revisedUnresolved.length,
+    verificationUnresolved: originalUnresolved.length > 0 || revisedUnresolved.length > 0,
   };
 }
 

@@ -2,6 +2,52 @@ const CUT_TYPES = new Set(["linear", "arc-cw", "arc-ccw", "rough", "cycle-profil
 const EPSILON = 1e-9;
 const POINT_CUTTING_MODEL = Object.freeze({mode: "point", axialMin: 0, axialMax: 0, axialDirection: "both"});
 
+function hasFiniteAxis(point, axis) {
+  return typeof point?.[axis] === "number" && Number.isFinite(point[axis]);
+}
+
+/**
+ * Identify motion that cannot be reduced to the axisymmetric X/Z turning
+ * model. `machiningMode` is the canonical marker for parser-produced live
+ * motion. The coordinate fallback deliberately fails closed when a future
+ * parser retains Y or C before it can attach that marker.
+ */
+export function isLiveToolSegment(segment) {
+  if (!segment || typeof segment !== "object") return false;
+  if (segment.machiningMode === "live-tool" || segment.liveTool === true || segment.cAxisMotion) return true;
+  const points = Array.isArray(segment.points) && segment.points.length
+    ? segment.points
+    : [segment.start, segment.end].filter(Boolean);
+  return points.some((point) => hasFiniteAxis(point, "y") || hasFiniteAxis(point, "c"));
+}
+
+export function liveToolSimulationWarning(segment, capability) {
+  if (!isLiveToolSegment(segment)) return null;
+  const common = {
+    line: segment.executionLine || segment.line || null,
+    toolKey: segment.toolKey || null,
+  };
+  if (capability === "stock-removal") {
+    return {
+      ...common,
+      code: "live-tool-stock-removal-unsupported",
+      message: "Live-tool motion is displayed, but non-axisymmetric stock removal is not yet modeled; stock was left unchanged for this move.",
+    };
+  }
+  if (capability === "collision") {
+    return {
+      ...common,
+      code: "live-tool-collision-unsupported",
+      message: "Live-tool motion is displayed, but its 3D cutter/holder collision sweep is not yet modeled; no clearance result was claimed for this move.",
+    };
+  }
+  return null;
+}
+
+function isRapidSegment(segment) {
+  return segment?.type === "rapid" || segment?.type === "live-rapid";
+}
+
 function samplesForSegment(segment, xScale, resolution = 1) {
   const samples = [];
   for (let pointIndex = 1; pointIndex < segment.points.length; pointIndex += 1) {
@@ -445,6 +491,31 @@ export function extendStockProfile(stock, segments, {
   const toolWarnings = [...(stock.toolWarnings || [])];
   const warningKeys = new Set(toolWarnings.map((warning) => `${warning.code}|${warning.line}|${warning.toolKey}`));
   for (const segment of segments.slice(start, end)) {
+    if (segment?.verificationBlocked || segment?.liveToolBlocked) {
+      const warning = {
+        line: segment.executionLine || segment.line || null,
+        toolKey: segment.toolKey || null,
+        code: "verification-blocked-stock-removal",
+        message: "Verification-blocked motion is displayed but excluded from stock-removal claims.",
+      };
+      const key = `${warning.code}|${warning.line}|${warning.toolKey}`;
+      if (!warningKeys.has(key)) {
+        warningKeys.add(key);
+        toolWarnings.push(warning);
+      }
+      continue;
+    }
+    if (isLiveToolSegment(segment)) {
+      if (!isRapidSegment(segment)) {
+        const warning = liveToolSimulationWarning(segment, "stock-removal");
+        const key = `${warning.code}|${warning.line}|${warning.toolKey}`;
+        if (!warningKeys.has(key)) {
+          warningKeys.add(key);
+          toolWarnings.push(warning);
+        }
+      }
+      continue;
+    }
     if (!CUT_TYPES.has(segment.type)) continue;
     const result = applySegmentEnvelope(profile, next.zPositions, segment, xScale, next.radius, toolResolver);
     if (Number.isFinite(result.materialEndZ)) materialEndZ = Math.min(materialEndZ, result.materialEndZ);
@@ -471,6 +542,9 @@ export const buildStockGrid = buildStockProfile;
 export function collisionPointForSegment(segment, {
   chuckFaceZ = -80, jawDiameter = 70, clearance = 3, chuckDepth = 18, xScale = 0.5,
 } = {}) {
+  if (isLiveToolSegment(segment)) {
+    throw new Error("Live-tool collision clearance is unresolved in the axisymmetric model; use evaluateCollisions() and inspect its warnings.");
+  }
   const face = Number(chuckFaceZ);
   const jawRadius = Math.max(0, Number(jawDiameter) || 0) / 2;
   const margin = Math.max(0, Number(clearance) || 0);
@@ -483,11 +557,58 @@ export function collisionPointForSegment(segment, {
   )) || null;
 }
 
-export function findCollisions(segments, options = {}) {
+export function evaluateCollisions(segments, options = {}) {
   const collisions = [];
+  const warnings = [];
+  const warningKeys = new Set();
+  for (const operation of Array.isArray(options.unresolvedOperations) ? options.unresolvedOperations : []) {
+    if (!operation?.blocked || operation?.displayed) continue;
+    const warning = {
+      line: operation.line || null,
+      toolKey: null,
+      code: "unresolved-live-tool-operation",
+      message: "A verification-blocked live-tool operation has no drawable segment; collision clearance is PATH ONLY.",
+    };
+    const key = `${warning.code}|${warning.line}|${warning.toolKey}`;
+    if (!warningKeys.has(key)) {
+      warningKeys.add(key);
+      warnings.push(warning);
+    }
+  }
+  for (const motion of Array.isArray(options.cAxisMotions) ? options.cAxisMotions : []) {
+    if (motion?.combinedWithLinearAxes) continue;
+    const warning = {
+      line: motion?.line || null,
+      toolKey: null,
+      code: "c-axis-collision-unsupported",
+      message: "Standalone C-axis motion is retained for timing and comparison, but collision clearance is PATH ONLY.",
+    };
+    const key = `${warning.code}|${warning.line}|${warning.toolKey}`;
+    if (!warningKeys.has(key)) {
+      warningKeys.add(key);
+      warnings.push(warning);
+    }
+  }
   segments.forEach((segment, segmentIndex) => {
+    if (isLiveToolSegment(segment)) {
+      const warning = liveToolSimulationWarning(segment, "collision");
+      const key = `${warning.code}|${warning.line}|${warning.toolKey}`;
+      if (!warningKeys.has(key)) {
+        warningKeys.add(key);
+        warnings.push(warning);
+      }
+      return;
+    }
     const point = collisionPointForSegment(segment, options);
     if (point) collisions.push({segmentIndex, segment, point});
   });
-  return collisions;
+  return {collisions, warnings};
+}
+
+export function findCollisions(segments, options = {}) {
+  const evaluation = evaluateCollisions(segments, options);
+  if (evaluation.warnings.length) {
+    throw new Error("Collision verification is unresolved for one or more live-tool moves; use evaluateCollisions() and inspect both collisions and warnings.");
+  }
+  return evaluation.collisions;
 }
