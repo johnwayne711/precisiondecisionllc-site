@@ -53,7 +53,16 @@ export function graphicsSelectionEnabled(viewMode) {
 export function sourceLineAtOffset(source, offset) {
   const text = String(source ?? "");
   const boundedOffset = Math.max(0, Math.min(text.length, Number(offset) || 0));
-  return text.slice(0, boundedOffset).split("\n").length;
+  let line = 1;
+  for (let index = 0; index < boundedOffset; index += 1) {
+    const character = text.charCodeAt(index);
+    if (character === 10) {
+      line += 1;
+    } else if (character === 13 && text.charCodeAt(index + 1) !== 10) {
+      line += 1;
+    }
+  }
+  return line;
 }
 
 const PROGRAM_CURSOR_NAVIGATION_KEYS = new Set([

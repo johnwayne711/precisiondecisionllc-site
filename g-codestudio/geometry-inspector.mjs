@@ -149,9 +149,18 @@ export function geometryMeasurement(entity) {
   return {...lineMeasurement(entity), center: null, start: {...entity.start}, end: {...entity.end}};
 }
 
+export function geometrySampleSegmentCount(entity, maximumSegments = 96) {
+  if (entity.type !== "arc") return 1;
+  return Math.max(8, Math.min(maximumSegments, Math.ceil(Math.abs(entity.sweep) / (Math.PI / 48))));
+}
+
+export function geometrySamplePointCount(entity, maximumSegments = 96) {
+  return geometrySampleSegmentCount(entity, maximumSegments) + 1;
+}
+
 export function sampleGeometryEntity(entity, maximumSegments = 96) {
   if (entity.type !== "arc") return [{...entity.start}, {...entity.end}];
-  const count = Math.max(8, Math.min(maximumSegments, Math.ceil(Math.abs(entity.sweep) / (Math.PI / 48))));
+  const count = geometrySampleSegmentCount(entity, maximumSegments);
   return Array.from({length: count + 1}, (_, index) => geometryPointAt(entity, index / count));
 }
 

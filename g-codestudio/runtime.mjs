@@ -1,3 +1,5 @@
+import {millSegmentLengthMm} from "./mill-gcode.mjs";
+
 const EPSILON = 1e-9;
 export const LEGACY_RAPID_RATE_IPM = 400;
 export const LEGACY_RAPID_RATE_MM_PER_MINUTE = LEGACY_RAPID_RATE_IPM * 25.4;
@@ -20,6 +22,7 @@ function pathPieces(segment, xScale) {
 
 function rapidTiming(segment, {xScale, rapidXMax, rapidYMax, rapidZMax, rapidCMax, fallbackRapidRate}) {
   if (segment?.verificationBlocked || segment?.liveToolBlocked) return null;
+  if (segment?.rapidInterpolationUnresolved) return null;
   // Haas G112 virtual X/Y is transformed into coordinated physical X/C
   // motion by the control. Cartesian display distance is not enough to infer
   // axis-limited rapid time, so keep that claim unresolved.
@@ -68,6 +71,11 @@ function cuttingTiming(segment, xScale) {
   if (segment.verificationBlocked || segment.liveToolBlocked) return null;
   if (!(segment.feed > 0)) return null;
   const unitScale = segment.unitScale > 0 ? segment.unitScale : (segment.programUnits === "in" ? 25.4 : 1);
+  if (segment.machiningMode === "mill" && segment.feedMode === "per-minute") {
+    const length = millSegmentLengthMm(segment);
+    if (!Number.isFinite(length)) return null;
+    return {seconds: (length / unitScale) / segment.feed * 60, assumed: false};
+  }
   let minutes = 0;
   let assumed = false;
   for (const piece of pathPieces(segment, xScale)) {
@@ -220,6 +228,10 @@ export function estimateCycleTime(parsed, {
   }
   if (segments.some((segment) => segment.type === "rapid" && segment.coordinateMode === "g112-face")) {
     limitations.add("G112 face rapid timing is unresolved because virtual X/Y motion requires controller-specific X/C kinematic limits.");
+  }
+  const unresolvedMillRapids = segments.filter((segment) => segment.type === "rapid" && segment.rapidInterpolationUnresolved).length;
+  if (unresolvedMillRapids) {
+    limitations.add(`${unresolvedMillRapids} multi-axis mill rapid${unresolvedMillRapids === 1 ? " has" : "s have"} unconfigured coordinated-versus-dogleg interpolation and ${unresolvedMillRapids === 1 ? "is" : "are"} excluded from distance and timing claims.`);
   }
   if (segments.some((segment) => segment.type === "rapid" && segment.cAxisMotion
     && (segment.cAxisMotion.start === null || segment.cAxisMotion.start === undefined))) {

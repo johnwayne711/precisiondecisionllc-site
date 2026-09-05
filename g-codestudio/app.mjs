@@ -1,4 +1,8 @@
 import {parseGcode, programBounds, segmentLength, spindleStateAtLine} from "./gcode.mjs";
+import {
+  MILL_PARSE_LIMITS, millPositionAt, millProgramBounds, millSegmentLengthMm, millSourceByteSummary,
+  millSourceRecordSummary, parseMillGcode,
+} from "./mill-gcode.mjs";
 import {cycleTimeAtPosition, estimateCycleTime, formatCycleTime} from "./runtime.mjs";
 import {
   buildStockProfile, collisionPointForSegment, evaluateCollisions, extendStockProfile, isLiveToolSegment,
@@ -6,6 +10,16 @@ import {
 } from "./simulation.mjs";
 import {convertUnitValue, scaleForUnits} from "./units.mjs";
 import {comparePrograms, compareSegmentGeometry, diffLineTokens, geometryItemsForFit, overlayGeometryLayers} from "./compare.mjs";
+import {parseDxf, toLatheGeometry} from "./dxf-import.mjs";
+import {mapStepSectionToLatheGeometry} from "./step-import.mjs";
+import {MAX_STEP_BYTES, StepKernelClient} from "./step-worker-client.mjs";
+import {
+  MAX_REFERENCE_UI_COMPARISON_OPERATIONS, REFERENCE_DISPLAY_ARC_MAXIMUM_SEGMENTS,
+  referenceDisplayWorkload, worstReferenceWitness,
+} from "./reference-display-budget.mjs";
+import {
+  compareProgramProfileToNominal, DEFAULT_PROFILE_NUMERICAL_BUDGET_MM, DEFAULT_PROFILE_TOLERANCE_MM,
+} from "./profile-compare.mjs";
 import {graphicsQualityPreset, renderGraphicsQualityPreset} from "./graphics-quality.mjs";
 import {createFrameScheduler} from "./render-scheduler.mjs";
 import {
@@ -47,6 +61,7 @@ import {
   zoomCameraAt,
   viewCubeHitTarget,
 } from "./view3d.mjs";
+import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
 const sampleProgram = `%
 O1071 (G-CODE STUDIO SAMPLE - G71 ROUGH TURN)
@@ -96,11 +111,35 @@ M155
 M30
 %`;
 
+const millSampleProgram = `%
+O1001 (G-CODE STUDIO 3-AXIS MILL PATH SAMPLE)
+G17 G20 G40 G49 G80 G90 G91.1 G94
+G54
+T1 M6
+S6000 M3
+G0 X-1.000 Y-1.000
+G43 H1 Z0.250
+G1 Z-0.100 F12.0
+G1 X1.000 F24.0
+Y1.000
+X-1.000
+Y-1.000
+G0 Z0.250
+X0.500 Y0.000
+G1 Z-0.050 F12.0
+G3 X-0.500 Y0.000 Z-0.150 I-0.500 J0.000 F18.0
+G3 X0.500 Y0.000 Z-0.250 I0.500 J0.000
+G0 Z0.250
+M5
+M30
+%`;
+
 const LIVE_BORE_SAMPLE_CUTTER_ID = "milling-tool:harvey-tool:771416";
 
 function isExactBundledSample(source, bundledOrigin = false) {
   return isExactBundledProgram(source, sampleProgram, bundledOrigin)
-    || isExactBundledProgram(source, liveBoreSampleProgram, bundledOrigin);
+    || isExactBundledProgram(source, liveBoreSampleProgram, bundledOrigin)
+    || isExactBundledProgram(source, millSampleProgram, bundledOrigin);
 }
 
 const DEFAULT_MACHINE_PROFILES = [
@@ -157,6 +196,8 @@ const NUMERIC_MACHINE_FIELDS = new Set([
 const $ = (id) => document.getElementById(id);
 const elements = {
   canvas: $("plotCanvas"), wrap: $("canvasWrap"), input: $("gcodeInput"), fileInput: $("fileInput"),
+  geometryFileInput: $("geometryFileInput"), importGeometry: $("importGeometryButton"),
+  stepFileInput: $("stepFileInput"), importStep: $("importStepButton"),
   programPanel: $("programPanel"), editor: $("gcodeEditor"), activeLine: $("gcodeActiveLine"), lineNumbers: $("gcodeLineNumbers"),
   activeLineNumber: $("gcodeActiveNumber"), searchHighlights: $("gcodeSearchHighlights"),
   programSearchPanel: $("programSearchPanel"), programSearchInput: $("programSearchInput"),
@@ -167,7 +208,7 @@ const elements = {
   fileName: $("fileName"), lineCount: $("lineCount"), status: $("programStatus"), timeline: $("timeline"),
   blockReadout: $("blockReadout"), play: $("playButton"), stepBack: $("stepBackButton"), stepForward: $("stepForwardButton"),
   readerElapsedTime: $("readerElapsedTime"), readerRemainingTime: $("readerRemainingTime"), readerTotalTime: $("readerTotalTime"),
-  speed: $("speedSelect"), machine: $("machineSelect"), editMachine: $("editMachineButton"), orientation: $("orientationSelect"),
+  speed: $("speedSelect"), machineMode: $("machineModeSelect"), machine: $("machineSelect"), editMachine: $("editMachineButton"), orientation: $("orientationSelect"),
   xMode: $("xModeSelect"), programUnits: $("programUnits"), programUnitsHint: $("programUnitsHint"), stockDiameter: $("stockDiameter"), stockLength: $("stockLength"), stockGripLength: $("stockGripLength"), stockStickout: $("stockStickout"), stockToggle: $("stockToggle"),
   empty: $("emptyState"),
   chuckFaceZ: $("chuckFaceZ"), jawDiameter: $("jawDiameter"), clearance: $("clearanceInput"), collisionToggle: $("collisionToggle"),
@@ -186,6 +227,7 @@ const elements = {
   fitGeometryDifferences: $("fitGeometryDifferences"), fitGeometryPart: $("fitGeometryPart"), compareNavigation: $("compareNavigation"),
   graphicsInfoButton: $("graphicsInfoButton"), graphicsInfoPanel: $("graphicsInfoPanel"),
   view2d: $("view2dButton"), viewFace: $("viewFaceButton"), view3d: $("view3dButton"), faceViewStatus: $("faceViewStatus"),
+  millViewStatus: $("millViewStatus"), latheReadout: $("latheReadout"), millReadout: $("millReadout"),
   toolOverlay: $("toolOverlayButton"), toolVerificationBadge: $("toolVerificationBadge"),
   programToolsSetup: $("programToolsSetup"), programToolSummary: $("programToolSummary"), programToolList: $("programToolList"),
   toolLibraryButton: $("toolLibraryButton"), toolLibraryDialog: $("toolLibraryDialog"), toolLibraryClose: $("toolLibraryClose"),
@@ -198,8 +240,26 @@ const elements = {
   viewCube: $("viewCube"), viewCubeCanvas: $("viewCubeCanvas"), viewCubeHome: $("viewCubeHome"),
   graphicsQuality: $("graphicsQuality"), graphicsQualityHint: $("graphicsQualityHint"),
   toolpathToggle: $("toolpathToggle"), liveToolStatus: $("liveToolStatus"),
+  referenceGeometrySetup: $("referenceGeometrySetup"), referenceGeometrySummary: $("referenceGeometrySummary"),
+  referenceGeometryFile: $("referenceGeometryFile"), referenceGeometryUnits: $("referenceGeometryUnits"),
+  referenceGeometryTolerance: $("referenceGeometryTolerance"), referenceGeometryOriginX: $("referenceGeometryOriginX"),
+  referenceGeometryOriginY: $("referenceGeometryOriginY"), referenceGeometryZDirection: $("referenceGeometryZDirection"),
+  referenceGeometryXDirection: $("referenceGeometryXDirection"), referenceGeometryToggle: $("referenceGeometryToggle"),
+  referenceGeometryImportStatus: $("referenceGeometryImportStatus"),
+  referenceGeometryAlignmentStatus: $("referenceGeometryAlignmentStatus"),
+  referenceGeometryDeviation: $("referenceGeometryDeviation"),
+  referenceGeometryDiagnostics: $("referenceGeometryDiagnostics"), removeGeometry: $("removeGeometryButton"),
+  referenceDxfControls: $("referenceDxfControls"), referenceStepControls: $("referenceStepControls"),
+  stepAxialAxis: $("stepAxialAxis"), stepRadialAxis: $("stepRadialAxis"), stepNormalAxis: $("stepNormalAxis"),
+  stepPlaneOffset: $("stepPlaneOffset"), stepContour: $("stepContour"), stepAxialOrigin: $("stepAxialOrigin"),
+  stepRadialOrigin: $("stepRadialOrigin"), stepAxialDirection: $("stepAxialDirection"),
+  stepRadialDirection: $("stepRadialDirection"), buildStepSection: $("buildStepSectionButton"),
   dimensionButton: $("dimensionButton"), clearDimensionsButton: $("clearDimensionsButton"),
   geometryInspector: $("geometryInspector"), clearGeometrySelection: $("clearGeometrySelection"),
+  latheMachineSelectRow: $("latheMachineSelectRow"), millSetupIdentity: $("millSetupIdentity"),
+  latheOrientationControl: $("latheOrientationControl"), latheXModeControl: $("latheXModeControl"),
+  latheSetupControls: $("latheSetupControls"), millSetupBoundary: $("millSetupBoundary"),
+  compare: $("compareButton"), brandSubtitle: $("brandSubtitle"), workspaceSafetyNote: $("workspaceSafetyNote"),
 };
 
 const state = {
@@ -218,6 +278,7 @@ const state = {
   showTool2d: false,
   toolAssignments: {}, toolAssignmentRevision: 0, toolAssignmentScope: null, bundledSample: false,
   toolLibraryTab: "assemblies", toolLibrarySelection: null,
+  referenceGeometry: null, referenceComparison: null, referenceGeneration: 0,
 };
 const ctx = elements.canvas.getContext("2d");
 const navigation3dRenderer = createFrameScheduler({
@@ -227,7 +288,7 @@ const navigation3dRenderer = createFrameScheduler({
 });
 const STORAGE_KEY = "verify.session.v1";
 const preferenceIds = [
-  "machineSelect", "orientationSelect", "xModeSelect", "programUnits", "displayUnits", "stockDiameter", "stockLength", "stockGripLength",
+  "machineModeSelect", "machineSelect", "orientationSelect", "xModeSelect", "programUnits", "displayUnits", "stockDiameter", "stockLength", "stockGripLength",
   "stockToggle", "chuckFaceZ", "jawDiameter", "clearanceInput", "collisionToggle", "graphicsQuality",
   "toolpathToggle",
 ];
@@ -241,6 +302,8 @@ const programSearch = {
 const programTextMeasureContext = document.createElement("canvas").getContext("2d");
 const STOCK_FRAME_CACHE_LIMIT = 64;
 const THREE_D_SETTLE_MS = 850;
+const MAX_DXF_BYTES = 25 * 1024 * 1024;
+const PROGRAM_EDITOR_LINE_LIMIT = MILL_PARSE_LIMITS.maxRecords;
 const TOOL_LIBRARY_SOURCE_BY_ID = new Map(TOOL_LIBRARY_CATALOG.sources.map((source) => [source.id, source]));
 const LIVE_TOOL_LIBRARY_SOURCE_BY_ID = new Map(LIVE_TOOL_LIBRARY_CATALOG.sources.map((source) => [source.id, source]));
 const MILLING_TOOL_LIBRARY_SOURCE_BY_ID = new Map(MILLING_TOOL_LIBRARY_CATALOG.sources.map((source) => [source.id, source]));
@@ -258,13 +321,30 @@ function programEditorMetrics() {
 }
 
 function programLineCount() {
-  return Math.max(1, elements.input.value.split(/\r?\n/).length);
+  if (isMillMode() && millSourceByteSummary(elements.input.value).exceeded) return PROGRAM_EDITOR_LINE_LIMIT + 1;
+  return millSourceRecordSummary(elements.input.value, {maxRecords: PROGRAM_EDITOR_LINE_LIMIT}).count;
 }
 
 function renderProgramLineNumbers() {
-  const count = programLineCount();
-  elements.lineNumbers.textContent = Array.from({length: count}, (_, index) => index + 1).join("\n");
-  elements.lineCount.textContent = `${count} lines`;
+  const byteSummary = isMillMode() ? millSourceByteSummary(elements.input.value) : null;
+  if (byteSummary?.exceeded) {
+    elements.lineNumbers.textContent = "";
+    elements.lineNumbers.dataset.suppressed = "true";
+    elements.lineCount.textContent = `>${byteSummary.maxSourceBytes.toLocaleString("en-US")} bytes · gutter hidden`;
+    return;
+  }
+  const summary = millSourceRecordSummary(elements.input.value, {maxRecords: PROGRAM_EDITOR_LINE_LIMIT});
+  if (summary.exceeded) {
+    elements.lineNumbers.textContent = "";
+    elements.lineNumbers.dataset.suppressed = "true";
+    elements.lineCount.textContent = `>${summary.maxRecords.toLocaleString("en-US")} lines · gutter hidden`;
+    return;
+  }
+  delete elements.lineNumbers.dataset.suppressed;
+  const numbers = [];
+  for (let line = 1; line <= summary.count; line += 1) numbers.push(line);
+  elements.lineNumbers.textContent = numbers.join("\n");
+  elements.lineCount.textContent = `${summary.count} lines`;
 }
 
 function positionProgramLineHighlight() {
@@ -333,14 +413,6 @@ function restoreProgramSearchCaret() {
   elements.input.scrollLeft = programSearch.anchorScrollLeft;
 }
 
-function programLineStartOffsets(source) {
-  const offsets = [0];
-  for (let index = 0; index < source.length; index += 1) {
-    if (source[index] === "\n") offsets.push(index + 1);
-  }
-  return offsets;
-}
-
 function programVisualColumn(source, start, end, tabSize) {
   let column = 0;
   for (let index = start; index < end; index += 1) {
@@ -353,13 +425,12 @@ function renderProgramSearchHighlights() {
   elements.searchHighlights.replaceChildren();
   if (elements.programSearchPanel.hidden || !programSearch.matches.length) return;
   const source = elements.input.value;
-  const lineStarts = programLineStartOffsets(source);
   const {lineHeight, paddingTop, paddingLeft, characterWidth, tabSize} = programEditorMetrics();
   const fragment = document.createDocumentFragment();
   for (const [index, match] of programSearch.matches.entries()) {
     const top = paddingTop + (match.line - 1) * lineHeight - elements.input.scrollTop;
     if (top + lineHeight < 0 || top > elements.input.clientHeight) continue;
-    const lineStart = lineStarts[match.line - 1] ?? 0;
+    const lineStart = match.lineStart;
     const startColumn = programVisualColumn(source, lineStart, match.start, tabSize);
     const endColumn = programVisualColumn(source, lineStart, match.end, tabSize);
     const highlight = document.createElement("span");
@@ -401,7 +472,9 @@ function refreshProgramSearch() {
   programSearch.kind = result.kind;
   programSearch.index = -1;
   if (!result.matches.length) {
-    elements.programSearchStatus.textContent = result.kind === "empty" ? "Type to find" : "No matches";
+    elements.programSearchStatus.textContent = result.kind === "blocked"
+      ? result.reason
+      : (result.kind === "empty" ? "Type to find" : "No matches");
     updateProgramSearchControls();
     renderProgramSearchHighlights();
     return;
@@ -448,6 +521,12 @@ function closeProgramSearch() {
   elements.input.focus({preventScroll: true});
 }
 
+function invalidateReferenceComparison(label, message) {
+  if (!state.referenceGeometry?.ready) return;
+  state.referenceComparison = {pending: true, pendingLabel: label, pendingMessage: message};
+  renderReferenceGeometryUi();
+}
+
 function markProgramChanged() {
   if (state.bundledSample) {
     state.toolAssignments = {};
@@ -460,6 +539,7 @@ function markProgramChanged() {
   positionProgramLineHighlight();
   renderProgramLineNumbers();
   elements.status.textContent = "Program changed — plot to refresh";
+  invalidateReferenceComparison("PLOT REQUIRED", "The G-code changed; plot it again before using the reference-path result.");
   if (elements.compareDialog.open && state.comparisonOriginal) renderComparison();
   schedulePersist();
 }
@@ -509,6 +589,11 @@ function replaceEveryProgramMatch() {
   const anchorStart = programOffsetAfterAllReplacements(programSearch.anchorStart, matches, replacement.length);
   const anchorEnd = programOffsetAfterAllReplacements(programSearch.anchorEnd, matches, replacement.length);
   const replaced = replaceAllProgramSearchMatches(elements.input.value, matches, replacement);
+  if (replaced.blocked) {
+    elements.programSearchStatus.textContent = replaced.reason;
+    elements.programReplaceInput.focus();
+    return;
+  }
   elements.input.value = replaced.value;
   preserveProgramSearchAnchor(anchorStart, anchorEnd);
   markProgramChanged();
@@ -518,6 +603,10 @@ function replaceEveryProgramMatch() {
 }
 
 function persistSession() {
+  if (isMillMode()) {
+    if (millSourceByteSummary(elements.input.value).exceeded) return;
+    if (millSourceRecordSummary(elements.input.value, {maxRecords: PROGRAM_EDITOR_LINE_LIMIT}).exceeded) return;
+  }
   try {
     const preferences = {};
     for (const id of preferenceIds) {
@@ -680,13 +769,16 @@ function machineLengthMm(value, profile) {
 
 function selectedProgramUnits(profile = currentMachineProfile()) {
   if (elements.programUnits.value === "inch" || elements.programUnits.value === "mm") return elements.programUnits.value;
+  if (isMillMode()) return "inch";
   return profile?.units === "mm" ? "mm" : "inch";
 }
 
 function updateProgramUnitsHint(profile = currentMachineProfile()) {
   const selected = selectedProgramUnits(profile);
   const label = selected === "inch" ? "Inches" : "Millimeters";
-  const source = elements.programUnits.value === "machine" ? `Machine default: ${label}.` : `Fallback: ${label}.`;
+  const source = elements.programUnits.value === "machine"
+    ? `${isMillMode() ? "Bounded mill default" : "Machine default"}: ${label}.`
+    : `Fallback: ${label}.`;
   elements.programUnitsHint.textContent = `${source} Used when G20/G21 is absent.`;
 }
 
@@ -787,7 +879,11 @@ async function saveMachineEditor(event) {
   }
 }
 
-function loadProgram(name, content, {bundledSample = false} = {}) {
+function loadProgram(name, content, {bundledSample = false, machineMode = null} = {}) {
+  if (machineMode === "lathe" || machineMode === "mill") {
+    elements.machineMode.value = machineMode;
+    applyMachineModeUi();
+  }
   state.toolAssignments = {};
   state.toolAssignmentScope = null;
   state.bundledSample = bundledSample === true;
@@ -806,6 +902,8 @@ function loadProgram(name, content, {bundledSample = false} = {}) {
 }
 
 function loadLiveBoreSample() {
+  elements.machineMode.value = "lathe";
+  applyMachineModeUi();
   const machineId = "haas-ngc-live-tool-syntax";
   if ([...elements.machine.options].some((option) => option.value === machineId)) elements.machine.value = machineId;
   elements.orientation.value = "left";
@@ -833,8 +931,28 @@ function loadLiveBoreSample() {
   persistSession();
 }
 
+function loadMillSample() {
+  elements.machineMode.value = "mill";
+  elements.programUnits.value = "machine";
+  elements.toolpathToggle.checked = true;
+  refreshUnitUi();
+  applyMachineModeUi();
+  loadProgram("sample-3-axis-mill.nc", millSampleProgram, {bundledSample: true, machineMode: "mill"});
+  state.programLine = state.parsed.sourceLines || programLineCount();
+  state.visibleBlocks = state.parsed.segments.length;
+  setGraphicsDimension("3d");
+  updateTransport({scrollProgram: true});
+  fitView();
+  elements.status.textContent = "3-axis mill command-centerline demo · final path shown";
+  persistSession();
+}
+
 async function loadBrowserFile(file) {
   if (!file) return;
+  if (isMillMode() && Number.isFinite(Number(file.size)) && Number(file.size) > MILL_PARSE_LIMITS.maxSourceBytes) {
+    elements.status.textContent = `Mill G-code import stopped before reading: file exceeds the bounded ${MILL_PARSE_LIMITS.maxSourceBytes.toLocaleString("en-US")}-byte limit.`;
+    return;
+  }
   loadProgram(file.name, await file.text());
 }
 
@@ -846,6 +964,828 @@ async function openProgram() {
     return;
   }
   elements.fileInput.click();
+}
+
+function bytesAsHex(bytes) {
+  return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Hex(bytes) {
+  if (!globalThis.crypto?.subtle) {
+    throw new Error("Secure SHA-256 hashing is unavailable, so the reference geometry was not imported.");
+  }
+  return bytesAsHex(await globalThis.crypto.subtle.digest("SHA-256", bytes));
+}
+
+function decodeDxfBytes(bytes) {
+  try {
+    return {content: new TextDecoder("utf-8", {fatal: true}).decode(bytes), encoding: "utf-8"};
+  } catch {
+    return {content: new TextDecoder("windows-1252").decode(bytes), encoding: "windows-1252"};
+  }
+}
+
+function bytesFromBase64(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function setReferenceResult(element, text, tone = null) {
+  element.textContent = text;
+  element.className = tone || "";
+}
+
+function detectedReferenceUnits(model) {
+  if (model?.units?.status !== "declared") return "";
+  if (model.units.name === "inch") return "inch";
+  if (model.units.name === "millimeter") return "mm";
+  return "";
+}
+
+function referenceHasNonUnitParseError(model) {
+  const resolvableUnitCodes = new Set(["units-invalid", "units-missing", "units-unitless", "units-unsupported"]);
+  return (model?.diagnostics || []).some((diagnostic) => (
+    diagnostic.severity === "error" && !resolvableUnitCodes.has(diagnostic.code)
+  ));
+}
+
+function referenceInspectorEntities(mapped, sourceName) {
+  const entities = [];
+  for (const primitive of mapped?.primitives || []) {
+    const isStep = mapped.format === "step-section" || mapped.sourceModel?.format === "step-section";
+    const component = `${isStep ? "STEP section" : "DXF reference"} · ${sourceName}`;
+    const layer = primitive.layer || "0";
+    const label = isStep
+      ? `${String(primitive.source?.curveType || primitive.type).replace(/^GeomAbs_/, "").toUpperCase()} · analytic B-rep edge`
+      : `${String(primitive.source?.dxfType || primitive.type).toUpperCase()} · layer ${layer}`;
+    const metadata = {
+      exact: false,
+      analytic: true,
+      referenceGeometry: true,
+      referenceFormat: isStep ? "step" : "dxf",
+      geometryUncertaintyMm: Number(primitive.geometryUncertaintyMm) || 0,
+      dxfEntityId: primitive.source?.entityId || primitive.id,
+      dxfType: primitive.source?.dxfType || primitive.type,
+      stepEdgeId: primitive.source?.edgeId || null,
+      layer,
+      handle: primitive.source?.handle || null,
+    };
+    if (primitive.type === "line") {
+      entities.push(lineGeometry({
+        id: `reference-${primitive.id}`, component, label, start: primitive.start, end: primitive.end, metadata,
+      }));
+    } else if (primitive.type === "arc") {
+      entities.push(arcGeometry({
+        id: `reference-${primitive.id}`, component, label, center: primitive.center, radius: primitive.radius,
+        startAngle: primitive.startAngle, sweep: primitive.sweep, metadata,
+      }));
+    } else if (primitive.type === "circle") {
+      for (const [suffix, startAngle] of [["a", 0], ["b", Math.PI]]) {
+        entities.push(arcGeometry({
+          id: `reference-${primitive.id}-${suffix}`, component, label, center: primitive.center,
+          radius: primitive.radius, startAngle, sweep: Math.PI, metadata: {...metadata, fullCircle: true},
+        }));
+      }
+    }
+  }
+  return entities;
+}
+
+function referenceComparisonSegments(segments = state.parsed.segments) {
+  const finish = segments.filter((segment) => segment.type === "finish");
+  if (finish.length) return {segments: finish, label: "G70 finish path"};
+  const cycleProfile = segments.filter((segment) => segment.type === "cycle-profile");
+  if (cycleProfile.length) return {segments: cycleProfile, label: "turning-cycle profile path"};
+  const cutting = segments.filter((segment) => (
+    !isRapidMotion(segment)
+    && !isLiveToolSegment(segment)
+    && segment.start && segment.end
+  ));
+  return {segments: cutting, label: "planar cutting path"};
+}
+
+function formatReferenceDistance(mm) {
+  const places = elements.displayUnits.value === "inch" ? 5 : 4;
+  return `${displayValue(mm).toFixed(places)} ${unitName()}`;
+}
+
+function referenceToleranceMm() {
+  const text = elements.referenceGeometryTolerance.value.trim();
+  if (!text) return NaN;
+  return Number(text) * unitScale();
+}
+
+function updateReferenceComparison() {
+  state.referenceComparison = null;
+  if (isMillMode()) return;
+  const reference = state.referenceGeometry;
+  if (!reference?.ready || !reference.mapped?.primitives?.length) return;
+  const toleranceMm = referenceToleranceMm();
+  if (!Number.isFinite(toleranceMm) || toleranceMm <= 0) {
+    state.referenceComparison = {error: "Path tolerance must be a positive finite value."};
+    return;
+  }
+  const selected = referenceComparisonSegments();
+  const parserVerificationBlockers = (state.parsed.warnings || []).filter((warning) => (
+    warning.verificationBlocked || warning.info !== true
+  ));
+  if (!selected.segments.length) {
+    state.referenceComparison = {selectionLabel: selected.label, error: "No planar cutting path is available to compare."};
+    return;
+  }
+  try {
+    const result = compareProgramProfileToNominal(selected.segments, reference.mapped, {
+      programXScale: xScale(),
+      toleranceMm,
+      numericalBudgetMm: Math.min(DEFAULT_PROFILE_NUMERICAL_BUDGET_MM, toleranceMm / 10),
+      programVerificationBlocked: parserVerificationBlockers.length > 0,
+      maximumComparisonOperations: MAX_REFERENCE_UI_COMPARISON_OPERATIONS,
+    });
+    state.referenceComparison = {
+      selectionLabel: selected.label,
+      result,
+      worstWitness: worstReferenceWitness(result.segmentResults),
+      parserVerificationBlockerCount: parserVerificationBlockers.length,
+    };
+  } catch (error) {
+    state.referenceComparison = {selectionLabel: selected.label, error: error instanceof Error ? error.message : String(error)};
+  }
+}
+
+function renderReferenceDiagnostics() {
+  const reference = state.referenceGeometry;
+  const entries = [];
+  if (!reference) {
+    entries.push({severity: "info", message: "DXF overlays stay analytic; STEP solids are sectioned locally into analytic B-rep curves."});
+  } else {
+    entries.push({
+      severity: "info",
+      message: `${reference.source.byteLength.toLocaleString()} bytes · SHA-256 ${reference.source.sha256.slice(0, 12)}… · held in memory on this device.`,
+    });
+    if (reference.kind === "dxf" && reference.model.units?.status === "declared") {
+      entries.push({severity: "info", message: `DXF $INSUNITS declares ${reference.model.units.name}.`});
+    }
+    if (reference.kind === "step" && reference.model?.kernel) {
+      const kernel = reference.model.kernel;
+      entries.push({severity: "info", message: `${kernel.name || "Open CASCADE"} ${kernel.version || ""} · analytic B-rep import and section.`.trim()});
+      const sourceUnits = reference.model.sourceUnits;
+      const declaredUnitNames = Array.isArray(sourceUnits?.declarations)
+        ? [...new Set(sourceUnits.declarations.map((declaration) => declaration?.name).filter(Boolean))]
+        : [];
+      const unitNames = declaredUnitNames.length
+        ? declaredUnitNames.join(", ")
+        : sourceUnits?.name || reference.model.units?.source?.name || reference.model.units?.source || null;
+      if (unitNames) entries.push({severity: "info", message: `STEP length unit${String(unitNames).includes(",") ? "s" : ""}: ${unitNames}; kernel coordinates are canonical millimeters.`});
+      if (reference.model.topology) {
+        const topology = reference.model.topology;
+        entries.push({severity: "info", message: `Imported topology: ${topology.solidCount ?? topology.solids ?? "?"} solid · ${topology.faceCount ?? topology.faces ?? "?"} faces · ${topology.edgeCount ?? topology.edges ?? "?"} edges.`});
+      }
+      const maxTolerance = Number(
+        reference.model.tolerances?.maxToleranceMm
+        ?? reference.model.tolerances?.maximumMm
+        ?? reference.model.topology?.maxToleranceMm
+        ?? reference.model.import?.maxToleranceMm
+        ?? reference.model.maxToleranceMm,
+      );
+      if (Number.isFinite(maxTolerance)) entries.push({severity: "info", message: `Maximum imported B-rep tolerance: ${maxTolerance.toExponential(3)} mm.`});
+    }
+    const diagnosticSources = [reference.model?.diagnostics, reference.setupDiagnostics, reference.sectionDto?.diagnostics, reference.mapped?.diagnostics];
+    const seenDiagnostics = new Set();
+    for (const diagnostic of diagnosticSources.flatMap((source) => source || [])) {
+      if (diagnostic.resolved) continue;
+      const key = `${diagnostic.code || ""}\0${diagnostic.message || ""}`;
+      if (seenDiagnostics.has(key)) continue;
+      seenDiagnostics.add(key);
+      entries.push(diagnostic);
+    }
+    if (reference.pending) entries.push({severity: "warning", message: reference.pendingMessage || "The local STEP geometry kernel is working…"});
+    if (reference.displayWorkload?.diagnostic) entries.push(reference.displayWorkload.diagnostic);
+    if (reference.ready) {
+      if (reference.kind === "dxf") {
+        entries.push({
+          severity: "info",
+          message: `DXF X → program ${Number(elements.referenceGeometryZDirection.value) === 1 ? "+Z" : "−Z"}; DXF Y → physical ${Number(elements.referenceGeometryXDirection.value) === 1 ? "+X" : "−X"} radius.`,
+        });
+      } else {
+        entries.push({
+          severity: "info",
+          message: `STEP ${elements.stepAxialAxis.value.toUpperCase()} → program ${Number(elements.stepAxialDirection.value) === 1 ? "+Z" : "−Z"}; ${elements.stepRadialAxis.value.toUpperCase()} → physical ${Number(elements.stepRadialDirection.value) === 1 ? "+X" : "−X"} radius; ${elements.stepNormalAxis.value.toUpperCase()} section at ${elements.stepPlaneOffset.value} mm.`,
+        });
+      }
+      const toleranceMm = referenceToleranceMm();
+      if (Number.isFinite(toleranceMm) && toleranceMm > 0) {
+        let geometryUncertaintyMm = Number(reference.mapped?.geometryUncertaintyMm) || 0;
+        for (const primitive of reference.mapped?.primitives || []) {
+          geometryUncertaintyMm = Math.max(geometryUncertaintyMm, Number(primitive.geometryUncertaintyMm) || 0);
+        }
+        const tenTimesTighter = geometryUncertaintyMm <= toleranceMm / 10;
+        entries.push({
+          severity: "info",
+          message: tenTimesTighter
+            ? `Directed path threshold: ${(toleranceMm / 25.4).toFixed(6)} in / ${toleranceMm.toFixed(4)} mm; retained geometry uncertainty is at least 10× tighter.`
+            : `Directed path threshold: ${(toleranceMm / 25.4).toFixed(6)} in / ${toleranceMm.toFixed(4)} mm; retained geometry uncertainty ${geometryUncertaintyMm.toExponential(3)} mm is included, so a boundary result remains unresolved.`,
+        });
+      }
+      if (state.referenceComparison?.selectionLabel) {
+        entries.push({severity: "info", message: `Deviation source: ${state.referenceComparison.selectionLabel}; rapids and live-tool motion are excluded.`});
+      }
+      if (state.referenceComparison?.parserVerificationBlockerCount) {
+        entries.push({
+          severity: "error",
+          message: `${state.referenceComparison.parserVerificationBlockerCount} unresolved parser diagnostic${state.referenceComparison.parserVerificationBlockerCount === 1 ? "" : "s"} prevent a complete path result.`,
+        });
+      }
+      if (state.referenceComparison?.pending) {
+        entries.push({severity: "warning", message: state.referenceComparison.pendingMessage});
+      }
+      if (reference.kind === "dxf") entries.push({severity: "warning", message: "Layer visibility and closed-contour topology are not qualified; import a profile-only DXF."});
+      entries.push({severity: "warning", message: `Program-to-closest-${reference.kind === "step" ? "selected STEP contour" : "DXF"} deviation does not prove that every reference curve is machined.`});
+    }
+    if (state.referenceComparison?.error) entries.push({severity: "error", message: state.referenceComparison.error});
+  }
+  elements.referenceGeometryDiagnostics.replaceChildren(...entries.map((entry) => {
+    const item = document.createElement("li");
+    item.textContent = entry.message;
+    if (entry.severity === "warning") item.className = "warning";
+    if (entry.severity === "error") item.className = "error";
+    return item;
+  }));
+}
+
+function renderReferenceGeometryUi() {
+  const reference = state.referenceGeometry;
+  const hasFile = Boolean(reference);
+  const ready = Boolean(reference?.ready);
+  const isStep = reference?.kind === "step";
+  elements.referenceDxfControls.hidden = isStep;
+  elements.referenceStepControls.hidden = !isStep;
+  elements.buildStepSection.disabled = !isStep || reference.pending || reference.model?.authorized !== true;
+  elements.removeGeometry.disabled = !hasFile;
+  elements.referenceGeometryToggle.disabled = !ready || state.viewMode !== "2d";
+  elements.referenceGeometrySetup.classList.toggle("blocked", Boolean(hasFile && !ready));
+  if (!hasFile) {
+    elements.referenceGeometrySummary.textContent = "NONE";
+    elements.referenceGeometryFile.textContent = "Import an ASCII DXF or a STEP solid to create an analytic 2D reference.";
+    setReferenceResult(elements.referenceGeometryImportStatus, "NO FILE");
+    setReferenceResult(elements.referenceGeometryAlignmentStatus, "—");
+    setReferenceResult(elements.referenceGeometryDeviation, "—");
+    renderReferenceDiagnostics();
+    return;
+  }
+
+  const hash = reference.source.sha256.slice(0, 12);
+  const curveCount = reference.mapped?.primitives?.length ?? reference.model?.primitives?.length ?? 0;
+  elements.referenceGeometryFile.textContent = `${reference.source.name} · ${isStep ? "STEP solid" : `${curveCount} analytic curve${curveCount === 1 ? "" : "s"}`} · SHA-256 ${hash}…`;
+  if (reference.pending) {
+    elements.referenceGeometrySummary.textContent = reference.pendingOperation === "section" ? "SECTIONING" : "IMPORTING";
+    setReferenceResult(elements.referenceGeometryImportStatus, "LOCAL KERNEL", "review");
+  } else if (reference.kind === "dxf" && referenceHasNonUnitParseError(reference.model)) {
+    elements.referenceGeometrySummary.textContent = "BLOCKED";
+    setReferenceResult(elements.referenceGeometryImportStatus, "BLOCKED", "blocked");
+  } else if (reference.kind === "dxf" && !elements.referenceGeometryUnits.value) {
+    elements.referenceGeometrySummary.textContent = "NEEDS SETUP";
+    setReferenceResult(elements.referenceGeometryImportStatus, "SELECT UNITS", "review");
+  } else if (isStep && reference.model?.authorized === false) {
+    elements.referenceGeometrySummary.textContent = "BLOCKED";
+    setReferenceResult(elements.referenceGeometryImportStatus, "IMPORT BLOCKED", "blocked");
+  } else if (isStep && !reference.sectionDto) {
+    elements.referenceGeometrySummary.textContent = "NEEDS SECTION";
+    setReferenceResult(elements.referenceGeometryImportStatus, "SOLID READY", "review");
+  } else if (isStep && reference.sectionDto?.authorized === false) {
+    elements.referenceGeometrySummary.textContent = "BLOCKED";
+    setReferenceResult(elements.referenceGeometryImportStatus, "SECTION BLOCKED", "blocked");
+  } else if (isStep && !elements.stepContour.value) {
+    elements.referenceGeometrySummary.textContent = "SELECT CONTOUR";
+    setReferenceResult(elements.referenceGeometryImportStatus, "SECTION READY", "review");
+  } else if (!ready) {
+    elements.referenceGeometrySummary.textContent = "BLOCKED";
+    setReferenceResult(elements.referenceGeometryImportStatus, "BLOCKED", "blocked");
+  } else {
+    elements.referenceGeometrySummary.textContent = "OVERLAY READY";
+    setReferenceResult(elements.referenceGeometryImportStatus, "ANALYTIC GEOMETRY", "ready");
+  }
+
+  const comparison = state.referenceComparison;
+  const aggregate = comparison?.result?.aggregate;
+  if (!ready) {
+    setReferenceResult(elements.referenceGeometryAlignmentStatus, "—");
+    setReferenceResult(elements.referenceGeometryDeviation, "—");
+  } else if (comparison?.pending) {
+    setReferenceResult(elements.referenceGeometryAlignmentStatus, comparison.pendingLabel, "review");
+    setReferenceResult(elements.referenceGeometryDeviation, "—");
+  } else if (!aggregate || comparison?.error) {
+    setReferenceResult(elements.referenceGeometryAlignmentStatus, "BLOCKED", "blocked");
+    setReferenceResult(elements.referenceGeometryDeviation, "—");
+  } else {
+    const labels = {
+      "within-tolerance": ["WITHIN PATH TOL", "ready"],
+      "outside-tolerance": ["OUTSIDE PATH TOL", "blocked"],
+      "tolerance-boundary": ["TOLERANCE BOUNDARY", "review"],
+      unresolved: ["UNRESOLVED", "blocked"],
+      "no-comparable-segments": ["NO PROFILE PATH", "blocked"],
+    };
+    const [label, tone] = labels[aggregate.classification] || ["REVIEW", "review"];
+    setReferenceResult(elements.referenceGeometryAlignmentStatus, label, tone);
+    if (!aggregate.maximumDeviation) {
+      setReferenceResult(elements.referenceGeometryDeviation, "—");
+    } else {
+      const {lowerBoundMm, upperBoundMm} = aggregate.maximumDeviation;
+      const deviation = upperBoundMm - lowerBoundMm <= 1e-10
+        ? formatReferenceDistance(upperBoundMm)
+        : `${formatReferenceDistance(lowerBoundMm)}–${formatReferenceDistance(upperBoundMm)}`;
+      setReferenceResult(elements.referenceGeometryDeviation, deviation, tone);
+    }
+  }
+  renderReferenceDiagnostics();
+}
+
+function finalizeReferenceMapping(reference, mapped, {fit = false} = {}) {
+  reference.mapped = mapped;
+  reference.displayWorkload = mapped?.authorized
+    ? referenceDisplayWorkload(mapped.primitives)
+    : null;
+  reference.ready = Boolean(mapped?.authorized
+    && mapped.primitives.length > 0
+    && reference.displayWorkload?.allowed);
+  reference.entities = reference.ready ? referenceInspectorEntities(mapped, reference.source.name) : [];
+  updateReferenceComparison();
+  renderReferenceGeometryUi();
+  if (fit) fitView(); else draw();
+}
+
+function stepMappingFromControls() {
+  const selectedIndex = Number.parseInt(elements.stepContour.value, 10);
+  const selectedContour = Number.isSafeInteger(selectedIndex)
+    ? sectionContours(state.referenceGeometry?.sectionDto)[selectedIndex]
+    : null;
+  const requiredNumber = (control) => control.value.trim() === "" ? NaN : Number(control.value);
+  return {
+    axialAxis: elements.stepAxialAxis.value,
+    radialAxis: elements.stepRadialAxis.value,
+    normalAxis: elements.stepNormalAxis.value,
+    planeOffsetMm: requiredNumber(elements.stepPlaneOffset),
+    axialOriginMm: requiredNumber(elements.stepAxialOrigin),
+    radialOriginMm: requiredNumber(elements.stepRadialOrigin),
+    axialDirection: Number(elements.stepAxialDirection.value),
+    radialDirection: Number(elements.stepRadialDirection.value),
+    selectedContourId: selectedContour?.id ?? "",
+  };
+}
+
+function mapCurrentStepSection({fit = false} = {}) {
+  const reference = state.referenceGeometry;
+  if (!reference || reference.kind !== "step" || !reference.sectionDto || !elements.stepContour.value) {
+    if (reference?.kind === "step") {
+      reference.mapped = null;
+      reference.entities = [];
+      reference.displayWorkload = null;
+      reference.ready = false;
+    }
+    state.referenceComparison = null;
+    renderReferenceGeometryUi();
+    if (fit) fitView(); else draw();
+    return;
+  }
+  let mapped;
+  try {
+    mapped = mapStepSectionToLatheGeometry(reference.sectionDto, stepMappingFromControls());
+  } catch (error) {
+    mapped = {
+      format: "step-section", coordinateSystem: "lathe-xz", primitives: [], geometry: [], bounds: null,
+      diagnostics: [{severity: "error", code: "step-mapping-failed", message: error instanceof Error ? error.message : String(error)}],
+      authorized: false,
+    };
+  }
+  finalizeReferenceMapping(reference, mapped, {fit});
+}
+
+function refreshReferenceGeometry({fit = false} = {}) {
+  const reference = state.referenceGeometry;
+  if (!reference) {
+    state.referenceComparison = null;
+    renderReferenceGeometryUi();
+    if (fit) fitView(); else draw();
+    return;
+  }
+  if (reference.kind === "step") {
+    mapCurrentStepSection({fit});
+    return;
+  }
+  const units = elements.referenceGeometryUnits.value;
+  const originX = elements.referenceGeometryOriginX.value.trim();
+  const originY = elements.referenceGeometryOriginY.value.trim();
+  if (!units || !originX || !originY) {
+    reference.mapped = null;
+    reference.entities = [];
+    reference.displayWorkload = null;
+    reference.ready = false;
+    state.referenceComparison = null;
+    renderReferenceGeometryUi();
+    if (fit) fitView(); else draw();
+    return;
+  }
+  const mapped = toLatheGeometry(reference.model, {
+    sourceUnits: reference.unitsAuthority === "dxf-header" ? null : units,
+    targetUnits: "millimeter",
+    overrideDeclaredUnits: reference.unitsAuthority === "user-confirmed",
+    origin: {x: Number(originX), y: Number(originY)},
+    zDirection: Number(elements.referenceGeometryZDirection.value),
+    radialDirection: Number(elements.referenceGeometryXDirection.value),
+  });
+  finalizeReferenceMapping(reference, mapped, {fit});
+}
+
+function purgeReferencePayload(reference) {
+  if (!reference) return;
+  reference.worker?.terminate?.("STEP reference replaced or removed from memory.");
+  if (reference.source?.originalBytes instanceof Uint8Array) reference.source.originalBytes.fill(0);
+  if (reference.source) {
+    reference.source.originalBytes = null;
+    reference.source.originalText = null;
+  }
+  reference.worker = null;
+  reference.sectionDto = null;
+  reference.mapped = null;
+  reference.entities = [];
+}
+
+function beginReferenceReplacement() {
+  state.referenceGeneration += 1;
+  purgeReferencePayload(state.referenceGeometry);
+  state.referenceGeometry = null;
+  state.referenceComparison = null;
+}
+
+function resetStepControls() {
+  elements.stepAxialAxis.value = "";
+  elements.stepRadialAxis.value = "";
+  elements.stepNormalAxis.value = "";
+  elements.stepPlaneOffset.value = "0";
+  elements.stepAxialOrigin.value = "0";
+  elements.stepRadialOrigin.value = "0";
+  elements.stepAxialDirection.value = "1";
+  elements.stepRadialDirection.value = "1";
+  elements.stepContour.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Build section first";
+  elements.stepContour.append(placeholder);
+}
+
+function sectionContours(sectionDto) {
+  const contours = sectionDto?.contours ?? sectionDto?.section?.contours;
+  return Array.isArray(contours) ? contours : [];
+}
+
+function populateStepContours(sectionDto) {
+  const contours = sectionContours(sectionDto);
+  elements.stepContour.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = contours.length ? "Select explicitly" : "No closed contours";
+  elements.stepContour.append(placeholder);
+  contours.forEach((contour, index) => {
+    const option = document.createElement("option");
+    option.value = String(index);
+    const edgeCount = Array.isArray(contour.edges) ? contour.edges.length : Number(contour.edgeCount) || 0;
+    option.textContent = `Contour ${index + 1} · ${edgeCount} analytic edge${edgeCount === 1 ? "" : "s"}`;
+    elements.stepContour.append(option);
+  });
+  elements.stepContour.value = "";
+}
+
+function acceptDxfSource({name, content, byteLength, sha256, encoding, originalBytes = null}) {
+  const model = parseDxf(content, {sourceName: name, sourceHash: sha256});
+  beginReferenceReplacement();
+  // Do not let the hidden browser input retain a second File/byte authority;
+  // the explicit in-memory source below is the only retained DXF payload.
+  elements.geometryFileInput.value = "";
+  const detectedUnits = detectedReferenceUnits(model);
+  elements.referenceGeometryUnits.value = detectedUnits;
+  elements.referenceGeometryOriginX.value = "0";
+  elements.referenceGeometryOriginY.value = "0";
+  elements.referenceGeometryZDirection.value = "1";
+  elements.referenceGeometryXDirection.value = "1";
+  elements.referenceGeometryToggle.checked = true;
+  state.referenceGeometry = {
+    kind: "dxf",
+    source: {name, byteLength, sha256, encoding, originalBytes, originalText: content},
+    model,
+    unitsAuthority: detectedUnits ? "dxf-header" : null,
+    mapped: null,
+    entities: [],
+    displayWorkload: null,
+    ready: false,
+  };
+  state.geometryHover = null;
+  state.geometrySelection = null;
+  state.componentGeometry = [];
+  resetGeometryInspectorDom();
+  clearPinnedDimensions({disableMode: true});
+  elements.referenceGeometrySetup.open = true;
+  refreshReferenceGeometry({fit: true});
+}
+
+async function acceptStepSource({name, byteLength, sha256, originalBytes}) {
+  if (!(originalBytes instanceof Uint8Array) || originalBytes.byteLength !== byteLength) {
+    throw new TypeError("STEP import requires the exact source bytes and matching byte length.");
+  }
+  const worker = new StepKernelClient();
+  beginReferenceReplacement();
+  const generation = state.referenceGeneration;
+  resetStepControls();
+  elements.stepFileInput.value = "";
+  elements.referenceGeometryToggle.checked = true;
+  const reference = {
+    kind: "step",
+    source: {name, byteLength, sha256, encoding: "binary", originalBytes},
+    model: {schemaVersion: 1, format: "step-solid", source: {name, byteLength, sha256}, diagnostics: [], authorized: null},
+    worker,
+    pending: true,
+    pendingOperation: "load",
+    pendingMessage: "Loading the pinned local Open CASCADE kernel and translating the STEP B-rep…",
+    sectionRevision: 0,
+    sectionDto: null,
+    setupDiagnostics: [],
+    mapped: null,
+    entities: [],
+    displayWorkload: null,
+    ready: false,
+  };
+  state.referenceGeometry = reference;
+  state.geometryHover = null;
+  state.geometrySelection = null;
+  state.componentGeometry = [];
+  resetGeometryInspectorDom();
+  clearPinnedDimensions({disableMode: true});
+  elements.referenceGeometrySetup.open = true;
+  renderReferenceGeometryUi();
+  draw();
+  elements.status.textContent = `Importing ${name} locally; the STEP kernel is loaded only on first use…`;
+  try {
+    const result = await worker.load({source: {name, byteLength, sha256}, bytes: originalBytes});
+    if (state.referenceGeneration !== generation || state.referenceGeometry !== reference) return;
+    if (result?.schemaVersion !== 1 || result?.format !== "step-solid" || !result.source
+      || result.source.name !== name || result.source.byteLength !== byteLength || result.source.sha256 !== sha256) {
+      throw new Error("The STEP worker result did not match the retained source-byte provenance.");
+    }
+    reference.model = result;
+    reference.pending = false;
+    reference.pendingOperation = null;
+    reference.pendingMessage = null;
+    if (result?.authorized !== true) {
+      worker.terminate("Unauthorized STEP import was purged from the geometry worker.");
+      reference.worker = null;
+      elements.status.textContent = `${name} was read, but its STEP topology or precision evidence is blocked.`;
+    } else {
+      elements.status.textContent = `Imported ${name} in memory. Choose all three model axes, the section plane, then build the analytic section.`;
+    }
+  } catch (error) {
+    if (state.referenceGeneration !== generation || state.referenceGeometry !== reference) return;
+    worker.terminate("Failed STEP import was purged from the geometry worker.");
+    reference.worker = null;
+    reference.pending = false;
+    reference.pendingOperation = null;
+    reference.pendingMessage = null;
+    reference.model = {
+      schemaVersion: 1, format: "step-solid", source: {name, byteLength, sha256}, authorized: false,
+      diagnostics: [{severity: "error", code: "step-import-failed", message: error instanceof Error ? error.message : String(error)}],
+    };
+    elements.status.textContent = error instanceof Error ? error.message : "Could not import that STEP solid.";
+  }
+  renderReferenceGeometryUi();
+  draw();
+}
+
+async function buildStepSection() {
+  const reference = state.referenceGeometry;
+  if (!reference || reference.kind !== "step" || reference.pending) return;
+  reference.setupDiagnostics = [];
+  const mapping = stepMappingFromControls();
+  const axes = [mapping.axialAxis, mapping.radialAxis, mapping.normalAxis];
+  if (new Set(axes).size !== 3 || axes.some((axis) => !["x", "y", "z"].includes(axis))) {
+    reference.setupDiagnostics.push({severity: "error", code: "step-axes-required", message: "Select three distinct model axes for axial, radial, and section-normal directions."});
+  }
+  if (![mapping.planeOffsetMm, mapping.axialOriginMm, mapping.radialOriginMm].every(Number.isFinite)) {
+    reference.setupDiagnostics.push({severity: "error", code: "step-transform-invalid", message: "STEP section coordinate and origins must be finite millimeter values."});
+  }
+  if (!reference.worker || reference.model?.authorized !== true) {
+    reference.setupDiagnostics.push({severity: "error", code: "step-model-unavailable", message: "A validated single STEP solid is required before building a section."});
+  }
+  if (reference.setupDiagnostics.length) {
+    reference.sectionDto = null;
+    reference.mapped = null;
+    reference.entities = [];
+    reference.ready = false;
+    state.referenceComparison = null;
+    renderReferenceGeometryUi();
+    draw();
+    return;
+  }
+
+  const generation = state.referenceGeneration;
+  const sectionRevision = (reference.sectionRevision ?? 0) + 1;
+  reference.sectionRevision = sectionRevision;
+  reference.pending = true;
+  reference.pendingOperation = "section";
+  reference.pendingMessage = `Computing the exact ${mapping.normalAxis.toUpperCase()}=${mapping.planeOffsetMm} mm B-rep section locally…`;
+  reference.sectionDto = null;
+  reference.mapped = null;
+  reference.entities = [];
+  reference.displayWorkload = null;
+  reference.ready = false;
+  state.referenceComparison = null;
+  populateStepContours(null);
+  renderReferenceGeometryUi();
+  draw();
+  try {
+    const result = await reference.worker.section({normalAxis: mapping.normalAxis, planeOffsetMm: mapping.planeOffsetMm});
+    if (state.referenceGeneration !== generation || state.referenceGeometry !== reference) return;
+    if (reference.sectionRevision !== sectionRevision) {
+      reference.pending = false;
+      reference.pendingOperation = null;
+      reference.pendingMessage = null;
+      reference.setupDiagnostics = [{
+        severity: "warning",
+        code: "step-section-definition-changed",
+        message: "The STEP axes or section plane changed while the kernel was working; build the section again.",
+      }];
+      elements.status.textContent = "STEP section setup changed; build the analytic section again.";
+      renderReferenceGeometryUi();
+      draw();
+      return;
+    }
+    if (result?.schemaVersion !== 1 || result?.format !== "step-section" || !result.source
+      || result.source.name !== reference.source.name
+      || result.source.byteLength !== reference.source.byteLength
+      || result.source.sha256 !== reference.source.sha256) {
+      throw new Error("The STEP section result did not match the retained source-byte provenance.");
+    }
+    reference.sectionDto = result;
+    reference.pending = false;
+    reference.pendingOperation = null;
+    reference.pendingMessage = null;
+    populateStepContours(result);
+    if (result?.authorized === true && sectionContours(result).length) {
+      elements.status.textContent = `Analytic section built from ${reference.source.name}. Select the intended closed contour before comparison.`;
+    } else {
+      elements.status.textContent = "The selected STEP section is blocked; review its topology and precision diagnostics.";
+    }
+  } catch (error) {
+    if (state.referenceGeneration !== generation || state.referenceGeometry !== reference) return;
+    if (reference.sectionRevision !== sectionRevision) {
+      reference.pending = false;
+      reference.pendingOperation = null;
+      reference.pendingMessage = null;
+      reference.setupDiagnostics = [{
+        severity: "warning",
+        code: "step-section-definition-changed",
+        message: "The STEP axes or section plane changed while the kernel was working; build the section again.",
+      }];
+      renderReferenceGeometryUi();
+      draw();
+      return;
+    }
+    reference.pending = false;
+    reference.pendingOperation = null;
+    reference.pendingMessage = null;
+    reference.sectionDto = {
+      schemaVersion: 1, format: "step-section", authorized: false, section: {contours: []},
+      diagnostics: [{severity: "error", code: "step-section-failed", message: error instanceof Error ? error.message : String(error)}],
+    };
+    populateStepContours(reference.sectionDto);
+    elements.status.textContent = error instanceof Error ? error.message : "Could not section that STEP solid.";
+  }
+  renderReferenceGeometryUi();
+  draw();
+}
+
+async function loadBrowserDxf(file) {
+  if (isMillMode()) {
+    elements.status.textContent = "DXF reference comparison is lathe-only in the current bounded mill path viewer.";
+    return;
+  }
+  if (!file) return;
+  if (file.size > MAX_DXF_BYTES) {
+    elements.status.textContent = "That DXF is larger than G-Code Studio's 25 MB browser limit.";
+    elements.geometryFileInput.value = "";
+    return;
+  }
+  try {
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    const sha256 = await sha256Hex(buffer);
+    const decoded = decodeDxfBytes(bytes);
+    acceptDxfSource({
+      name: file.name, content: decoded.content, byteLength: bytes.byteLength, sha256,
+      encoding: decoded.encoding, originalBytes: bytes,
+    });
+    elements.status.textContent = `Imported ${file.name} as an in-memory DXF reference`;
+  } catch (error) {
+    elements.status.textContent = error instanceof Error ? error.message : "Could not import that DXF.";
+  } finally {
+    elements.geometryFileInput.value = "";
+  }
+}
+
+async function loadBrowserStep(file) {
+  if (isMillMode()) {
+    elements.status.textContent = "STEP reference comparison is lathe-only in the current bounded mill path viewer.";
+    return;
+  }
+  if (!file) return;
+  if (file.size > MAX_STEP_BYTES) {
+    elements.status.textContent = "That STEP file is larger than G-Code Studio's 25 MB browser limit.";
+    elements.stepFileInput.value = "";
+    return;
+  }
+  try {
+    const buffer = await file.arrayBuffer();
+    const originalBytes = new Uint8Array(buffer);
+    const sha256 = await sha256Hex(buffer);
+    await acceptStepSource({name: file.name, byteLength: originalBytes.byteLength, sha256, originalBytes});
+  } catch (error) {
+    elements.status.textContent = error instanceof Error ? error.message : "Could not import that STEP solid.";
+  } finally {
+    elements.stepFileInput.value = "";
+  }
+}
+
+async function openReferenceGeometry() {
+  if (isMillMode()) {
+    elements.status.textContent = "Switch to Lathe to import a DXF reference; mill mode currently displays command centerlines only.";
+    return;
+  }
+  if (window.pywebview?.api?.open_dxf) {
+    const selected = await window.pywebview.api.open_dxf();
+    if (selected?.error) { elements.status.textContent = selected.error; return; }
+    if (typeof selected?.originalBytesBase64 === "string") {
+      try {
+        const originalBytes = bytesFromBase64(selected.originalBytesBase64);
+        const bridgeHash = await sha256Hex(originalBytes.buffer);
+        if (originalBytes.byteLength !== selected.byteLength || bridgeHash !== selected.sha256) {
+          throw new Error("The desktop DXF byte provenance did not match its declared size and SHA-256.");
+        }
+        const decoded = decodeDxfBytes(originalBytes);
+        acceptDxfSource({
+          name: selected.name, content: decoded.content, byteLength: selected.byteLength,
+          sha256: selected.sha256, encoding: decoded.encoding,
+          originalBytes,
+        });
+        elements.status.textContent = `Imported ${selected.name} as an in-memory DXF reference`;
+      } catch (error) {
+        elements.status.textContent = error instanceof Error ? error.message : "Could not import that DXF.";
+      }
+    }
+    return;
+  }
+  elements.geometryFileInput.click();
+}
+
+async function openStepGeometry() {
+  if (isMillMode()) {
+    elements.status.textContent = "Switch to Lathe to import a STEP reference; mill mode currently displays command centerlines only.";
+    return;
+  }
+  if (window.pywebview?.api?.open_step) {
+    const selected = await window.pywebview.api.open_step();
+    if (selected?.error) { elements.status.textContent = selected.error; return; }
+    if (typeof selected?.originalBytesBase64 === "string") {
+      try {
+        const originalBytes = bytesFromBase64(selected.originalBytesBase64);
+        const bridgeHash = await sha256Hex(originalBytes.buffer);
+        if (originalBytes.byteLength !== selected.byteLength || bridgeHash !== selected.sha256) {
+          throw new Error("The desktop STEP byte provenance did not match its declared size and SHA-256.");
+        }
+        await acceptStepSource({
+          name: selected.name, byteLength: selected.byteLength, sha256: selected.sha256, originalBytes,
+        });
+      } catch (error) {
+        elements.status.textContent = error instanceof Error ? error.message : "Could not import that STEP solid.";
+      }
+    }
+    return;
+  }
+  elements.stepFileInput.click();
+}
+
+function removeReferenceGeometry() {
+  const removedKind = state.referenceGeometry?.kind;
+  beginReferenceReplacement();
+  state.geometryHover = null;
+  state.geometrySelection = null;
+  state.componentGeometry = [];
+  clearPinnedDimensions({disableMode: true});
+  elements.geometryFileInput.value = "";
+  elements.stepFileInput.value = "";
+  elements.referenceGeometryUnits.value = "";
+  resetStepControls();
+  resetGeometryInspectorDom();
+  renderReferenceGeometryUi();
+  elements.status.textContent = `${removedKind === "step" ? "STEP" : "DXF"} reference removed from memory`;
+  fitView();
 }
 
 async function saveProgram() {
@@ -1202,15 +2142,62 @@ function renderComparison() {
 }
 
 function openComparison() {
+  if (isMillMode()) {
+    elements.status.textContent = "Program comparison is not yet qualified for native XYZ mill geometry.";
+    return;
+  }
   renderComparison();
   elements.compareDialog.showModal();
 }
 
+function isMillMode() { return elements.machineMode?.value === "mill"; }
+function applyMachineModeUi({refreshView = true} = {}) {
+  const mill = isMillMode();
+  document.body.dataset.machineMode = mill ? "mill" : "lathe";
+  document.title = mill ? "G-Code Studio — 3-axis mill backplotter" : "G-Code Studio — Lathe G-code backplotter";
+  elements.brandSubtitle.textContent = mill ? "3-AXIS MILL BACKPLOT" : "LATHE BACKPLOT";
+  elements.latheMachineSelectRow.hidden = mill;
+  elements.millSetupIdentity.hidden = !mill;
+  elements.latheOrientationControl.hidden = mill;
+  elements.latheXModeControl.hidden = mill;
+  elements.latheSetupControls.hidden = mill;
+  elements.millSetupBoundary.hidden = !mill;
+  elements.importGeometry.hidden = mill;
+  elements.importStep.hidden = mill;
+  elements.compare.hidden = mill;
+  elements.viewFace.hidden = mill;
+  elements.toolOverlay.hidden = mill;
+  elements.toolVerificationBadge.hidden = mill;
+  elements.dimensionButton.hidden = mill;
+  elements.clearDimensionsButton.hidden = mill;
+  elements.latheReadout.hidden = mill;
+  elements.millReadout.hidden = !mill;
+  elements.millViewStatus.hidden = !mill;
+  elements.view2d.textContent = mill ? "Top" : "2D";
+  elements.view2d.title = mill ? "Show the native X/Y command-centerline projection" : "Show the X/Z lathe backplot";
+  for (const item of document.querySelectorAll("[data-lathe-legend]")) item.hidden = mill;
+  $("operationModeLabel").textContent = mill ? "MILL TOOLPATH" : "LIVE TOOL";
+  $("stockStatusLabel").textContent = mill ? "STOCK MODEL" : "STOCK REMOVED";
+  $("clearanceStatusLabel").textContent = mill ? "COLLISION" : "CLEARANCE";
+  elements.workspaceSafetyNote.textContent = mill
+    ? "Command-centerline preview only — cutter size, compensation, work-offset transforms, stock, fixtures, machine travel, and collision are not modeled. Prove out with the control's approved process."
+    : "Preview only — the keep-out is a tool-point envelope, not full machine collision verification. Prove out with the control's approved process.";
+  if (mill && state.viewMode === "face") state.viewMode = "2d";
+  if (mill) {
+    state.geometrySelection = null;
+    state.geometryHover = null;
+    state.dimensionMode = false;
+    resetGeometryInspectorDom();
+  }
+  updateProgramUnitsHint();
+  if (refreshView) setGraphicsDimension(state.viewMode);
+}
 function xScale() { return elements.xMode.value === "diameter" ? 0.5 : 1; }
 function orientationSign() { return elements.orientation.value === "left" ? 1 : -1; }
 function unitScale() { return scaleForUnits(elements.displayUnits.value); }
 function unitName() { return elements.displayUnits.value === "inch" ? "in" : "mm"; }
 function displayValue(mm) { return mm / unitScale(); }
+function millDisplayDecimals() { return elements.displayUnits.value === "inch" ? 5 : 4; }
 function setupValue(input) { return (Number(input.value) || 0) * unitScale(); }
 function configuredStockBounds(overallLength) {
   return stockPlacement(overallLength, setupValue(elements.chuckFaceZ), setupValue(elements.stockGripLength));
@@ -1362,6 +2349,10 @@ function fitView() {
     draw();
     return;
   }
+  if (isMillMode()) {
+    draw();
+    return;
+  }
   const rect = elements.wrap.getBoundingClientRect();
   const bounds = boundsIncludingStock();
   if (!bounds || !rect.width || !rect.height) return;
@@ -1376,27 +2367,35 @@ function fitView() {
   draw();
 }
 
+function mergeBounds(first, second) {
+  if (!first) return second ? {...second} : null;
+  if (!second) return {...first};
+  return {
+    minX: Math.min(first.minX, second.minX),
+    maxX: Math.max(first.maxX, second.maxX),
+    minZ: Math.min(first.minZ, second.minZ),
+    maxZ: Math.max(first.maxZ, second.maxZ),
+  };
+}
+
 function boundsIncludingStock() {
+  if (isMillMode()) return millProgramBounds(state.parsed.segments);
   let bounds = programBounds(state.parsed.segments, xScale());
+  if (state.referenceGeometry?.ready && elements.referenceGeometryToggle.checked) {
+    bounds = mergeBounds(bounds, state.referenceGeometry.mapped.bounds);
+  }
   if (elements.collisionToggle.checked) {
     const keepout = collisionOptions();
     const jawRadius = keepout.jawDiameter / 2 + keepout.clearance;
     const chuckBounds = {minX: -jawRadius, maxX: jawRadius, minZ: keepout.chuckFaceZ - keepout.chuckDepth - keepout.clearance, maxZ: keepout.chuckFaceZ + keepout.clearance};
-    bounds = bounds ? {
-      minX: Math.min(bounds.minX, chuckBounds.minX), maxX: Math.max(bounds.maxX, chuckBounds.maxX),
-      minZ: Math.min(bounds.minZ, chuckBounds.minZ), maxZ: Math.max(bounds.maxZ, chuckBounds.maxZ),
-    } : chuckBounds;
+    bounds = mergeBounds(bounds, chuckBounds);
   }
   if (!elements.stockToggle.checked) return bounds;
   const radius = Math.max(0, setupValue(elements.stockDiameter)) / 2;
   const length = Math.max(0, setupValue(elements.stockLength));
   const axial = configuredStockBounds(length);
   const stock = {minX: -radius, maxX: radius, minZ: axial.startZ, maxZ: axial.endZ};
-  if (!bounds) return stock;
-  return {
-    minX: Math.min(bounds.minX, stock.minX), maxX: Math.max(bounds.maxX, stock.maxX),
-    minZ: Math.min(bounds.minZ, stock.minZ), maxZ: Math.max(bounds.maxZ, stock.maxZ),
-  };
+  return mergeBounds(bounds, stock);
 }
 
 function niceGridStep() {
@@ -1602,6 +2601,9 @@ function exactStockContourGeometry(stock) {
 
 function currentComponentGeometry() {
   const entities = [];
+  if (state.referenceGeometry?.ready && elements.referenceGeometryToggle.checked) {
+    entities.push(...state.referenceGeometry.entities);
+  }
   if (elements.collisionToggle.checked) {
     const options = collisionOptions();
     const jawRadius = options.jawDiameter / 2;
@@ -2910,7 +3912,7 @@ function toolPhysicalToScreen(point) {
 }
 
 function updateToolControls() {
-  const available = state.viewMode === "2d";
+  const available = state.viewMode === "2d" && !isMillMode();
   const active = available && state.showTool2d;
   elements.toolOverlay.disabled = !available;
   elements.toolOverlay.classList.toggle("active", active);
@@ -2922,7 +3924,7 @@ function updateToolControls() {
 }
 
 function drawToolAssembly2d() {
-  if (state.viewMode !== "2d" || !state.showTool2d) {
+  if (isMillMode() || state.viewMode !== "2d" || !state.showTool2d) {
     elements.toolVerificationBadge.hidden = true;
     return;
   }
@@ -3065,6 +4067,45 @@ function drawProgramPointMarkers2d(count) {
   }
 }
 
+function drawReferenceGeometry() {
+  if (!state.referenceGeometry?.ready || !elements.referenceGeometryToggle.checked) return;
+  ctx.save();
+  ctx.strokeStyle = "#fbbf24";
+  ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.92;
+  ctx.setLineDash([8, 4]);
+  for (const entity of state.referenceGeometry.entities) {
+    const points = sampleGeometryEntity(entity, REFERENCE_DISPLAY_ARC_MAXIMUM_SEGMENTS).map(geometryToScreen);
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      if (index === 0) ctx.moveTo(point.x, point.y);
+      else ctx.lineTo(point.x, point.y);
+    });
+    ctx.stroke();
+  }
+  const witness = state.referenceComparison?.worstWitness;
+  if (witness && witness.deviation.lowerBoundMm > 1e-10) {
+    const programPoint = geometryToScreen(witness.worstPoint);
+    const nominalPoint = geometryToScreen(witness.nearestNominal.point);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = witness.classification === "within-tolerance" ? "#56e39f" : "#fb7185";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 2]);
+    ctx.beginPath();
+    ctx.moveTo(programPoint.x, programPoint.y);
+    ctx.lineTo(nominalPoint.x, nominalPoint.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = ctx.strokeStyle;
+    for (const point of [programPoint, nominalPoint]) {
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
 function drawToolpath() {
   if (!elements.toolpathToggle.checked) {
     state.graphicsHits = [];
@@ -3146,7 +4187,7 @@ function dimensionEntityKey(entity) {
 }
 
 function updateDimensionControls() {
-  const available = state.viewMode === "2d";
+  const available = state.viewMode === "2d" && !isMillMode();
   elements.dimensionButton.disabled = !available;
   elements.dimensionButton.classList.toggle("active", available && state.dimensionMode);
   elements.dimensionButton.setAttribute("aria-pressed", String(available && state.dimensionMode));
@@ -3162,6 +4203,11 @@ function clearPinnedDimensions({disableMode = false} = {}) {
 function pinDimension(entity) {
   if (entity.metadata?.sampledContour) {
     elements.status.textContent = "Sampled stock-grid chords cannot be pinned as exact dimensions; select an exact programmed line or radius.";
+    return;
+  }
+  if (entity.metadata?.referenceGeometry) {
+    const format = entity.metadata.referenceFormat === "step" ? "STEP section" : "DXF";
+    elements.status.textContent = `Imported ${format} dimensions carry a bounded numeric uncertainty (≤ ${formatReferenceDistance(entity.metadata.geometryUncertaintyMm || 0)}); use the reference-deviation result instead of pinning an exact dimension.`;
     return;
   }
   const key = dimensionEntityKey(entity);
@@ -3277,8 +4323,23 @@ function formatGeometryPoint(point) {
   return `Z ${displayValue(point.z).toFixed(places)}  X ${displayValue(point.x).toFixed(places)} ${unitName()}`;
 }
 
+function resetGeometryInspectorDom() {
+  elements.geometryInspector.hidden = true;
+  $("geometryComponent").textContent = "Select component geometry";
+  $("geometryEntity").textContent = "Corners, midpoints, and lines snap in 2D.";
+  $("geometrySelectedPoint").textContent = "—";
+  $("geometryPrimaryLabel").textContent = "Length";
+  $("geometryLength").textContent = "—";
+  $("geometrySecondaryLabel").textContent = "Delta";
+  $("geometrySecondaryValue").textContent = "—";
+  $("geometryCenter").textContent = "—";
+  $("geometryStart").textContent = "—";
+  $("geometryMidpoint").textContent = "—";
+  $("geometryEnd").textContent = "—";
+}
+
 function renderGeometryInspector() {
-  const active = state.viewMode === "2d" && Boolean(state.geometrySelection);
+  const active = state.viewMode === "2d" && !isMillMode() && Boolean(state.geometrySelection);
   elements.geometryInspector.hidden = !active;
   if (!active) return;
   const hit = state.geometrySelection;
@@ -3289,7 +4350,10 @@ function renderGeometryInspector() {
   const samplingNote = sampledContour
     ? ` · GRID APPROXIMATION ≤ ${formatDistance(hit.entity.metadata.maximumAxialStep, elements.displayUnits.value === "inch" ? 4 : 3)} AXIAL STEP`
     : "";
-  $("geometryEntity").textContent = `${hit.entity.label} · ${snapNames[hit.kind] || "Geometry"}${samplingNote}`;
+  const referenceNote = hit.entity.metadata?.referenceGeometry
+    ? ` · ANALYTIC ${hit.entity.metadata.referenceFormat === "step" ? "STEP SECTION" : "DXF"} · NUMERIC BOUND ≤ ${formatReferenceDistance(hit.entity.metadata.geometryUncertaintyMm || 0)}`
+    : "";
+  $("geometryEntity").textContent = `${hit.entity.label} · ${snapNames[hit.kind] || "Geometry"}${samplingNote}${referenceNote}`;
   $("geometrySelectedPoint").textContent = formatGeometryPoint(hit.modelPoint);
   if (hit.entity.type === "arc") {
     $("geometryPrimaryLabel").textContent = "Radius";
@@ -3321,10 +4385,29 @@ function drawViewCube() {
     height: cubeRect.height,
     camera: state.camera3d,
     hoverTarget: state.viewCubeHover,
+    coordinateSystem: isMillMode() ? "mill" : "lathe",
   });
 }
 
 function draw3d(rect) {
+  if (isMillMode()) {
+    const currentPoint = elements.toolpathToggle.checked
+      ? millPositionAt(state.parsed, {sourceLine: state.programLine, visibleCount: state.visibleBlocks})
+      : null;
+    renderMill3d(ctx, {
+      width: rect.width,
+      height: rect.height,
+      segments: elements.toolpathToggle.checked ? state.parsed.segments : [],
+      visibleCount: elements.toolpathToggle.checked ? state.visibleBlocks : 0,
+      currentPoint,
+      camera: state.camera3d,
+      lengthScale: unitScale(),
+      lengthUnit: unitName(),
+    });
+    state.graphicsHits = [];
+    drawViewCube();
+    return;
+  }
   let stock = null;
   const quality = graphicsQuality();
   const interactive = state.playing || Date.now() < state.preview3dUntil || state.drag?.mode?.startsWith("3d-");
@@ -3406,10 +4489,27 @@ function draw() {
     draw3d(rect);
   } else if (state.viewMode === "face") {
     drawFace(rect);
+  } else if (isMillMode()) {
+    const currentPoint = elements.toolpathToggle.checked
+      ? millPositionAt(state.parsed, {sourceLine: state.programLine, visibleCount: state.visibleBlocks})
+      : null;
+    renderMillTop2d(ctx, {
+      width: rect.width,
+      height: rect.height,
+      segments: elements.toolpathToggle.checked ? state.parsed.segments : [],
+      visibleCount: elements.toolpathToggle.checked ? state.visibleBlocks : 0,
+      currentPoint,
+      lengthScale: unitScale(),
+      lengthUnit: unitName(),
+    });
+    state.graphicsHits = [];
+    state.geometryHover = null;
+    state.geometrySelection = null;
   } else {
     drawGrid(rect.width, rect.height);
     drawKeepout();
     drawStock();
+    drawReferenceGeometry();
     drawToolpath();
     drawToolAssembly2d();
     drawGeometryInspection();
@@ -3417,13 +4517,17 @@ function draw() {
   }
   renderGeometryInspector();
   updateDimensionControls();
-  const liveAttempts = liveToolOperations();
+  const liveAttempts = isMillMode() ? [] : liveToolOperations();
   elements.empty.hidden = state.parsed.segments.length > 0;
   elements.empty.textContent = liveAttempts.length
     ? (liveAttempts.some((attempt) => attempt.blocked)
       ? "No drawable live-tool path — motion is blocked; see Program notes"
       : "Live-tool position established; the operation has no drawable path")
-    : "No motion blocks found";
+    : (isMillMode()
+      ? (millPositionAt(state.parsed, {sourceLine: state.programLine, visibleCount: state.visibleBlocks})
+        ? "Mill XYZ baseline established; no incoming rapid path was invented"
+        : "No drawable mill motion — see Program notes")
+      : "No motion blocks found");
 }
 
 function updateBoundsReadout(bounds) {
@@ -3458,7 +4562,111 @@ function updateBoundsReadout(bounds) {
     : "Drawable program Z × X bounds.";
 }
 
+function renderProgramNotes(notes) {
+  $("warningCount").textContent = String(notes.length);
+  const list = $("warningList");
+  list.replaceChildren();
+  if (!notes.length) {
+    const item = document.createElement("li");
+    item.className = "muted";
+    item.textContent = "No parser warnings.";
+    list.append(item);
+    return;
+  }
+  notes.slice(0, 12).forEach((warning) => {
+    const item = document.createElement("li");
+    if (warning.danger || warning.verificationBlocked) item.className = "danger";
+    else if (warning.info) item.className = "muted";
+    item.textContent = `${warning.line ? `Line ${warning.line}: ` : ""}${warning.message}`;
+    list.append(item);
+  });
+}
+
+function updateMillStats() {
+  const segments = state.parsed.segments || [];
+  const decimals = millDisplayDecimals();
+  const verifiedSegments = segments.filter((segment) => !segment.verificationBlocked);
+  const unresolvedRapidSegments = verifiedSegments.filter((segment) => isRapidMotion(segment) && segment.rapidInterpolationUnresolved);
+  const rapid = verifiedSegments
+    .filter((segment) => isRapidMotion(segment) && !segment.rapidInterpolationUnresolved)
+    .reduce((sum, segment) => sum + millSegmentLengthMm(segment), 0);
+  const cut = verifiedSegments
+    .filter((segment) => !isRapidMotion(segment))
+    .reduce((sum, segment) => sum + millSegmentLengthMm(segment), 0);
+  const bounds = millProgramBounds(segments);
+  const blockedSegments = segments.filter((segment) => segment.verificationBlocked).length;
+
+  $("motionCount").textContent = String(segments.length);
+  $("cycleCount").textContent = "0";
+  $("rapidDistance").textContent = unresolvedRapidSegments.length ? "UNRESOLVED" : formatDistance(rapid, decimals);
+  $("rapidDistance").className = unresolvedRapidSegments.length ? "warning-value" : "";
+  $("rapidDistance").title = unresolvedRapidSegments.length
+    ? "At least one multi-axis G00 is shown only as an endpoint connector; rapid interpolation and total traveled distance depend on unconfigured controller/machine behavior."
+    : "Exact commanded single-axis rapid distance.";
+  $("cutDistance").textContent = formatDistance(cut, decimals);
+
+  const pathStatus = $("liveToolStatus");
+  pathStatus.textContent = blockedSegments ? `PATH ONLY · ${blockedSegments} BLOCKED` : "PATH ONLY";
+  pathStatus.className = blockedSegments ? "danger-value" : "warning-value";
+  pathStatus.title = "Programmed XYZ command centerlines only; no cutter, compensation, machine-position, stock, fixture, travel, or collision claim.";
+
+  const stockStatus = $("stockRemoved");
+  stockStatus.textContent = "NOT MODELED";
+  stockStatus.className = "warning-value";
+  stockStatus.title = "Mill stock removal is outside this bounded command-centerline viewer.";
+  const collisionStatus = $("collisionStatus");
+  collisionStatus.textContent = "NOT MODELED";
+  collisionStatus.className = "warning-value";
+  collisionStatus.title = "Mill cutter, holder, fixture, machine-envelope, and collision geometry are not modeled.";
+
+  const cycleTime = estimateCycleTime(state.parsed, {xScale: 1});
+  state.cycleTime = cycleTime;
+  const timeText = cycleTime.hasEstimate ? qualifiedTime(cycleTime.seconds, cycleTime.quality) : "—";
+  const timeTitle = [
+    cycleTime.hasEstimate
+      ? `Estimated programmed motion and dwell time: ${formatCycleTime(cycleTime.seconds)}.`
+      : "Cycle time cannot be estimated from the available commanded path and feed data.",
+    ...cycleTime.limitations,
+    "Generic mill rapid rates, tool-change duration, and spindle acceleration are not modeled.",
+  ].join(" ");
+  for (const element of [$("cycleTimeHeader"), $("cycleTimeStat")]) {
+    element.textContent = timeText;
+    element.title = timeTitle;
+    element.classList.toggle("partial-time", cycleTime.quality === "partial");
+    element.classList.toggle("assumed-time", cycleTime.quality === "assumed");
+  }
+
+  const boundsOutput = $("boundsReadout");
+  boundsOutput.className = "warning-value";
+  boundsOutput.title = "Displayed canonical XYZ command-centerline bounds. Blocked display chords, when present, are included for review.";
+  if (bounds && Number.isFinite(bounds.minY) && Number.isFinite(bounds.maxY)) {
+    const xSpan = displayValue(bounds.maxX - bounds.minX).toFixed(decimals);
+    const ySpan = displayValue(bounds.maxY - bounds.minY).toFixed(decimals);
+    const zSpan = displayValue(bounds.maxZ - bounds.minZ).toFixed(decimals);
+    boundsOutput.textContent = `X ${xSpan} × Y ${ySpan} × Z ${zSpan} ${unitName()} · PATH ONLY`;
+  } else {
+    boundsOutput.textContent = "PATH ONLY · UNRESOLVED";
+  }
+
+  const notes = [
+    {
+      line: null,
+      info: true,
+      message: "Mill mode preserves canonical XYZ programmed coordinates and analytic arc definitions. The canvas is a command-centerline display; cutter geometry, offsets, stock, fixtures, machine travel, and collision are not modeled.",
+    },
+    ...(state.parsed.warnings || []),
+  ];
+  for (const limitation of cycleTime.limitations) {
+    notes.push({line: null, info: true, message: limitation});
+  }
+  renderProgramNotes(notes);
+}
+
 function updateStats() {
+  if (isMillMode()) {
+    updateMillStats();
+    return;
+  }
   const segments = state.parsed.segments;
   const rapid = segments.filter((segment) => segment.type === "rapid").reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
   const cut = segments.filter((segment) => !isRapidMotion(segment) && !isLiveToolSegment(segment)).reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
@@ -3473,6 +4681,8 @@ function updateStats() {
   $("cycleCount").textContent = String(state.parsed.cycles.length);
   updateLiveToolStatus();
   $("rapidDistance").textContent = formatDistance(rapid);
+  $("rapidDistance").className = "";
+  $("rapidDistance").title = "Drawable rapid centerline distance.";
   $("cutDistance").textContent = formatDistance(cut);
   const machineOptions = machinePlotOptions(currentMachineProfile());
   const cycleTime = estimateCycleTime(state.parsed, {
@@ -3553,19 +4763,7 @@ function updateStats() {
     if (cycle.code === "G70") continue;
     notes.push({line: cycle.line, info: true, message: `${cycle.code} Type ${cycle.type} expanded to ${cycle.passes} roughing passes (P${cycle.p}–Q${cycle.q}).`});
   }
-  $("warningCount").textContent = String(notes.length);
-  const list = $("warningList");
-  list.replaceChildren();
-  if (!notes.length) {
-    const item = document.createElement("li"); item.className = "muted"; item.textContent = "No parser warnings."; list.append(item);
-  } else {
-    notes.slice(0, 12).forEach((warning) => {
-      const item = document.createElement("li");
-      if (warning.danger || warning.verificationBlocked) item.className = "danger";
-      else if (warning.info) item.className = "muted";
-      item.textContent = `${warning.line ? `Line ${warning.line}: ` : ""}${warning.message}`; list.append(item);
-    });
-  }
+  renderProgramNotes(notes);
 }
 
 function qualifiedTime(seconds, quality, {tenths = false} = {}) {
@@ -3615,14 +4813,37 @@ function updateTransport({scrollProgram = false} = {}) {
   elements.stepBack.disabled = state.programLine <= 0;
   elements.stepForward.disabled = state.programLine >= totalLines && state.visibleBlocks >= range.end;
   updateReaderTime();
-  if (state.visibleBlocks > 0) {
-    const point = state.parsed.segments[Math.min(state.visibleBlocks, totalBlocks) - 1].end;
+  if (isMillMode()) {
+    const point = millPositionAt(state.parsed, {sourceLine: state.programLine, visibleCount: state.visibleBlocks});
+    const places = millDisplayDecimals();
+    if (point) {
+      $("millXReadout").textContent = displayValue(point.x).toFixed(places);
+      $("millYReadout").textContent = displayValue(point.y).toFixed(places);
+      $("millZReadout").textContent = displayValue(point.z).toFixed(places);
+      const segment = state.visibleBlocks > 0
+        ? state.parsed.segments[Math.min(state.visibleBlocks, totalBlocks) - 1]
+        : null;
+      elements.millReadout.title = segment?.verificationBlocked
+        ? "Last verified XYZ before the blocked attempted move; its attempted endpoint is shown only by the red dashed review chord."
+        : state.visibleBlocks === 0
+          ? "Absolute G00 established this XYZ baseline; its unknown incoming rapid path is not drawn."
+          : "Programmed command-center XYZ in the selected display units.";
+    } else {
+      $("millXReadout").textContent = "—";
+      $("millYReadout").textContent = "—";
+      $("millZReadout").textContent = "—";
+      elements.millReadout.title = "Mill XYZ position is unresolved; establish a complete absolute G00 baseline.";
+    }
+  } else if (state.visibleBlocks > 0) {
+    const segment = state.parsed.segments[Math.min(state.visibleBlocks, totalBlocks) - 1];
+    const point = segment.end;
     const places = elements.displayUnits.value === "inch" ? 4 : 3;
     $("zReadout").textContent = displayValue(point.z).toFixed(places);
     $("xReadout").textContent = displayValue(point.x).toFixed(places);
   } else {
     const zero = elements.displayUnits.value === "inch" ? "0.0000" : "0.000";
-    $("zReadout").textContent = zero; $("xReadout").textContent = zero;
+    $("zReadout").textContent = zero;
+    $("xReadout").textContent = zero;
   }
   updateProgramLineHighlight({scroll: scrollProgram});
 }
@@ -3672,62 +4893,73 @@ function stepProgram(direction) {
 }
 
 function plotProgram({fit = true, clearDimensions = true} = {}) {
+  const mill = isMillMode();
   const machine = currentMachineProfile();
   const plotOptions = machinePlotOptions(machine);
   const previousAssignments = state.toolAssignments;
   const previousAssignmentScope = state.toolAssignmentScope;
-  const nextAssignmentScope = programAssignmentScope(elements.input.value, {fileName: elements.fileName.textContent});
-  state.parsed = parseGcode(elements.input.value, {
-    xMode: elements.xMode.value,
-    arcChordTolerance: graphicsQuality().arcChordTolerance,
-    ...plotOptions,
-  });
-  if (plotOptions.initialPosition) {
-    const source = String(plotOptions.initialPositionMode || "custom").replaceAll("-", " ").toUpperCase();
-    state.parsed.warnings.unshift({
-      line: null,
-      info: true,
-      message: `Initial rapid begins at the configured ${source} plotted tool-reference point. Turret, holder, and machine-coordinate transforms are not modeled by this point.`,
+  const nextAssignmentScope = mill
+    ? previousAssignmentScope
+    : programAssignmentScope(elements.input.value, {fileName: elements.fileName.textContent});
+  state.parsed = mill
+    ? parseMillGcode(elements.input.value, {
+      defaultUnits: selectedProgramUnits(machine),
+      warnOnAssumedUnits: true,
+      arcChordTolerance: graphicsQuality().arcChordTolerance,
+    })
+    : parseGcode(elements.input.value, {
+      xMode: elements.xMode.value,
+      arcChordTolerance: graphicsQuality().arcChordTolerance,
+      ...plotOptions,
     });
-  } else if (plotOptions.initialPositionMode !== "unknown" && plotOptions.initialPositionIssue === "incomplete") {
-    state.parsed.warnings.unshift({
-      line: null,
-      info: true,
-      message: `The selected ${String(plotOptions.initialPositionMode).replaceAll("-", " ")} start needs both plotted program-coordinate Initial X and Initial Z values; no incoming approach was invented.`,
+  if (!mill) {
+    if (plotOptions.initialPosition) {
+      const source = String(plotOptions.initialPositionMode || "custom").replaceAll("-", " ").toUpperCase();
+      state.parsed.warnings.unshift({
+        line: null,
+        info: true,
+        message: `Initial rapid begins at the configured ${source} plotted tool-reference point. Turret, holder, and machine-coordinate transforms are not modeled by this point.`,
+      });
+    } else if (plotOptions.initialPositionMode !== "unknown" && plotOptions.initialPositionIssue === "incomplete") {
+      state.parsed.warnings.unshift({
+        line: null,
+        info: true,
+        message: `The selected ${String(plotOptions.initialPositionMode).replaceAll("-", " ")} start needs both plotted program-coordinate Initial X and Initial Z values; no incoming approach was invented.`,
+      });
+    }
+    if (machine?.status === "draft") {
+      state.parsed.warnings.unshift({line: null, info: true, message: `${machine.name} draft estimates are active; verify the machine definition before relying on approach or rapid geometry.`});
+    }
+    state.toolAssignments = reconcileToolAssignments(state.parsed.executableToolCalls || [], previousAssignments, {
+      previousScope: previousAssignmentScope,
+      nextScope: nextAssignmentScope,
     });
-  }
-  if (machine?.status === "draft") {
-    state.parsed.warnings.unshift({line: null, info: true, message: `${machine.name} draft estimates are active; verify the machine definition before relying on approach or rapid geometry.`});
-  }
-  state.toolAssignments = reconcileToolAssignments(state.parsed.executableToolCalls || [], previousAssignments, {
-    previousScope: previousAssignmentScope,
-    nextScope: nextAssignmentScope,
-  });
-  state.toolAssignments = Object.fromEntries(Object.entries(state.toolAssignments).map(([toolKey, assignment]) => {
-    const assignmentRef = toolAssignmentAssemblyRef(assignment);
-    const resolvedAssembly = assignmentRef && assignmentRef.legacy !== true
-      ? resolveAssignableToolAssembly2d({id: assignmentRef.id, revision: assignmentRef.revision})
-      : null;
-    return [toolKey, normalizeVersionedToolAssignment(assignment, resolvedAssembly)];
-  }));
-  state.toolAssignmentScope = nextAssignmentScope;
-  if (isExactBundledProgram(elements.input.value, sampleProgram, state.bundledSample)
-    && (state.parsed.executableToolCalls || []).some((call) => call.key === "T0101")) {
-    state.toolAssignments.T0101 ||= {
-      ...createVersionedToolAssignment(DEFAULT_TOOL_ASSEMBLY_2D, {tipDatum: null, axialDirection: "negative-z"}),
-      confirmed: true,
-      confirmationSource: "bundled-sample",
-    };
-  }
-  if (isExactBundledProgram(elements.input.value, liveBoreSampleProgram, state.bundledSample)
-    && (state.parsed.executableToolCalls || []).some((call) => call.key === "T0202")) {
-    const cutter = resolveAssignableToolAssembly2d({id: LIVE_BORE_SAMPLE_CUTTER_ID, revision: 1});
-    if (cutter) {
-      state.toolAssignments.T0202 ||= {
-        ...createVersionedToolAssignment(cutter),
+    state.toolAssignments = Object.fromEntries(Object.entries(state.toolAssignments).map(([toolKey, assignment]) => {
+      const assignmentRef = toolAssignmentAssemblyRef(assignment);
+      const resolvedAssembly = assignmentRef && assignmentRef.legacy !== true
+        ? resolveAssignableToolAssembly2d({id: assignmentRef.id, revision: assignmentRef.revision})
+        : null;
+      return [toolKey, normalizeVersionedToolAssignment(assignment, resolvedAssembly)];
+    }));
+    state.toolAssignmentScope = nextAssignmentScope;
+    if (isExactBundledProgram(elements.input.value, sampleProgram, state.bundledSample)
+      && (state.parsed.executableToolCalls || []).some((call) => call.key === "T0101")) {
+      state.toolAssignments.T0101 ||= {
+        ...createVersionedToolAssignment(DEFAULT_TOOL_ASSEMBLY_2D, {tipDatum: null, axialDirection: "negative-z"}),
         confirmed: true,
         confirmationSource: "bundled-sample",
       };
+    }
+    if (isExactBundledProgram(elements.input.value, liveBoreSampleProgram, state.bundledSample)
+      && (state.parsed.executableToolCalls || []).some((call) => call.key === "T0202")) {
+      const cutter = resolveAssignableToolAssembly2d({id: LIVE_BORE_SAMPLE_CUTTER_ID, revision: 1});
+      if (cutter) {
+        state.toolAssignments.T0202 ||= {
+          ...createVersionedToolAssignment(cutter),
+          confirmed: true,
+          confirmationSource: "bundled-sample",
+        };
+      }
     }
   }
   state.toolAssignmentRevision += 1;
@@ -3740,21 +4972,30 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
   state.geometryHover = null;
   state.geometrySelection = null;
   if (clearDimensions) clearPinnedDimensions({disableMode: true});
+  updateReferenceComparison();
+  renderReferenceGeometryUi();
   renderProgramLineNumbers();
-  renderProgramToolAssignments();
+  if (!mill) renderProgramToolAssignments();
   const cycleStatus = state.parsed.cycles.filter((cycle) => cycle.code !== "G70").map((cycle) => `${cycle.code} ${cycle.passes} passes`).join(" • ");
-  const liveSummary = liveToolOperationSummary();
-  elements.status.textContent = state.parsed.segments.length
-    ? `${state.parsed.segments.length} motion blocks${cycleStatus ? ` • ${cycleStatus}` : ""}`
-    : liveSummary.operations.length
-      ? `No drawable live-tool path · ${liveSummary.blocked.length} blocked · ${liveSummary.notDisplayed.length} not drawn`
-      : "No motion found";
+  if (mill) {
+    const blockingWarnings = state.parsed.warnings.filter((warning) => warning.verificationBlocked).length;
+    elements.status.textContent = state.parsed.segments.length
+      ? `${state.parsed.segments.length} mill motion blocks · XYZ command centerline${blockingWarnings ? ` · ${blockingWarnings} blocked issue${blockingWarnings === 1 ? "" : "s"}` : ""}`
+      : blockingWarnings ? "No drawable mill path · see blocked Program notes" : "No mill motion found";
+  } else {
+    const liveSummary = liveToolOperationSummary();
+    elements.status.textContent = state.parsed.segments.length
+      ? `${state.parsed.segments.length} motion blocks${cycleStatus ? ` • ${cycleStatus}` : ""}`
+      : liveSummary.operations.length
+        ? `No drawable live-tool path · ${liveSummary.blocked.length} blocked · ${liveSummary.notDisplayed.length} not drawn`
+        : "No motion found";
+  }
   updateStats(); updateTransport();
   if (fit) fitView(); else draw();
 }
 
 function zoomAt(factor, x = elements.wrap.clientWidth / 2, y = elements.wrap.clientHeight / 2) {
-  if (state.viewMode === "face") return;
+  if (state.viewMode === "face" || (isMillMode() && state.viewMode === "2d")) return;
   if (state.viewMode === "3d") {
     state.camera3d = zoomCameraAt(state.camera3d, factor, {x, y}, {
       width: elements.wrap.clientWidth,
@@ -3807,10 +5048,12 @@ function refreshStockPlacementUi() {
 function refreshUnitUi() {
   const label = unitName();
   elements.unitReadout.textContent = label;
+  $("millUnitReadout").textContent = label;
   document.querySelectorAll("[data-unit-label]").forEach((element) => { element.textContent = label; });
   const standardStep = elements.displayUnits.value === "inch" ? "0.01" : "0.1";
   for (const input of [elements.stockDiameter, elements.stockLength, elements.stockGripLength, elements.chuckFaceZ, elements.jawDiameter]) input.step = standardStep;
   elements.clearance.step = elements.displayUnits.value === "inch" ? "0.005" : "0.1";
+  elements.referenceGeometryTolerance.step = elements.displayUnits.value === "inch" ? "0.0001" : "0.001";
   elements.stockStickout.step = standardStep;
   refreshStockPlacementUi();
   updateGraphicsQualityHint();
@@ -3825,10 +5068,14 @@ elements.displayUnits.addEventListener("change", () => {
     const converted = convertUnitValue(Number(input.value) || 0, previousUnits, nextUnits);
     input.value = String(Number(converted.toFixed(places)));
   }
+  const convertedTolerance = convertUnitValue(Number(elements.referenceGeometryTolerance.value) || 0, previousUnits, nextUnits);
+  elements.referenceGeometryTolerance.value = String(Number(convertedTolerance.toFixed(nextUnits === "inch" ? 8 : 7)));
   activeUnitScale = nextScale;
   refreshUnitUi();
   renderProgramToolAssignments();
   renderGeometryInspector();
+  updateReferenceComparison();
+  renderReferenceGeometryUi();
   updateStats(); updateTransport(); fitView();
   persistSession();
 });
@@ -3918,17 +5165,101 @@ elements.machine.addEventListener("change", () => {
   plotProgram();
   persistSession();
 });
+elements.machineMode.addEventListener("change", () => {
+  applyMachineModeUi();
+  plotProgram();
+  persistSession();
+});
 
 $("plotButton").addEventListener("click", () => { plotProgram(); persistSession(); });
-$("loadSampleButton").addEventListener("click", () => loadProgram("sample-g71-rough.nc", sampleProgram, {bundledSample: true}));
+$("loadSampleButton").addEventListener("click", () => loadProgram("sample-g71-rough.nc", sampleProgram, {bundledSample: true, machineMode: "lathe"}));
 $("loadLiveBoreSampleButton").addEventListener("click", loadLiveBoreSample);
+$("loadMillSampleButton").addEventListener("click", loadMillSample);
 $("openButton").addEventListener("click", openProgram);
+elements.importGeometry.addEventListener("click", openReferenceGeometry);
+elements.importStep.addEventListener("click", openStepGeometry);
 $("compareButton").addEventListener("click", openComparison);
 elements.save.addEventListener("click", saveProgram);
 elements.fileInput.addEventListener("change", async () => {
   await loadBrowserFile(elements.fileInput.files[0]);
   elements.fileInput.value = "";
 });
+elements.geometryFileInput.addEventListener("change", async () => {
+  await loadBrowserDxf(elements.geometryFileInput.files[0]);
+  elements.geometryFileInput.value = "";
+});
+elements.stepFileInput.addEventListener("change", async () => {
+  await loadBrowserStep(elements.stepFileInput.files[0]);
+  elements.stepFileInput.value = "";
+});
+elements.referenceGeometryUnits.addEventListener("change", () => {
+  if (state.referenceGeometry?.kind !== "dxf") return;
+  state.referenceGeometry.unitsAuthority = elements.referenceGeometryUnits.value ? "user-confirmed" : null;
+  refreshReferenceGeometry({fit: true});
+});
+for (const control of [
+  elements.referenceGeometryOriginX, elements.referenceGeometryOriginY,
+  elements.referenceGeometryZDirection, elements.referenceGeometryXDirection,
+]) {
+  control.addEventListener("change", () => {
+    if (state.referenceGeometry?.kind === "dxf") refreshReferenceGeometry({fit: true});
+  });
+}
+for (const control of [
+  elements.referenceGeometryOriginX,
+  elements.referenceGeometryOriginY,
+  elements.referenceGeometryTolerance,
+]) {
+  control.addEventListener("input", () => invalidateReferenceComparison(
+    "APPLY CHANGE",
+    "A reference mapping or tolerance value changed; finish the edit before using the path result.",
+  ));
+}
+elements.referenceGeometryTolerance.addEventListener("change", () => {
+  updateReferenceComparison();
+  renderReferenceGeometryUi();
+  draw();
+});
+for (const control of [
+  elements.stepAxialAxis, elements.stepRadialAxis, elements.stepNormalAxis, elements.stepPlaneOffset,
+]) {
+  control.addEventListener("change", () => {
+    const reference = state.referenceGeometry;
+    if (reference?.kind !== "step") return;
+    reference.sectionRevision = (reference.sectionRevision ?? 0) + 1;
+    reference.sectionDto = null;
+    reference.setupDiagnostics = [];
+    reference.mapped = null;
+    reference.entities = [];
+    reference.displayWorkload = null;
+    reference.ready = false;
+    state.referenceComparison = null;
+    populateStepContours(null);
+    renderReferenceGeometryUi();
+    draw();
+  });
+}
+for (const control of [
+  elements.stepAxialOrigin, elements.stepRadialOrigin,
+  elements.stepAxialDirection, elements.stepRadialDirection,
+]) {
+  control.addEventListener("change", () => mapCurrentStepSection({fit: true}));
+}
+for (const control of [elements.stepAxialOrigin, elements.stepRadialOrigin]) {
+  control.addEventListener("input", () => invalidateReferenceComparison(
+    "APPLY CHANGE",
+    "A STEP origin changed; finish the edit before using the path result.",
+  ));
+}
+elements.stepContour.addEventListener("change", () => mapCurrentStepSection({fit: true}));
+elements.buildStepSection.addEventListener("click", buildStepSection);
+elements.referenceGeometryToggle.addEventListener("change", () => {
+  state.geometryHover = null;
+  state.geometrySelection = null;
+  clearPinnedDimensions({disableMode: true});
+  fitView();
+});
+elements.removeGeometry.addEventListener("click", removeReferenceGeometry);
 elements.originalFileInput.addEventListener("change", async () => {
   const file = elements.originalFileInput.files[0];
   if (file) setComparisonOriginal(file.name, await file.text());
@@ -3964,6 +5295,7 @@ $("zoomInButton").addEventListener("click", () => zoomAt(1.25));
 $("zoomOutButton").addEventListener("click", () => zoomAt(0.8));
 function setGraphicsDimension(mode) {
   if (!["2d", "face", "3d"].includes(mode)) return;
+  if (isMillMode() && mode === "face") mode = "2d";
   state.viewMode = mode;
   const threeDimensional = mode === "3d";
   const face = mode === "face";
@@ -3982,12 +5314,16 @@ function setGraphicsDimension(mode) {
   elements.view2d.setAttribute("aria-pressed", String(twoDimensional));
   elements.viewFace.setAttribute("aria-pressed", String(face));
   elements.view3d.setAttribute("aria-pressed", String(threeDimensional));
-  elements.canvas.setAttribute("aria-label", face
+  elements.canvas.setAttribute("aria-label", isMillMode()
+    ? (threeDimensional
+      ? "Interactive three-dimensional mill command-centerline backplot in native XYZ coordinates. Stock, cutter geometry, compensation, and collision are not modeled."
+      : "Top X/Y projection of the mill command-centerline path. Z motion is retained in geometry and shown in the coordinate readout and 3D view.")
+    : face
     ? "Machine-oriented live-tool face view from the free end toward the chuck, with positive X up and positive Y left. Shows programmed X/Y centerlines and any supported analytic axial bores; unsupported material removal and complete cutter-holder collision remain path-only."
     : threeDimensional
       ? "Interactive three-dimensional lathe backplot."
       : "Interactive lathe backplot. Click component geometry to inspect it, or use Dimension to pin exact line and radius measurements.");
-  elements.canvas.style.cursor = threeDimensional ? "grab" : (face ? "default" : "crosshair");
+  elements.canvas.style.cursor = threeDimensional ? "grab" : (face || isMillMode() ? "default" : "crosshair");
   elements.viewCube.hidden = !threeDimensional;
   elements.faceViewStatus.hidden = !face;
   if (!twoDimensional) {
@@ -3997,24 +5333,25 @@ function setGraphicsDimension(mode) {
   elements.wrap.classList.toggle("three-d", threeDimensional);
   elements.wrap.classList.toggle("face-view", face);
   $("fitButton").disabled = face;
-  $("zoomInButton").disabled = face;
-  $("zoomOutButton").disabled = face;
+  $("zoomInButton").disabled = face || (isMillMode() && twoDimensional);
+  $("zoomOutButton").disabled = face || (isMillMode() && twoDimensional);
   state.drag = null;
   updateDimensionControls();
   updateToolControls();
+  renderReferenceGeometryUi();
   fitView();
 }
 elements.view2d.addEventListener("click", () => setGraphicsDimension("2d"));
 elements.viewFace.addEventListener("click", () => setGraphicsDimension("face"));
 elements.view3d.addEventListener("click", () => setGraphicsDimension("3d"));
 elements.toolOverlay.addEventListener("click", () => {
-  if (state.viewMode !== "2d") return;
+  if (isMillMode() || state.viewMode !== "2d") return;
   state.showTool2d = !state.showTool2d;
   updateToolControls();
   draw();
 });
 elements.dimensionButton.addEventListener("click", () => {
-  if (state.viewMode !== "2d") return;
+  if (isMillMode() || state.viewMode !== "2d") return;
   state.dimensionMode = !state.dimensionMode;
   elements.canvas.style.cursor = "crosshair";
   updateDimensionControls();
@@ -4107,12 +5444,13 @@ for (const control of [elements.stockLength, elements.stockGripLength]) {
 
 elements.canvas.addEventListener("wheel", (event) => { event.preventDefault(); const rect = elements.canvas.getBoundingClientRect(); zoomAt(event.deltaY < 0 ? 1.12 : 0.89, event.clientX - rect.left, event.clientY - rect.top); }, {passive: false});
 function graphicsHitForEvent(event) {
+  if (isMillMode() && state.viewMode === "2d") return null;
   if (!graphicsSelectionEnabled(state.viewMode)) return null;
   const rect = elements.canvas.getBoundingClientRect();
   return graphicsHitAt(state.graphicsHits, event.clientX - rect.left, event.clientY - rect.top, {currentBlock: state.visibleBlocks});
 }
 function geometryHitForEvent(event) {
-  if (state.viewMode !== "2d") return null;
+  if (isMillMode() || state.viewMode !== "2d") return null;
   const rect = elements.canvas.getBoundingClientRect();
   return geometryHitAt(
     state.componentGeometry,
@@ -4122,6 +5460,12 @@ function geometryHitForEvent(event) {
 }
 function updateGraphicsHover(event) {
   if (state.viewMode === "face") {
+    state.hoverBlockIndex = null;
+    state.geometryHover = null;
+    elements.canvas.style.cursor = "default";
+    return null;
+  }
+  if (isMillMode() && state.viewMode === "2d") {
     state.hoverBlockIndex = null;
     state.geometryHover = null;
     elements.canvas.style.cursor = "default";
@@ -4157,7 +5501,7 @@ function updateGraphicsHover(event) {
   return hit;
 }
 function selectGeometryAt(event) {
-  if (state.viewMode !== "2d") return false;
+  if (isMillMode() || state.viewMode !== "2d") return false;
   const hit = geometryHitForEvent(event);
   if (!hit) return false;
   state.playing = false;
@@ -4196,6 +5540,7 @@ elements.canvas.addEventListener("pointerdown", (event) => {
     elements.canvas.style.cursor = navigationMode === "orbit" ? "grabbing" : "move";
     return;
   }
+  if (isMillMode()) return;
   if (event.button !== 0) return;
   elements.canvas.setPointerCapture(event.pointerId);
   state.drag = {mode: "2d", x: event.clientX, y: event.clientY, offsetX: state.camera.offsetX, offsetY: state.camera.offsetY, button: event.button, moved: false};
@@ -4203,6 +5548,10 @@ elements.canvas.addEventListener("pointerdown", (event) => {
 });
 elements.canvas.addEventListener("pointermove", (event) => {
   if (state.viewMode === "face") {
+    elements.canvas.style.cursor = "default";
+    return;
+  }
+  if (isMillMode() && state.viewMode === "2d") {
     elements.canvas.style.cursor = "default";
     return;
   }
@@ -4257,7 +5606,9 @@ function finishCanvasDrag(event, cancelled = false) {
     return;
   }
   const hasHover = state.hoverBlockIndex !== null || state.geometryHover !== null;
-  elements.canvas.style.cursor = state.viewMode === "face" ? "default" : (hasHover ? "pointer" : (state.viewMode === "3d" ? "grab" : "crosshair"));
+  elements.canvas.style.cursor = state.viewMode === "face" || (isMillMode() && state.viewMode === "2d")
+    ? "default"
+    : (hasHover ? "pointer" : (state.viewMode === "3d" ? "grab" : "crosshair"));
   if (restorePrecision) request3dNavigationDraw();
 }
 elements.canvas.addEventListener("pointerup", (event) => finishCanvasDrag(event));
@@ -4270,7 +5621,9 @@ elements.canvas.addEventListener("pointerleave", () => {
     state.geometryHover = null;
     draw();
   }
-  elements.canvas.style.cursor = state.viewMode === "face" ? "default" : (state.viewMode === "3d" ? "grab" : "crosshair");
+  elements.canvas.style.cursor = state.viewMode === "face" || (isMillMode() && state.viewMode === "2d")
+    ? "default"
+    : (state.viewMode === "3d" ? "grab" : "crosshair");
   updateTransport();
 });
 elements.input.addEventListener("scroll", () => {
@@ -4344,7 +5697,11 @@ window.addEventListener("drop", async (event) => {
   event.preventDefault();
   dragDepth = 0;
   elements.dropOverlay.hidden = true;
-  await loadBrowserFile(event.dataTransfer?.files?.[0]);
+  const file = event.dataTransfer?.files?.[0];
+  const filename = file?.name?.toLowerCase() || "";
+  if (filename.endsWith(".dxf")) await loadBrowserDxf(file);
+  else if (filename.endsWith(".step") || filename.endsWith(".stp")) await loadBrowserStep(file);
+  else await loadBrowserFile(file);
 });
 
 window.addEventListener("keydown", (event) => {
@@ -4396,6 +5753,9 @@ state.machineProfiles = mergeMachineProfiles(DEFAULT_MACHINE_PROFILES, readMachi
 renderMachineSelect();
 const restored = restoreSession();
 activeUnitScale = unitScale();
+elements.referenceGeometryTolerance.value = String(Number((DEFAULT_PROFILE_TOLERANCE_MM / activeUnitScale).toFixed(
+  elements.displayUnits.value === "inch" ? 8 : 7,
+)));
 refreshUnitUi();
 updateProgramUnitsHint();
 updateToolControls();
@@ -4403,5 +5763,6 @@ if (!restored) {
   elements.input.value = sampleProgram;
   state.bundledSample = true;
 }
+applyMachineModeUi();
 plotProgram();
 loadMachineProfiles();

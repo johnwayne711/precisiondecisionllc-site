@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "package": {
+    "name": "libcascade",
+    "version": "3.0.2",
+    "tarball": "https://registry.npmjs.org/libcascade/-/libcascade-3.0.2.tgz",
+    "integrity": "sha512-btp/dg/YHO6jhkDmgXNqFyLtWXhL8LlrJwZ0aPw5FD4+kCys0Qfc//dNUlYitZIm+kBym4ZA63/cFrBVhR4yPQ==",
+    "shasum": "01d6a802dd1ca483577c8a30f6965e0af83e8e7c"
+  },
+  "sourceFiles": {
+    "dist/opencascade_single.js": {
+      "bytes": 66865,
+      "sha256": "cba05f3367106483ba89f62012f26327dfae8eb9fcfce52813608bd85e0d0e89"
+    },
+    "dist/opencascade_single.wasm": {
+      "bytes": 42691285,
+      "sha256": "faa8e6d9180bcd59fbd02101ccf96892b88a23bdd3865e3ed33df48fb65a3fca"
+    },
+    "dist/opencascade_single.build-manifest.json": {
+      "bytes": 599652,
+      "sha256": "90b62b0e86b14e875b0137945610a07c6b43cfde5af658bb4bbd84d596a317d3"
+    },
+    "dist/opencascade_single.provenance.json": {
+      "bytes": 122329,
+      "sha256": "38b7029d6ad48d2516b1f987e31ea6b6fab3e27567942090d7ed59a83c40e3f9"
+    },
+    "LICENSE": {
+      "bytes": 26526,
+      "sha256": "20c17d8b8c48a600800dfd14f95d5cb9ff47066a9641ddeab48dc54aec96e331"
+    },
+    "LICENSE.OCCT-Exception": {
+      "bytes": 947,
+      "sha256": "121ba3ff45b104d133fd1bd5072e1b821c20dbcf217c560f437b9e341b11e61d"
+    },
+    "package.json": {
+      "bytes": 4104,
+      "sha256": "49fba1b98969334395dd974f8b9b2bd4846203c362c6458fdb9bb75c40cf2fb2"
+    }
+  },
+  "runtime": {
+    "variant": "single",
+    "threading": "single-threaded",
+    "upstreamGlue": {
+      "bytes": 66865,
+      "sha256": "cba05f3367106483ba89f62012f26327dfae8eb9fcfce52813608bd85e0d0e89"
+    },
+    "vendoredGlue": {
+      "bytes": 65975,
+      "sha256": "69545c40dc9ae80b17c694f655913ab6974fea1b1fafdf018f05ffb1e6ac4529"
+    },
+    "dynamicExecutionPatch": {
+      "source": "Emscripten 6.0.5 tag 1db513782be24469589d7cb8a1f1834e9a33f271",
+      "upstreamPinnedCommit": "dfb9d1a46c3bb8f52e1e6324be23123b9d73c190",
+      "replacements": [
+        "embind craftInvokerFunction",
+        "emval create invoker"
+      ],
+      "policy": "DYNAMIC_EXECUTION=0 generic fallbacks; no eval or new Function"
+    },
+    "wasm": {
+      "bytes": 42691285,
+      "sha256": "faa8e6d9180bcd59fbd02101ccf96892b88a23bdd3865e3ed33df48fb65a3fca",
+      "chunkBytes": 16777216,
+      "chunks": [
+        {
+          "file": "opencascade_single.wasm.part-000",
+          "bytes": 16777216,
+          "sha256": "f782e4be2918c7a1cba2bcc1c9d944754e12f61fc755fad3b6f1c94593d9f3cf"
+        },
+        {
+          "file": "opencascade_single.wasm.part-001",
+          "bytes": 16777216,
+          "sha256": "30262c448aa32357184acb222ffffa21f22f114ebb37aac88a6614700ee6ce5d"
+        },
+        {
+          "file": "opencascade_single.wasm.part-002",
+          "bytes": 9136853,
+          "sha256": "cf50586d33258debe626431f7ebf10f4b4020293181f0f4aadbb23b44bf439a3"
+        }
+      ]
+    }
+  },
+  "upstream": {
+    "project": "https://github.com/taucad/opencascade.js",
+    "packageLicense": "LGPL-2.1-only WITH Open-CASCADE-Exception-1.0",
+    "occtVersion": "V8_0_1",
+    "occtCommit": "b8f597c677811d1f9f4d8a97f5ae2825c0353a42",
+    "opencascadeJsCommit": "a0b2b3cd611d502681b31e6fb2f9c018146494fd",
+    "emscriptenVersion": "6.0.5"
+  },
+  "records": {
+    "upstreamBuildManifest": {
+      "file": "upstream-build-manifest.json",
+      "bytes": 599652,
+      "sha256": "90b62b0e86b14e875b0137945610a07c6b43cfde5af658bb4bbd84d596a317d3"
+    },
+    "upstreamProvenance": {
+      "file": "upstream-provenance.json",
+      "bytes": 122329,
+      "sha256": "38b7029d6ad48d2516b1f987e31ea6b6fab3e27567942090d7ed59a83c40e3f9"
+    },
+    "lgplLicense": {
+      "file": "LICENSE.LGPL-2.1.txt",
+      "bytes": 26526,
+      "sha256": "20c17d8b8c48a600800dfd14f95d5cb9ff47066a9641ddeab48dc54aec96e331"
+    },
+    "occtExceptionLicense": {
+      "file": "LICENSE.OCCT-Exception.txt",
+      "bytes": 947,
+      "sha256": "121ba3ff45b104d133fd1bd5072e1b821c20dbcf217c560f437b9e341b11e61d"
+    },
+    "readme": {
+      "file": "README.md",
+      "bytes": 1334,
+      "sha256": "dd404135069a1b8b72c9d38941ab9cb0637d837d03a2b5670a814cb6bfcadb93"
+    }
+  }
+}

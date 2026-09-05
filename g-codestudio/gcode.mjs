@@ -8,10 +8,27 @@ import {
 
 const MOTION_CODES = new Map([[0, "rapid"], [1, "linear"], [2, "arc-cw"], [3, "arc-ccw"]]);
 const CONTROL_FLOW_M_CODES = new Set([96, 97, 98, 99]);
+const COMMON_MODELED_M_CODES = new Set([2, 3, 4, 5, 8, 9, 30, ...CONTROL_FLOW_M_CODES]);
+const GENERIC_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 133, 134, 135, 154, 155]);
+const HAAS_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 133, 134, 135, 154, 155]);
 const HAAS_UNSUPPORTED_GROUP_01_MOTIONS = new Set([32, 90, 92, 94]);
 const HAAS_UNSUPPORTED_GROUP_09_CYCLES = new Set([81, 82, 83, 84, 85, 86, 87, 88, 89, 95]);
 const HAAS_DEFAULT_TO_FLOAT_ADDRESSES = new Set(["X", "Y", "Z", "A", "B", "C", "D", "E", "I", "J", "K", "U", "W"]);
 const HAAS_INTEGER_FEED_SCALES = new Set(["default", "integer", ".1", ".01", ".001", ".0001"]);
+const MODELED_PROGRAM_ADDRESSES = new Set([
+  "N", "O", "G", "M", "T", "S", "F",
+  "X", "Y", "Z", "U", "W", "C", "H",
+  "I", "J", "K", "R", "D", "P", "Q",
+]);
+const GENERIC_MODAL_GROUPS = Object.freeze([
+  {name: "motion", codes: new Set([0, 1, 2, 3, 70, 71, 72])},
+  {name: "plane", codes: new Set([17, 18, 19])},
+  {name: "positioning", codes: new Set([90, 91])},
+  {name: "feed", codes: new Set([94, 95])},
+  {name: "units", codes: new Set([20, 21])},
+  {name: "cutter compensation", codes: new Set([40, 41, 42])},
+  {name: "spindle speed", codes: new Set([96, 97])},
+]);
 const HAAS_MODAL_GROUPS = Object.freeze([
   {name: "Group 01 motion", codes: new Set([0, 1, 2, 3, 32, 90, 92, 94])},
   {name: "Group 02 plane", codes: new Set([17, 18, 19])},
@@ -24,6 +41,49 @@ const HAAS_MODAL_GROUPS = Object.freeze([
   {name: "G112 interpolation", codes: new Set([112, 113])},
 ]);
 const EPSILON = 1e-9;
+const PROFILE_NUMERICAL_BUDGET_MM = 0.00127;
+const POSITION_INPUT_ULPS = 8;
+const POSITION_OPERATION_ULPS = 8;
+const CENTER_ARC_DERIVATION_ULPS = 2;
+const RADIUS_ARC_INPUT_ULPS = 16;
+const RADIUS_ARC_DERIVATION_ULPS = 64;
+
+function boundedUncertaintySum(...terms) {
+  const total = terms.reduce((sum, term) => sum + Math.max(0, Number(term) || 0), 0);
+  return Number.isFinite(total) ? total : Number.MAX_VALUE;
+}
+
+function numericUncertainty(value, ulps = POSITION_INPUT_ULPS) {
+  if (!Number.isFinite(value)) return Number.MAX_VALUE;
+  const uncertainty = Number.EPSILON * ulps * Math.max(1, Math.abs(value));
+  return Number.isFinite(uncertainty) ? uncertainty : Number.MAX_VALUE;
+}
+
+function arithmeticUncertainty(...values) {
+  const result = values.at(-1);
+  return numericUncertainty(result, POSITION_OPERATION_ULPS);
+}
+
+function physicalPointUncertaintyMm(axisUncertainty, xCoordinateScale = 1) {
+  const x = Math.max(0, Number(axisUncertainty?.x) || 0) * Math.abs(xCoordinateScale);
+  const z = Math.max(0, Number(axisUncertainty?.z) || 0);
+  const uncertainty = Math.hypot(x, z);
+  return Number.isFinite(uncertainty) ? uncertainty : Number.MAX_VALUE;
+}
+
+function requiredUncertainty(value) {
+  const uncertainty = Number(value);
+  return Number.isFinite(uncertainty) && uncertainty >= 0 ? uncertainty : Number.MAX_VALUE;
+}
+
+function facePointUncertaintyMm(axisUncertainty) {
+  const uncertainty = Math.hypot(
+    requiredUncertainty(axisUncertainty?.x),
+    requiredUncertainty(axisUncertainty?.y),
+    requiredUncertainty(axisUncertainty?.z),
+  );
+  return Number.isFinite(uncertainty) ? uncertainty : Number.MAX_VALUE;
+}
 
 export function stripComments(line) {
   return line.replace(/\([^)]*\)/g, " ").replace(/;.*$/, " ").trim();
@@ -104,40 +164,242 @@ function normalizedSweep(startAngle, endAngle, clockwise) {
   return sweep;
 }
 
-function centerFromRadius(start, end, radius, clockwise) {
+function radiusArcInputUncertainty(value) {
+  return Number.EPSILON * RADIUS_ARC_INPUT_ULPS * Math.max(1, Math.abs(value));
+}
+
+function radiusArcPointUncertainty(point, positionUncertaintyMm) {
+  if (Number.isFinite(positionUncertaintyMm) && positionUncertaintyMm >= 0) {
+    return positionUncertaintyMm;
+  }
+  return Math.hypot(
+    radiusArcInputUncertainty(point.z),
+    radiusArcInputUncertainty(point.x),
+  );
+}
+
+function radiusArcDerivationUncertainty(
+  start,
+  end,
+  radius,
+  chord,
+  discriminant,
+  offset,
+  {startUncertaintyMm = 0, endUncertaintyMm = 0, radiusUncertaintyMm = 0} = {},
+) {
+  const magnitude = Math.abs(radius);
+  const dz = end.z - start.z;
+  const dx = end.x - start.x;
+  const startUncertainty = radiusArcPointUncertainty(start, startUncertaintyMm);
+  const endUncertainty = radiusArcPointUncertainty(end, endUncertaintyMm);
+  const deltaRoundoff = Math.hypot(
+    radiusArcInputUncertainty(dz),
+    radiusArcInputUncertainty(dx),
+  );
+  const chordUncertainty = startUncertainty
+    + endUncertainty
+    + deltaRoundoff
+    + radiusArcInputUncertainty(chord);
+  const radiusUncertainty = boundedUncertaintySum(
+    radiusArcInputUncertainty(magnitude),
+    radiusUncertaintyMm,
+  );
+  const radiusSquared = magnitude * magnitude;
+  const halfChordSquared = chord * chord / 4;
+  const discriminantRoundoff = Number.EPSILON
+    * RADIUS_ARC_DERIVATION_ULPS
+    * Math.max(1, Math.abs(radiusSquared), Math.abs(halfChordSquared));
+  const discriminantUncertainty = (2 * magnitude + radiusUncertainty) * radiusUncertainty
+    + (2 * chord + chordUncertainty) * chordUncertainty / 4
+    + discriminantRoundoff;
+  if (![chordUncertainty, radiusUncertainty, discriminant, discriminantUncertainty]
+    .every(Number.isFinite)) return Number.POSITIVE_INFINITY;
+
+  const minimumOffset = Math.sqrt(Math.max(0, discriminant - discriminantUncertainty));
+  const maximumOffset = Math.sqrt(Math.max(0, discriminant + discriminantUncertainty));
+  const offsetUncertainty = Math.max(
+    Math.abs(offset - minimumOffset),
+    Math.abs(maximumOffset - offset),
+  );
+  if (!Number.isFinite(offsetUncertainty) || chord <= chordUncertainty) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  // Normalizing the chord vector amplifies endpoint uncertainty by 1/chord.
+  // This term bounds the resulting displacement of the perpendicular center
+  // offset. It becomes intentionally fail-closed for tiny/ill-resolved chords.
+  const directionUncertainty = Math.min(2, 2 * chordUncertainty / (chord - chordUncertainty));
+  const directionDisplacement = maximumOffset * directionUncertainty;
+  const midpointUncertainty = (startUncertainty + endUncertainty) / 2;
+  const derivedMagnitude = Math.max(
+    1,
+    magnitude,
+    offset,
+    Math.abs(start.z),
+    Math.abs(start.x),
+    Math.abs(end.z),
+    Math.abs(end.x),
+  );
+  const constructionRoundoff = Number.EPSILON
+    * RADIUS_ARC_DERIVATION_ULPS
+    * derivedMagnitude;
+  const total = midpointUncertainty
+    + offsetUncertainty
+    + directionDisplacement
+    + radiusUncertainty
+    + constructionRoundoff;
+  return Number.isFinite(total) ? total : Number.POSITIVE_INFINITY;
+}
+
+function centerDefinedArcDerivationUncertainty(
+  start,
+  end,
+  center,
+  radius,
+  sweep,
+  params,
+  {startMm = 0, endMm = 0} = {},
+) {
+  const startUncertainty = radiusArcPointUncertainty(start, startMm);
+  const endUncertainty = radiusArcPointUncertainty(end, endMm);
+  const offsetUncertainty = Math.hypot(
+    Math.max(0, Number(params.iUncertaintyMm) || 0),
+    Math.max(0, Number(params.kUncertaintyMm) || 0),
+  );
+  const centerRoundoff = Math.hypot(
+    arithmeticUncertainty(start.x, params.i || 0, center.x),
+    arithmeticUncertainty(start.z, params.k || 0, center.z),
+  );
+  const centerUncertainty = boundedUncertaintySum(
+    startUncertainty,
+    offsetUncertainty,
+    centerRoundoff,
+  );
+  const startVectorLength = distance(center, start);
+  const endVectorLength = distance(center, end);
+  const startVectorUncertainty = boundedUncertaintySum(
+    startUncertainty,
+    centerUncertainty,
+    arithmeticUncertainty(start.x, center.x, start.x - center.x),
+    arithmeticUncertainty(start.z, center.z, start.z - center.z),
+  );
+  const endVectorUncertainty = boundedUncertaintySum(
+    endUncertainty,
+    centerUncertainty,
+    arithmeticUncertainty(end.x, center.x, end.x - center.x),
+    arithmeticUncertainty(end.z, center.z, end.z - center.z),
+  );
+  if (startVectorLength <= startVectorUncertainty || endVectorLength <= endVectorUncertainty) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const startAngularUncertainty = Math.asin(Math.min(
+    1,
+    startVectorUncertainty / (startVectorLength - startVectorUncertainty),
+  ));
+  const endAngularUncertainty = Math.asin(Math.min(
+    1,
+    endVectorUncertainty / (endVectorLength - endVectorUncertainty),
+  ));
+  const angularRoundoff = numericUncertainty(sweep, CENTER_ARC_DERIVATION_ULPS);
+  const topologyUncertainty = startAngularUncertainty
+    + endAngularUncertainty
+    + angularRoundoff;
+  const sweepMagnitude = Math.abs(sweep);
+  const topologyMargin = Math.min(sweepMagnitude, Math.PI * 2 - sweepMagnitude);
+  if (!Number.isFinite(topologyUncertainty) || topologyMargin <= topologyUncertainty) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const radiusUncertainty = boundedUncertaintySum(
+    offsetUncertainty,
+    numericUncertainty(radius, CENTER_ARC_DERIVATION_ULPS),
+  );
+  const angularDisplacement = (radius + radiusUncertainty) * (
+    Math.max(startAngularUncertainty, endAngularUncertainty) + angularRoundoff
+  );
+  const constructionRoundoff = numericUncertainty(Math.max(
+    1,
+    radius,
+    Math.abs(center.x),
+    Math.abs(center.z),
+  ), CENTER_ARC_DERIVATION_ULPS);
+  const total = boundedUncertaintySum(
+    centerUncertainty,
+    radiusUncertainty,
+    angularDisplacement,
+    constructionRoundoff,
+  );
+  return Number.isFinite(total) ? total : Number.POSITIVE_INFINITY;
+}
+
+function centerFromRadius(start, end, radius, clockwise, inputUncertainty = {}) {
   const dz = end.z - start.z;
   const dx = end.x - start.x;
   const chord = Math.hypot(dz, dx);
   const magnitude = Math.abs(radius);
   if (chord < EPSILON || chord > magnitude * 2 + EPSILON) return null;
   const midpoint = {z: (start.z + end.z) / 2, x: (start.x + end.x) / 2};
-  const offset = Math.sqrt(Math.max(0, magnitude * magnitude - chord * chord / 4));
+  const halfChord = chord / 2;
+  const discriminant = (magnitude - halfChord) * (magnitude + halfChord);
+  const offset = Math.sqrt(Math.max(0, discriminant));
   const perpendicular = {z: -dx / chord, x: dz / chord};
   const candidates = [
     {z: midpoint.z + perpendicular.z * offset, x: midpoint.x + perpendicular.x * offset},
     {z: midpoint.z - perpendicular.z * offset, x: midpoint.x - perpendicular.x * offset},
   ];
   const wantMajor = radius < 0;
-  return candidates.find((center) => {
-    const a0 = Math.atan2(start.x - center.x, start.z - center.z);
-    const a1 = Math.atan2(end.x - center.x, end.z - center.z);
+  const center = candidates.find((candidate) => {
+    const a0 = Math.atan2(start.x - candidate.x, start.z - candidate.z);
+    const a1 = Math.atan2(end.x - candidate.x, end.z - candidate.z);
     const major = Math.abs(normalizedSweep(a0, a1, clockwise)) > Math.PI + EPSILON;
     return major === wantMajor;
   }) ?? candidates[0];
+  return {
+    center,
+    geometryUncertaintyMm: radiusArcDerivationUncertainty(
+      start,
+      end,
+      radius,
+      chord,
+      discriminant,
+      offset,
+      inputUncertainty,
+    ),
+  };
 }
 
-function arcGeometry(start, end, params, clockwise, xCoordinateScale, chordTolerance) {
+function arcGeometry(
+  start,
+  end,
+  params,
+  clockwise,
+  xCoordinateScale,
+  chordTolerance,
+  positionUncertainty = {},
+) {
   const geometryStart = {z: start.z, x: start.x * xCoordinateScale};
   const geometryEnd = {z: end.z, x: end.x * xCoordinateScale};
   let center = null;
+  let geometryUncertaintyMm = 0;
+  let centerDefined = false;
   if (Number.isFinite(params.i) || Number.isFinite(params.k)) {
     // On common diameter-programmed controls X endpoints are diameters while I
     // remains a radial center offset. Keeping I unscaled matches that convention.
     center = {z: geometryStart.z + (params.k || 0), x: geometryStart.x + (params.i || 0)};
+    centerDefined = true;
   } else if (Number.isFinite(params.r)) {
-    center = centerFromRadius(geometryStart, geometryEnd, params.r, clockwise);
+    const solution = centerFromRadius(geometryStart, geometryEnd, params.r, clockwise, {
+      startUncertaintyMm: positionUncertainty.startMm,
+      endUncertaintyMm: positionUncertainty.endMm,
+      radiusUncertaintyMm: params.rUncertaintyMm,
+    });
+    center = solution?.center ?? null;
+    geometryUncertaintyMm = solution?.geometryUncertaintyMm ?? Number.POSITIVE_INFINITY;
   }
   if (!center) return null;
+  if (!Number.isFinite(geometryUncertaintyMm)
+    || geometryUncertaintyMm > PROFILE_NUMERICAL_BUDGET_MM) {
+    return {numericalResolutionBlocked: true, geometryUncertaintyMm};
+  }
   const radius = distance(center, geometryStart);
   if (radius < EPSILON) return null;
   const endRadius = distance(center, geometryEnd);
@@ -145,6 +407,21 @@ function arcGeometry(start, end, params, clockwise, xCoordinateScale, chordToler
   const startAngle = Math.atan2(geometryStart.x - center.x, geometryStart.z - center.z);
   const endAngle = Math.atan2(geometryEnd.x - center.x, geometryEnd.z - center.z);
   const sweep = normalizedSweep(startAngle, endAngle, clockwise);
+  if (centerDefined) {
+    geometryUncertaintyMm = centerDefinedArcDerivationUncertainty(
+      geometryStart,
+      geometryEnd,
+      center,
+      radius,
+      sweep,
+      params,
+      positionUncertainty,
+    );
+    if (!Number.isFinite(geometryUncertaintyMm)
+      || geometryUncertaintyMm > PROFILE_NUMERICAL_BUDGET_MM) {
+      return {numericalResolutionBlocked: true, geometryUncertaintyMm};
+    }
+  }
   const tolerance = Math.max(EPSILON, Number(chordTolerance) || 0.0254);
   const maximumAngle = 2 * Math.acos(Math.max(-1, Math.min(1, 1 - tolerance / radius)));
   const steps = Math.max(12, Math.min(4096, Math.ceil(Math.abs(sweep) / Math.max(maximumAngle, EPSILON))));
@@ -155,7 +432,7 @@ function arcGeometry(start, end, params, clockwise, xCoordinateScale, chordToler
   }
   points[0] = {...start};
   points[points.length - 1] = {...end};
-  return {center, radius, sweep, points};
+  return {center, radius, sweep, points, geometryUncertaintyMm};
 }
 
 function recordFor(raw, index) {
@@ -196,6 +473,50 @@ function interpretedHaasAddressValue(record, letter, state) {
   return value;
 }
 
+function scaledPositionAddress(record, letter, state) {
+  const sourceValue = interpretedHaasAddressValue(record, letter, state);
+  const value = sourceValue * state.scale;
+  const lexeme = lastWordLexeme(record, letter);
+  const exactSafeInteger = state.scale === 1
+    && /^[+-]?\d+$/.test(lexeme || "")
+    && Number.isSafeInteger(sourceValue);
+  const scaleUncertainty = state.scale === 1 ? 0 : numericUncertainty(state.scale);
+  return {
+    value,
+    uncertaintyMm: exactSafeInteger ? 0 : boundedUncertaintySum(
+        numericUncertainty(sourceValue) * Math.abs(state.scale),
+        scaleUncertainty * Math.abs(sourceValue),
+        numericUncertainty(value),
+      ),
+  };
+}
+
+function rotaryPositionAddress(record, letter, state) {
+  const value = interpretedHaasAddressValue(record, letter, state);
+  const lexeme = lastWordLexeme(record, letter);
+  const exactSafeInteger = /^[+-]?\d+$/.test(lexeme || "") && Number.isSafeInteger(value);
+  return {
+    value,
+    uncertaintyDegrees: exactSafeInteger ? 0 : numericUncertainty(value),
+  };
+}
+
+function resolvedPositionCoordinate(current, currentUncertaintyMm, address, absolute) {
+  if (!address) return {value: current, uncertaintyMm: currentUncertaintyMm};
+  if (!Number.isFinite(address.value)) return {value: null, uncertaintyMm: null};
+  if (absolute) return {value: address.value, uncertaintyMm: address.uncertaintyMm};
+  if (!Number.isFinite(current)) return {value: null, uncertaintyMm: null};
+  const value = current + address.value;
+  return {
+    value,
+    uncertaintyMm: boundedUncertaintySum(
+      requiredUncertainty(currentUncertaintyMm),
+      address.uncertaintyMm,
+      arithmeticUncertainty(current, address.value, value),
+    ),
+  };
+}
+
 function interpretedHaasFeedValue(record, state) {
   const value = lastWord(record, "F");
   const lexeme = lastWordLexeme(record, "F");
@@ -228,13 +549,101 @@ function duplicateHaasAddress(record) {
 }
 
 function validateHaasRecordAddresses(record, state, warnings, {stopExecution = false} = {}) {
-  if (state.liveToolDialect !== "haas-lathe-ngc") return true;
   const clean = stripComments(record.raw);
   const unsupportedExpression = /[#[\]]/.test(clean);
   const optionalBlockDelete = /^\s*\/\d*/.test(clean);
   const malformedAddressText = !unsupportedExpression && hasMalformedAddressText(record.raw);
-  const unsupportedAxes = ["A", "B", "E", "V"].filter((letter) => record.byLetter.has(letter));
+  if (unsupportedExpression || optionalBlockDelete || malformedAddressText) {
+    if (unsupportedExpression) {
+      warningOnce(warnings, {
+        line: record.line,
+        code: "macro-expression-unsupported",
+        verificationBlocked: true,
+        message: "Macro variables and bracket expressions are not evaluated; execution is blocked instead of dropping expression-valued words.",
+      });
+    } else if (optionalBlockDelete) {
+      warningOnce(warnings, {
+        line: record.line,
+        code: "block-delete-state-required",
+        verificationBlocked: true,
+        message: "Optional/block-delete execution depends on machine state that is not configured; execution is blocked instead of assuming this line runs.",
+      });
+    } else {
+      warningOnce(warnings, {
+        line: record.line,
+        code: state.liveToolDialect === "haas-lathe-ngc" ? "malformed-haas-address" : "malformed-program-address",
+        verificationBlocked: true,
+        message: "The program block contains malformed or unrecognized address text; execution is blocked instead of silently dropping it.",
+      });
+    }
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
+  const unsupportedAddresses = [...record.byLetter.keys()].filter((letter) => (
+    !MODELED_PROGRAM_ADDRESSES.has(letter)
+    && !(state.liveToolDialect === "haas-lathe-ngc" && ["A", "B", "E", "V"].includes(letter))
+  ));
+  if (unsupportedAddresses.length) {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "unsupported-program-address",
+      verificationBlocked: true,
+      message: `${unsupportedAddresses.join("/")} address semantics are not modeled; execution is blocked instead of dropping the word.`,
+    });
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
   const duplicateAddress = duplicateHaasAddress(record);
+  const genericModalConflict = state.liveToolDialect === "haas-lathe-ngc"
+    ? null
+    : conflictingGenericModalGroup(record);
+  if (state.liveToolDialect !== "haas-lathe-ngc" && (duplicateAddress || genericModalConflict)) {
+    warningOnce(warnings, {
+      line: record.line,
+      code: duplicateAddress ? "duplicate-program-address" : "multiple-modal-codes",
+      verificationBlocked: true,
+      message: duplicateAddress
+        ? `The program block contains more than one ${duplicateAddress} address; execution is blocked instead of selecting one value.`
+        : `The program block selects more than one ${genericModalConflict.name} code; execution is blocked instead of guessing precedence.`,
+    });
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
+  const mCodes = record.byLetter.get("M") || [];
+  const nonIntegerMCode = mCodes.find((code) => !Number.isInteger(code));
+  if (nonIntegerMCode !== undefined) {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "non-integer-m-code",
+      verificationBlocked: true,
+      message: `M${nonIntegerMCode} is not an exact supported M code and was not executed by the model.`,
+    });
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
+  const modeledMCodes = state.liveToolDialect === "haas-lathe-ngc"
+    ? HAAS_MODELED_M_CODES
+    : GENERIC_MODELED_M_CODES;
+  const unsupportedMCode = mCodes.find((code) => !modeledMCodes.has(code));
+  if (unsupportedMCode !== undefined) {
+    const liveSpecific = state.liveToolDialect === "haas-lathe-ngc"
+      ? [14, 15, 19].includes(unsupportedMCode)
+      : [133, 134, 135, 154, 155].includes(unsupportedMCode);
+    warningOnce(warnings, {
+      line: record.line,
+      code: liveSpecific
+        ? (state.liveToolDialect === "haas-lathe-ngc" ? "unsupported-live-m-code" : "live-tool-dialect-required")
+        : (state.liveToolDialect === "haas-lathe-ngc" ? "unsupported-haas-m-code" : "unsupported-m-code"),
+      verificationBlocked: true,
+      message: liveSpecific && state.liveToolDialect !== "haas-lathe-ngc"
+        ? `M${unsupportedMCode} is machine-builder-specific and cannot be interpreted until a live-tool controller dialect is configured.`
+        : `M${unsupportedMCode} is not modeled for the selected controller; its machine-state or control-flow effects are unknown, so execution is blocked.`,
+    });
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
+  if (state.liveToolDialect !== "haas-lathe-ngc") return true;
+  const unsupportedAxes = ["A", "B", "E", "V"].filter((letter) => record.byLetter.has(letter));
   const invalidToolAddress = (record.lexemesByLetter?.get("T") || []).find((lexeme) => !/^\d{1,4}$/.test(lexeme));
   const invalidSequenceAddress = record.byLetter.has("N") && !isUnsignedIntegerWord(record, "N");
   const isContourCycle = hasG(record, 70) || hasG(record, 71) || hasG(record, 72);
@@ -249,31 +658,10 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
   const integerFeedAmbiguous = record.byLetter.has("F") && !invalidFeedAddress
     && feedLexeme && !feedLexeme.includes(".") && state.haasIntegerFeedScale === "unknown";
   const ambiguousAddresses = ambiguousHaasIntegerAddresses(record, state, [...HAAS_DEFAULT_TO_FLOAT_ADDRESSES]);
-  if (!unsupportedExpression && !optionalBlockDelete && !malformedAddressText && !unsupportedAxes.length && !duplicateAddress
+  if (!unsupportedAxes.length && !duplicateAddress
     && invalidToolAddress === undefined && !invalidSequenceAddress && !invalidContourReference
     && !invalidFeedAddress && !integerFeedAmbiguous && !ambiguousAddresses.length) return true;
-  if (unsupportedExpression) {
-    warningOnce(warnings, {
-      line: record.line,
-      code: "macro-expression-unsupported",
-      verificationBlocked: true,
-      message: "Haas macro variables and bracket expressions are not evaluated; execution is blocked instead of dropping expression-valued words.",
-    });
-  } else if (optionalBlockDelete) {
-    warningOnce(warnings, {
-      line: record.line,
-      code: "block-delete-state-required",
-      verificationBlocked: true,
-      message: "Optional/block-delete execution depends on machine state that is not configured; execution is blocked instead of assuming this line runs.",
-    });
-  } else if (malformedAddressText) {
-    warningOnce(warnings, {
-      line: record.line,
-      code: "malformed-haas-address",
-      verificationBlocked: true,
-      message: "Haas block contains malformed or unrecognized address text; execution is blocked instead of silently dropping it.",
-    });
-  } else if (unsupportedAxes.length) {
+  if (unsupportedAxes.length) {
     warningOnce(warnings, {
       line: record.line,
       code: "unsupported-auxiliary-axis",
@@ -376,14 +764,23 @@ function conflictingHaasModalGroup(record) {
   return HAAS_MODAL_GROUPS.find((group) => codes.filter((code) => group.codes.has(code)).length > 1) || null;
 }
 
+function conflictingGenericModalGroup(record) {
+  const codes = record.byLetter.get("G") || [];
+  return GENERIC_MODAL_GROUPS.find((group) => codes.filter((code) => group.codes.has(code)).length > 1) || null;
+}
+
 function invalidateExecutionState(state) {
   state.spindleRunning = null;
   state.liveToolRunning = null;
   state.cAxisEngaged = null;
   state.cAxisPosition = null;
+  state.cAxisPositionUncertaintyDegrees = null;
   state.faceX = null;
   state.faceY = null;
   state.faceZ = null;
+  state.faceXUncertaintyMm = null;
+  state.faceYUncertaintyMm = null;
+  state.faceZUncertaintyMm = null;
   state.g112PathTainted = true;
   state.turningMode = "unknown";
   state.executionBlocked = true;
@@ -408,12 +805,24 @@ function noteLiveToolAttempt(record, state, motion = state.motion) {
 }
 
 function invalidateUnsupportedPosition(record, state) {
-  if (record.byLetter.has("X") || record.byLetter.has("Y")) state.x = null;
-  if (record.byLetter.has("Z")) state.z = null;
-  if (record.byLetter.has("C") || record.byLetter.has("H")) state.cAxisPosition = null;
+  if (record.byLetter.has("X") || record.byLetter.has("Y")) {
+    state.x = null;
+    state.xUncertaintyMm = null;
+  }
+  if (record.byLetter.has("Z")) {
+    state.z = null;
+    state.zUncertaintyMm = null;
+  }
+  if (record.byLetter.has("C") || record.byLetter.has("H")) {
+    state.cAxisPosition = null;
+    state.cAxisPositionUncertaintyDegrees = null;
+  }
   state.faceX = null;
   state.faceY = null;
   state.faceZ = null;
+  state.faceXUncertaintyMm = null;
+  state.faceYUncertaintyMm = null;
+  state.faceZUncertaintyMm = null;
   state.g112PathTainted = true;
 }
 
@@ -462,21 +871,71 @@ function timingSnapshot(state) {
   };
 }
 
+function polarFaceComponentUncertaintyMm(radius, radiusUncertaintyMm, trigValue, angleUncertaintyRadians, component) {
+  return boundedUncertaintySum(
+    radiusUncertaintyMm,
+    (Math.abs(radius) + requiredUncertainty(radiusUncertaintyMm)) * requiredUncertainty(angleUncertaintyRadians),
+    numericUncertainty(trigValue, POSITION_OPERATION_ULPS) * Math.abs(radius),
+    numericUncertainty(component, POSITION_OPERATION_ULPS),
+  );
+}
+
 function updateG112Mode(record, state) {
   if (state.liveToolDialect !== "haas-lathe-ngc") return;
   for (const code of record.byLetter.get("G") || []) {
     if (code === 112) {
       if (!state.g112Active) {
+        const radiusCoordinateScale = state.xMode === "diameter" ? 0.5 : 1;
         const radius = Number.isFinite(state.x)
-          ? state.x * (state.xMode === "diameter" ? 0.5 : 1)
+          ? state.x * radiusCoordinateScale
+          : null;
+        const radiusUncertaintyMm = Number.isFinite(radius)
+          ? boundedUncertaintySum(
+            requiredUncertainty(state.xUncertaintyMm) * radiusCoordinateScale,
+            arithmeticUncertainty(state.x, radiusCoordinateScale, radius),
+          )
           : null;
         const angle = Number.isFinite(state.cAxisPosition)
           ? state.cAxisPosition * Math.PI / 180
           : null;
+        const angleUncertaintyRadians = Number.isFinite(angle)
+          ? boundedUncertaintySum(
+            requiredUncertainty(state.cAxisPositionUncertaintyDegrees) * Math.PI / 180,
+            arithmeticUncertainty(state.cAxisPosition, Math.PI, 180, angle),
+          )
+          : null;
         state.faceX = Number.isFinite(radius) && Number.isFinite(angle) ? radius * Math.cos(angle) : null;
         state.faceY = Number.isFinite(radius) && Number.isFinite(angle) ? radius * Math.sin(angle) : null;
         state.faceZ = state.z;
-        state.g112PathTainted = false;
+        state.faceXUncertaintyMm = Number.isFinite(state.faceX)
+          ? polarFaceComponentUncertaintyMm(
+            radius,
+            radiusUncertaintyMm,
+            Math.cos(angle),
+            angleUncertaintyRadians,
+            state.faceX,
+          )
+          : null;
+        state.faceYUncertaintyMm = Number.isFinite(state.faceY)
+          ? polarFaceComponentUncertaintyMm(
+            radius,
+            radiusUncertaintyMm,
+            Math.sin(angle),
+            angleUncertaintyRadians,
+            state.faceY,
+          )
+          : null;
+        state.faceZUncertaintyMm = Number.isFinite(state.faceZ)
+          ? requiredUncertainty(state.zUncertaintyMm)
+          : null;
+        state.g112PathTainted = state.turningPathTainted || (
+          facePointKnown({x: state.faceX, y: state.faceY, z: state.faceZ})
+          && facePointUncertaintyMm({
+            x: state.faceXUncertaintyMm,
+            y: state.faceYUncertaintyMm,
+            z: state.faceZUncertaintyMm,
+          }) > PROFILE_NUMERICAL_BUDGET_MM
+        );
       }
       state.g112Active = true;
       state.turningMode = "live-tool";
@@ -484,12 +943,19 @@ function updateG112Mode(record, state) {
       if (state.g112PathTainted) {
         state.x = null;
         state.z = null;
+        state.xUncertaintyMm = null;
+        state.zUncertaintyMm = null;
         state.cAxisPosition = null;
+        state.cAxisPositionUncertaintyDegrees = null;
+        state.turningPathTainted = true;
       }
       state.g112Active = false;
       state.faceX = null;
       state.faceY = null;
       state.faceZ = null;
+      state.faceXUncertaintyMm = null;
+      state.faceYUncertaintyMm = null;
+      state.faceZUncertaintyMm = null;
       state.g112PathTainted = false;
     }
   }
@@ -739,15 +1205,23 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
       handled = true;
     }
     if (state.liveToolDialect !== "haas-lathe-ngc") {
-      if ([133, 134, 135, 154, 155].includes(code)) {
+      if (code === 8 || code === 9) {
+        // Coolant state does not alter the bounded centerline geometry model.
+        handled = true;
+      }
+      if (!handled) {
+        const liveSpecific = [133, 134, 135, 154, 155].includes(code);
         state.liveToolRunning = null;
         state.cAxisEngaged = null;
         state.turningMode = "unknown";
+        if (!liveSpecific) invalidateExecutionState(state);
         warningOnce(warnings, {
           line: record.line,
-          code: "live-tool-dialect-required",
+          code: liveSpecific ? "live-tool-dialect-required" : "unsupported-m-code",
           verificationBlocked: true,
-          message: `M${code} is machine-builder-specific and cannot be interpreted until a live-tool controller dialect is configured.`,
+          message: liveSpecific
+            ? `M${code} is machine-builder-specific and cannot be interpreted until a live-tool controller dialect is configured.`
+            : `M${code} is not modeled for the selected controller; its machine-state or control-flow effects are unknown, so execution is blocked.`,
         });
       }
       continue;
@@ -947,18 +1421,27 @@ function parseDirectCAxis(record, state, warnings, cAxisMotions) {
   const hasH = record.byLetter.has("H");
   if (!hasC && !hasH) return {present: false, blocked: false};
   const start = state.cAxisPosition;
+  const startUncertaintyDegrees = state.cAxisPositionUncertaintyDegrees;
   let end = start;
+  let endUncertaintyDegrees = startUncertaintyDegrees;
   if (hasC && hasH) {
     end = null;
+    endUncertaintyDegrees = null;
   } else if (hasC) {
-    const cWord = interpretedHaasAddressValue(record, "C", state);
+    const cAddress = rotaryPositionAddress(record, "C", state);
     // Haas documents C as the absolute rotary-position address and H as its
     // incremental alternative. G390/G391 govern linear positioning; they do
     // not turn C into the H-style incremental address.
-    end = cWord;
+    end = cAddress.value;
+    endUncertaintyDegrees = cAddress.uncertaintyDegrees;
   } else if (hasH) {
-    const hWord = interpretedHaasAddressValue(record, "H", state);
-    end = Number.isFinite(end) ? end + hWord : null;
+    const hAddress = rotaryPositionAddress(record, "H", state);
+    end = Number.isFinite(start) ? start + hAddress.value : null;
+    endUncertaintyDegrees = Number.isFinite(end) ? boundedUncertaintySum(
+      requiredUncertainty(startUncertaintyDegrees),
+      hAddress.uncertaintyDegrees,
+      arithmeticUncertainty(start, hAddress.value, end),
+    ) : null;
   }
   const block = (issues) => {
     const verificationIssues = [...new Set(issues)];
@@ -967,6 +1450,7 @@ function parseDirectCAxis(record, state, warnings, cAxisMotions) {
       type: state.motion === "rapid" ? "rapid-index" : "interpolated-index",
       start: Number.isFinite(start) ? start : null,
       end: Number.isFinite(end) ? end : null,
+      geometryUncertaintyDegrees: Number.isFinite(endUncertaintyDegrees) ? endUncertaintyDegrees : null,
       engaged: state.cAxisEngaged,
       engagementSource: state.cAxisEngagementSource,
       combinedWithLinearAxes: false,
@@ -1033,11 +1517,13 @@ function parseDirectCAxis(record, state, warnings, cAxisMotions) {
   let event = null;
   if (!issues.length && Number.isFinite(end)) {
     state.cAxisPosition = end;
+    state.cAxisPositionUncertaintyDegrees = endUncertaintyDegrees;
     event = {
       line: record.line,
       type: "rapid-index",
       start: Number.isFinite(start) ? start : null,
       end,
+      geometryUncertaintyDegrees: endUncertaintyDegrees,
       engaged: state.cAxisEngaged,
       engagementSource: state.cAxisEngagementSource,
       combinedWithLinearAxes: false,
@@ -1051,13 +1537,14 @@ function facePointKnown(point) {
   return Number.isFinite(point?.x) && Number.isFinite(point?.y) && Number.isFinite(point?.z);
 }
 
-function facePathTouchesCenter(start, end) {
+function facePathTouchesCenter(start, end, geometryUncertaintyMm = 0) {
   const dx = end.x - start.x;
   const dy = end.y - start.y;
   const lengthSquared = dx * dx + dy * dy;
-  if (lengthSquared < EPSILON * EPSILON) return Math.hypot(start.x, start.y) <= EPSILON;
+  const centerTolerance = boundedUncertaintySum(EPSILON, geometryUncertaintyMm);
+  if (lengthSquared < EPSILON * EPSILON) return Math.hypot(start.x, start.y) <= centerTolerance;
   const projection = Math.max(0, Math.min(1, -(start.x * dx + start.y * dy) / lengthSquared));
-  return Math.hypot(start.x + projection * dx, start.y + projection * dy) <= EPSILON;
+  return Math.hypot(start.x + projection * dx, start.y + projection * dy) <= centerTolerance;
 }
 
 function g112Readiness(record, state, warnings) {
@@ -1085,28 +1572,66 @@ function g112Readiness(record, state, warnings) {
 }
 
 function resolveG112End(record, state) {
-  const resolve = (letter, current) => {
-    if (!record.byLetter.has(letter)) return current;
-    const word = interpretedHaasAddressValue(record, letter, state) * state.scale;
-    return state.absolute ? word : (Number.isFinite(current) ? current + word : null);
-  };
+  const resolve = (letter, current, currentUncertaintyMm) => resolvedPositionCoordinate(
+    current,
+    currentUncertaintyMm,
+    record.byLetter.has(letter) ? scaledPositionAddress(record, letter, state) : null,
+    state.absolute,
+  );
+  const x = resolve("X", state.faceX, state.faceXUncertaintyMm);
+  const y = resolve("Y", state.faceY, state.faceYUncertaintyMm);
+  const z = resolve("Z", state.faceZ, state.faceZUncertaintyMm);
   return {
-    x: resolve("X", state.faceX),
-    y: resolve("Y", state.faceY),
-    z: resolve("Z", state.faceZ),
+    point: {x: x.value, y: y.value, z: z.value},
+    uncertaintyMm: {x: x.uncertaintyMm, y: y.uncertaintyMm, z: z.uncertaintyMm},
   };
 }
 
-function acceptG112End(state, end) {
+function acceptG112End(state, resolution) {
+  const end = resolution.point;
+  const uncertaintyMm = resolution.uncertaintyMm;
   state.faceX = end.x;
   state.faceY = end.y;
   state.faceZ = end.z;
+  state.faceXUncertaintyMm = uncertaintyMm.x;
+  state.faceYUncertaintyMm = uncertaintyMm.y;
+  state.faceZUncertaintyMm = uncertaintyMm.z;
   if (Number.isFinite(end.x) && Number.isFinite(end.y)) {
     const radius = Math.hypot(end.x, end.y);
-    state.x = radius / (state.xMode === "diameter" ? 0.5 : 1);
-    if (radius > EPSILON) state.cAxisPosition = Math.atan2(end.y, end.x) * 180 / Math.PI;
+    const radiusCoordinateScale = state.xMode === "diameter" ? 0.5 : 1;
+    const radialPositionUncertaintyMm = Math.hypot(
+      requiredUncertainty(uncertaintyMm.x),
+      requiredUncertainty(uncertaintyMm.y),
+    );
+    const radiusUncertaintyMm = boundedUncertaintySum(
+      radialPositionUncertaintyMm,
+      numericUncertainty(radius, POSITION_OPERATION_ULPS),
+    );
+    state.x = radius / radiusCoordinateScale;
+    state.xUncertaintyMm = boundedUncertaintySum(
+      radiusUncertaintyMm / radiusCoordinateScale,
+      arithmeticUncertainty(radius, radiusCoordinateScale, state.x),
+    );
+    if (radius > EPSILON) {
+      const angleRadians = Math.atan2(end.y, end.x);
+      state.cAxisPosition = angleRadians * 180 / Math.PI;
+      const directionalUncertaintyRadians = radialPositionUncertaintyMm < radius
+        ? Math.asin(Math.min(1, radialPositionUncertaintyMm / radius))
+        : Number.MAX_VALUE;
+      state.cAxisPositionUncertaintyDegrees = boundedUncertaintySum(
+        directionalUncertaintyRadians * 180 / Math.PI,
+        numericUncertainty(angleRadians, POSITION_OPERATION_ULPS) * 180 / Math.PI,
+        arithmeticUncertainty(angleRadians, 180, Math.PI, state.cAxisPosition),
+      );
+    } else {
+      state.cAxisPosition = null;
+      state.cAxisPositionUncertaintyDegrees = null;
+    }
   }
-  if (Number.isFinite(end.z)) state.z = end.z;
+  if (Number.isFinite(end.z)) {
+    state.z = end.z;
+    state.zUncertaintyMm = uncertaintyMm.z;
+  }
 }
 
 function parseG112Record(record, state, warnings) {
@@ -1145,6 +1670,7 @@ function parseG112Record(record, state, warnings) {
       message: "C/H words are forbidden while G112 XY-to-XC interpolation is active.",
     });
     state.cAxisPosition = null;
+    state.cAxisPositionUncertaintyDegrees = null;
     state.g112PathTainted = true;
   }
   if (!hasX && !hasY && !hasZ) return null;
@@ -1163,11 +1689,33 @@ function parseG112Record(record, state, warnings) {
   }
 
   const start = {x: state.faceX, y: state.faceY, z: state.faceZ};
-  const end = resolveG112End(record, state);
+  const startUncertaintyMm = {
+    x: state.faceXUncertaintyMm,
+    y: state.faceYUncertaintyMm,
+    z: state.faceZUncertaintyMm,
+  };
+  const endResolution = resolveG112End(record, state);
+  const end = endResolution.point;
+  const endUncertaintyMm = endResolution.uncertaintyMm;
+  const geometryUncertaintyMm = Math.max(
+    facePointUncertaintyMm(startUncertaintyMm),
+    facePointUncertaintyMm(endUncertaintyMm),
+  );
+  const numericalResolutionBlocked = geometryUncertaintyMm > PROFILE_NUMERICAL_BUDGET_MM;
+  const reportNumericalResolution = () => {
+    if (warnings.some((warning) => warning.code === "g112-numerical-resolution")) return;
+    warningOnce(warnings, {
+      line: record.line,
+      code: "g112-numerical-resolution",
+      verificationBlocked: true,
+      message: "G112 face-coordinate arithmetic cannot retain the required 0.00005 in numerical budget; affected motion is display-only and verification is blocked.",
+    });
+  };
   const readinessIssues = g112Readiness(record, state, warnings);
   const wasTainted = priorTainted;
   const resynchronizes = state.absolute && state.motion === "rapid" && hasX && hasY && hasZ
-    && facePointKnown(end) && readinessIssues.length === 0 && !hasC;
+    && facePointKnown(end) && readinessIssues.length === 0 && !hasC
+    && facePointUncertaintyMm(endUncertaintyMm) <= PROFILE_NUMERICAL_BUDGET_MM;
 
   const motionBlocker = activeMotionBlocker(state);
   if (state.blockCurrentMotionLine === record.line || motionBlocker
@@ -1181,13 +1729,13 @@ function parseG112Record(record, state, warnings) {
       verificationBlocked: true,
       message: `${mode} is not modeled in the bounded G112 implementation; only G0/G1 face paths are supported.`,
     });
-    acceptG112End(state, end);
+    acceptG112End(state, endResolution);
     state.g112PathTainted = true;
     return null;
   }
   // In Haas G112, programmed X is a radius coordinate even when ordinary
   // turning X is configured as diameter. Y is the virtual linear face axis.
-  acceptG112End(state, end);
+  acceptG112End(state, endResolution);
 
   if (!facePointKnown(end)) {
     if (state.motion === "rapid") {
@@ -1217,7 +1765,9 @@ function parseG112Record(record, state, warnings) {
         message: "G112 face position was established by a complete absolute G0 X/Y/Z; no approach from an unknown position was drawn.",
       });
       state.g112PathTainted = false;
+      state.turningPathTainted = false;
     } else {
+      if (numericalResolutionBlocked) reportNumericalResolution();
       warningOnce(warnings, {
         line: record.line,
         code: state.motion === "rapid" ? "g112-position-establishment-unverified" : "g112-cut-from-unknown-position",
@@ -1238,14 +1788,20 @@ function parseG112Record(record, state, warnings) {
       message: "A complete absolute G0 X/Y/Z re-established the G112 face baseline; the unresolved incoming path was not drawn.",
     });
     state.g112PathTainted = false;
+    state.turningPathTainted = false;
     return null;
   }
   if (Math.hypot(end.x - start.x, end.y - start.y, end.z - start.z) < EPSILON) {
-    state.g112PathTainted = priorTainted || hasC;
+    if (numericalResolutionBlocked) reportNumericalResolution();
+    state.g112PathTainted = priorTainted || hasC || numericalResolutionBlocked;
     return null;
   }
 
   const issues = [...readinessIssues];
+  if (numericalResolutionBlocked) {
+    issues.push("g112-numerical-resolution");
+    reportNumericalResolution();
+  }
   if (wasTainted) {
     issues.push("g112-prior-path-unresolved");
     warningOnce(warnings, {
@@ -1256,7 +1812,17 @@ function parseG112Record(record, state, warnings) {
     });
   }
   if (hasC) issues.push("g112-c-word-forbidden");
-  if (facePathTouchesCenter(start, end)) {
+  const centerCrossingUncertaintyMm = Math.max(
+    Math.hypot(
+      requiredUncertainty(startUncertaintyMm.x),
+      requiredUncertainty(startUncertaintyMm.y),
+    ),
+    Math.hypot(
+      requiredUncertainty(endUncertaintyMm.x),
+      requiredUncertainty(endUncertaintyMm.y),
+    ),
+  );
+  if (facePathTouchesCenter(start, end, centerCrossingUncertaintyMm)) {
     issues.push("g112-center-crossing");
     warningOnce(warnings, {
       line: record.line,
@@ -1282,8 +1848,41 @@ function parseG112Record(record, state, warnings) {
     coordinateMode: "g112-face",
     xCoordinateMode: "radius",
     plane: "G17",
+    geometryUncertaintyMm,
+    coordinateUncertaintyMm: {
+      start: {
+        x: requiredUncertainty(startUncertaintyMm.x),
+        y: requiredUncertainty(startUncertaintyMm.y),
+        z: requiredUncertainty(startUncertaintyMm.z),
+      },
+      end: {
+        x: requiredUncertainty(endUncertaintyMm.x),
+        y: requiredUncertainty(endUncertaintyMm.y),
+        z: requiredUncertainty(endUncertaintyMm.z),
+      },
+    },
     verificationBlocked: issues.length > 0,
     verificationIssues: [...new Set(issues)],
+  };
+}
+
+function blockedSameEndpointArcSegment(segment, record, warnings) {
+  const sourceMotion = segment.sourceMotion || segment.type;
+  warningOnce(warnings, {
+    line: record.line,
+    code: "same-endpoint-arc-unsupported",
+    verificationBlocked: true,
+    message: "Same-endpoint or sub-resolution G02/G03 arc intent is not modeled; the attempted motion is retained as blocked instead of being ignored.",
+  });
+  return {
+    ...segment,
+    type: "linear",
+    sourceMotion,
+    verificationBlocked: true,
+    verificationIssues: [...new Set([
+      ...(segment.verificationIssues || []),
+      "same-endpoint-arc-unsupported",
+    ])],
   };
 }
 
@@ -1316,18 +1915,40 @@ function parseBasicRecord(record, state, xMode, warnings, {
     invalidateUnsupportedPosition(record, state);
     return null;
   }
-  const unsupportedLinearGeometryWords = ["I", "J", "K", "R"].filter((letter) => record.byLetter.has(letter));
-  if (state.liveToolDialect === "haas-lathe-ngc"
-    && ["rapid", "linear"].includes(state.motion)
-    && unsupportedLinearGeometryWords.length) {
+  const basicMotionContext = [0, 1].some((code) => hasG(record, code))
+    || ["X", "Y", "Z", "U", "W", "C", "H"].some((letter) => record.byLetter.has(letter));
+  const cycleOrSpecialRecord = [4, 28, 70, 71, 72].some((code) => hasG(record, code));
+  const arcMotion = state.motion === "arc-cw" || state.motion === "arc-ccw";
+  const unsupportedLinearGeometryWords = [
+    "I", "J", "K", "R",
+    ...(!cycleOrSpecialRecord && basicMotionContext ? ["D", "P", "Q"] : []),
+  ].filter((letter) => record.byLetter.has(letter));
+  if (["rapid", "linear"].includes(state.motion) && unsupportedLinearGeometryWords.length) {
     warningOnce(warnings, {
       line: record.line,
       code: "linear-corner-geometry-unsupported",
       verificationBlocked: true,
-      message: `Haas ${state.motion === "linear" ? "G01" : "G00"} ${unsupportedLinearGeometryWords.join("/")} corner or auxiliary geometry is not modeled; execution is blocked instead of drawing a sharp or incomplete path.`,
+      message: `${state.motion === "linear" ? "G01" : "G00"} ${unsupportedLinearGeometryWords.join("/")} corner or auxiliary geometry is not modeled; execution is blocked instead of drawing a sharp or incomplete path.`,
     });
     invalidateUnsupportedPosition(record, state);
-    invalidateExecutionState(state);
+    state.turningPathTainted = true;
+    if (state.liveToolDialect === "haas-lathe-ngc") invalidateExecutionState(state);
+    return null;
+  }
+  const unsupportedArcGeometryWords = [
+    "J",
+    ...(!cycleOrSpecialRecord && basicMotionContext ? ["D", "P", "Q"] : []),
+  ].filter((letter) => record.byLetter.has(letter));
+  if (arcMotion && unsupportedArcGeometryWords.length) {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "turning-arc-parameter-unsupported",
+      verificationBlocked: true,
+      message: `G02/G03 ${unsupportedArcGeometryWords.join("/")} geometry is not modeled in the X/Z turning plane; execution is blocked instead of dropping the word.`,
+    });
+    invalidateUnsupportedPosition(record, state);
+    state.turningPathTainted = true;
+    if (state.liveToolDialect === "haas-lathe-ngc") invalidateExecutionState(state);
     return null;
   }
   if (record.byLetter.has("Y")) {
@@ -1357,11 +1978,71 @@ function parseBasicRecord(record, state, xMode, warnings, {
     return null;
   }
 
+  if (arcMotion && state.plane !== "G18") {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "turning-plane-unsupported",
+      verificationBlocked: true,
+      message: `G02/G03 X/Z arc geometry is blocked while ${state.plane} is active; select G18.`,
+    });
+    invalidateUnsupportedPosition(record, state);
+    state.turningPathTainted = true;
+    if (state.liveToolDialect === "haas-lathe-ngc") invalidateExecutionState(state);
+    return null;
+  }
+  const implicitTurningArcPlane = arcMotion && !state.sawPlane;
+  if (implicitTurningArcPlane) {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "turning-plane-required",
+      verificationBlocked: true,
+      message: "G18 was not present before this arc; its assumed X/Z geometry is retained only as a blocked path.",
+    });
+  }
+
   const cAxis = parseDirectCAxis(record, state, warnings, cAxisMotions);
   if (cAxis.blocked) return null;
   const hasX = record.byLetter.has("X");
   const hasZ = record.byLetter.has("Z");
-  if (!hasX && !hasZ) return null;
+  if (!hasX && !hasZ) {
+    const hasArcIntent = hasG(record, 2)
+      || hasG(record, 3)
+      || record.byLetter.has("I")
+      || record.byLetter.has("K")
+      || record.byLetter.has("R");
+    if (arcMotion && hasArcIntent) {
+      const point = {x: state.x, z: state.z};
+      const pointUncertaintyMm = physicalPointUncertaintyMm(
+        {x: state.xUncertaintyMm, z: state.zUncertaintyMm},
+        xMode === "diameter" ? 0.5 : 1,
+      );
+      return blockedSameEndpointArcSegment({
+        type: state.motion,
+        start: {...point},
+        end: {...point},
+        points: isKnownPoint(point) ? [{...point}, {...point}] : [],
+        line: record.line,
+        raw: record.raw.trim(),
+        ...timingSnapshot(state),
+        toolKey: state.activeToolKey,
+        toolCallLine: state.activeToolCallLine,
+        geometryUncertaintyMm: pointUncertaintyMm,
+        coordinateUncertaintyMm: {
+          start: {
+            x: (Number(state.xUncertaintyMm) || 0) * (xMode === "diameter" ? 0.5 : 1),
+            z: Number(state.zUncertaintyMm) || 0,
+          },
+          end: {
+            x: (Number(state.xUncertaintyMm) || 0) * (xMode === "diameter" ? 0.5 : 1),
+            z: Number(state.zUncertaintyMm) || 0,
+          },
+        },
+        verificationBlocked: false,
+        verificationIssues: [],
+      }, record, warnings);
+    }
+    return null;
+  }
   if (state.liveToolDialect === "haas-lathe-ngc" && state.plane !== "G18") {
     warningOnce(warnings, {
       line: record.line,
@@ -1377,6 +2058,7 @@ function parseBasicRecord(record, state, xMode, warnings, {
     return null;
   }
   const verificationIssues = [];
+  if (implicitTurningArcPlane) verificationIssues.push("turning-plane-required");
   const liveStateActive = state.turningMode !== "turning"
     || state.liveToolRunning === true
     || (state.cAxisEngaged === true && !cAxis.event);
@@ -1413,29 +2095,94 @@ function parseBasicRecord(record, state, xMode, warnings, {
     });
   }
   if (!state.sawUnitMode) state.assumedUnitsUsed = true;
+  const wasTurningPathTainted = state.turningPathTainted;
+  const xCoordinateScale = xMode === "diameter" ? 0.5 : 1;
   const start = {x: state.x, z: state.z};
-  const xWord = hasX ? interpretedHaasAddressValue(record, "X", state) * state.scale : null;
-  const zWord = hasZ ? interpretedHaasAddressValue(record, "Z", state) * state.scale : null;
-  const end = {
-    x: hasX ? (state.absolute ? xWord : (Number.isFinite(state.x) ? state.x + xWord : null)) : state.x,
-    z: hasZ ? (state.absolute ? zWord : (Number.isFinite(state.z) ? state.z + zWord : null)) : state.z,
-  };
+  const startAxisUncertainty = {x: state.xUncertaintyMm, z: state.zUncertaintyMm};
+  const xAddress = hasX ? scaledPositionAddress(record, "X", state) : null;
+  const zAddress = hasZ ? scaledPositionAddress(record, "Z", state) : null;
+  const resolvedX = resolvedPositionCoordinate(state.x, state.xUncertaintyMm, xAddress, state.absolute);
+  const resolvedZ = resolvedPositionCoordinate(state.z, state.zUncertaintyMm, zAddress, state.absolute);
+  const end = {x: resolvedX.value, z: resolvedZ.value};
+  const endAxisUncertainty = {x: resolvedX.uncertaintyMm, z: resolvedZ.uncertaintyMm};
   state.x = end.x;
   state.z = end.z;
+  state.xUncertaintyMm = endAxisUncertainty.x;
+  state.zUncertaintyMm = endAxisUncertainty.z;
+  const startPositionUncertaintyMm = physicalPointUncertaintyMm(startAxisUncertainty, xCoordinateScale);
+  const endPositionUncertaintyMm = physicalPointUncertaintyMm(endAxisUncertainty, xCoordinateScale);
+  const turningResynchronizes = wasTurningPathTainted
+    && state.absolute
+    && state.motion === "rapid"
+    && hasX
+    && hasZ
+    && !cAxis.present
+    && verificationIssues.length === 0
+    && isKnownPoint(end)
+    && endPositionUncertaintyMm <= PROFILE_NUMERICAL_BUDGET_MM;
+  if (turningResynchronizes) {
+    state.turningPathTainted = false;
+    warningOnce(warnings, {
+      line: record.line,
+      code: "turning-position-resynchronized",
+      info: true,
+      message: "A complete absolute G0 X/Z re-established the turning baseline; the unresolved incoming path was not drawn.",
+    });
+    return null;
+  }
+  if (wasTurningPathTainted) {
+    verificationIssues.push("turning-position-resync-required");
+    warningOnce(warnings, {
+      line: record.line,
+      code: "turning-position-resync-required",
+      verificationBlocked: true,
+      message: "Turning motion remains blocked after unresolved G112 positioning until a complete, verification-clear absolute G0 X/Z re-establishes the baseline.",
+    });
+  }
   if (!isKnownPoint(end)) {
-    warnings.push({line: record.line, info: true, message: "Motion is waiting for both X and Z to become known."});
+    if (state.motion === "rapid") {
+      warnings.push({line: record.line, info: true, message: "Motion is waiting for both X and Z to become known."});
+    } else {
+      state.turningPathTainted = true;
+      warningOnce(warnings, {
+        line: record.line,
+        code: "turning-cut-from-unknown-position",
+        verificationBlocked: true,
+        message: "G01/G02/G03 cutting motion has an incomplete X/Z endpoint and cannot establish a verified path; use a complete absolute G0 X/Z baseline.",
+      });
+    }
     return null;
   }
   if (!isKnownPoint(start)) {
-    warnings.push({line: record.line, info: true, message: `Position established at X${(end.x / state.scale).toFixed(4)} Z${(end.z / state.scale).toFixed(4)}; no invented approach was drawn.`});
+    if (!wasTurningPathTainted && state.motion === "rapid") {
+      warnings.push({line: record.line, info: true, message: `Position established at X${(end.x / state.scale).toFixed(4)} Z${(end.z / state.scale).toFixed(4)}; no invented approach was drawn.`});
+    } else if (!wasTurningPathTainted) {
+      state.turningPathTainted = true;
+      warningOnce(warnings, {
+        line: record.line,
+        code: "turning-cut-from-unknown-position",
+        verificationBlocked: true,
+        message: "G01/G02/G03 cutting motion cannot establish a verified turning start; use a complete absolute G0 X/Z baseline first.",
+      });
+    }
     return null;
   }
-  if (distance(start, end) < EPSILON) return null;
-
   const points = state.motion === "rapid" ? rapidPath(start, end, state, xMode) : [start, end];
+  const positionUncertaintyMm = Math.max(startPositionUncertaintyMm, endPositionUncertaintyMm);
   const segment = {
     type: state.motion, start, end, points, line: record.line, raw: record.raw.trim(), ...timingSnapshot(state),
     toolKey: state.activeToolKey, toolCallLine: state.activeToolCallLine,
+    geometryUncertaintyMm: positionUncertaintyMm,
+    coordinateUncertaintyMm: {
+      start: {
+        x: (Number(startAxisUncertainty.x) || 0) * xCoordinateScale,
+        z: Number(startAxisUncertainty.z) || 0,
+      },
+      end: {
+        x: (Number(endAxisUncertainty.x) || 0) * xCoordinateScale,
+        z: Number(endAxisUncertainty.z) || 0,
+      },
+    },
     verificationBlocked: verificationIssues.length > 0,
     verificationIssues: [...new Set(verificationIssues)],
   };
@@ -1447,6 +2194,28 @@ function parseBasicRecord(record, state, xMode, warnings, {
     cAxis.event.combinedWithLinearAxes = true;
     segment.coordinateMode = "c-axis-index";
     segment.cAxisMotion = {start: cAxis.event.start, end: cAxis.event.end};
+  }
+  if (distance(start, end) < EPSILON) {
+    if (state.motion === "arc-cw" || state.motion === "arc-ccw") {
+      return blockedSameEndpointArcSegment(segment, record, warnings);
+    }
+    if (state.motion === "linear" && positionUncertaintyMm > PROFILE_NUMERICAL_BUDGET_MM) {
+      warningOnce(warnings, {
+        line: record.line,
+        code: "linear-numerical-resolution",
+        verificationBlocked: true,
+        message: "Sub-resolution G01 coordinate arithmetic cannot retain the required 0.00005 in numerical budget; the attempted move is retained as blocked.",
+      });
+      return {
+        ...segment,
+        verificationBlocked: true,
+        verificationIssues: [...new Set([
+          ...(segment.verificationIssues || []),
+          "linear-numerical-resolution",
+        ])],
+      };
+    }
+    return null;
   }
   if (state.motion === "arc-cw" || state.motion === "arc-ccw") {
     const hasCenterDefinition = record.byLetter.has("I") || record.byLetter.has("K");
@@ -1460,28 +2229,63 @@ function parseBasicRecord(record, state, xMode, warnings, {
       invalidateUnsupportedPosition(record, state);
       return null;
     }
+    const iAddress = record.byLetter.has("I") ? scaledPositionAddress(record, "I", state) : null;
+    const kAddress = record.byLetter.has("K") ? scaledPositionAddress(record, "K", state) : null;
+    const rAddress = record.byLetter.has("R") ? scaledPositionAddress(record, "R", state) : null;
     const params = {
-      i: record.byLetter.has("I") ? interpretedHaasAddressValue(record, "I", state) * state.scale : NaN,
-      k: record.byLetter.has("K") ? interpretedHaasAddressValue(record, "K", state) * state.scale : NaN,
-      r: record.byLetter.has("R") ? lastWord(record, "R") * state.scale : NaN,
+      i: iAddress?.value ?? NaN,
+      k: kAddress?.value ?? NaN,
+      r: rAddress?.value ?? NaN,
+      iUncertaintyMm: iAddress?.uncertaintyMm ?? 0,
+      kUncertaintyMm: kAddress?.uncertaintyMm ?? 0,
+      rUncertaintyMm: rAddress?.uncertaintyMm ?? 0,
     };
-    const arc = arcGeometry(start, end, params, state.motion === "arc-cw", xMode === "diameter" ? 0.5 : 1, state.arcChordTolerance);
-    if (arc) Object.assign(segment, arc);
+    const arc = arcGeometry(
+      start,
+      end,
+      params,
+      state.motion === "arc-cw",
+      xCoordinateScale,
+      state.arcChordTolerance,
+      {startMm: startPositionUncertaintyMm, endMm: endPositionUncertaintyMm},
+    );
+    if (arc && !arc.numericalResolutionBlocked) {
+      Object.assign(segment, arc);
+      segment.geometryUncertaintyMm = Math.max(positionUncertaintyMm, arc.geometryUncertaintyMm || 0);
+    }
     else {
+      segment.sourceMotion = state.motion;
       segment.type = "linear";
+      if (arc?.numericalResolutionBlocked) {
+        segment.verificationBlocked = true;
+        segment.verificationIssues = [...new Set([
+          ...(segment.verificationIssues || []),
+          "arc-numerical-resolution",
+        ])];
+        warningOnce(warnings, {
+          line: record.line,
+          code: "arc-numerical-resolution",
+          verificationBlocked: true,
+          message: "Arc center or directed-sweep construction cannot retain the required 0.00005 in numerical budget; the attempted chord is shown only as a blocked path.",
+        });
+      }
       if (state.liveToolDialect === "haas-lathe-ngc") {
         segment.verificationBlocked = true;
         segment.verificationIssues = [...new Set([...(segment.verificationIssues || []), "arc-geometry-unresolved"])];
-        warningOnce(warnings, {
-          line: record.line,
-          code: "arc-geometry-unresolved",
-          verificationBlocked: true,
-          message: "Haas arc geometry is incomplete or inconsistent; its attempted chord is shown only as a blocked path and execution stops.",
-        });
+        if (!arc?.numericalResolutionBlocked) {
+          warningOnce(warnings, {
+            line: record.line,
+            code: "arc-geometry-unresolved",
+            verificationBlocked: true,
+            message: "Haas arc geometry is incomplete or inconsistent; its attempted chord is shown only as a blocked path and execution stops.",
+          });
+        }
         state.x = null;
         state.z = null;
+        state.xUncertaintyMm = null;
+        state.zUncertaintyMm = null;
         invalidateExecutionState(state);
-      } else {
+      } else if (!arc?.numericalResolutionBlocked) {
         warnings.push({line: record.line, message: "Arc geometry is incomplete or inconsistent; shown as a line."});
       }
     }
@@ -1502,6 +2306,8 @@ function parseReferenceReturn(record, state, xMode, warnings) {
   if (!isKnownPoint(reference)) {
     state.x = null;
     state.z = null;
+    state.xUncertaintyMm = null;
+    state.zUncertaintyMm = null;
     warnings.push({line: record.line, message: "G28 returns to machine reference, but its position cannot be placed in the part view without a plotted reference estimate."});
     return [];
   }
@@ -1520,6 +2326,8 @@ function parseReferenceReturn(record, state, xMode, warnings) {
 
   state.x = reference.x;
   state.z = reference.z;
+  state.xUncertaintyMm = numericUncertainty(reference.x);
+  state.zUncertaintyMm = numericUncertainty(reference.z);
   const message = isKnownPoint(start)
     ? `G28 returned to the estimated machine reference at X${(reference.x / state.scale).toFixed(4)} Z${(reference.z / state.scale).toFixed(4)}.`
     : `G28 established the estimated machine reference at X${(reference.x / state.scale).toFixed(4)} Z${(reference.z / state.scale).toFixed(4)}; the unknown incoming move was not drawn.`;
@@ -1554,7 +2362,10 @@ function contourFor(records, startIndex, endIndex, state, xMode, warnings) {
       });
       localState.x = null;
       localState.z = null;
+      localState.xUncertaintyMm = null;
+      localState.zUncertaintyMm = null;
       localState.cAxisPosition = null;
+      localState.cAxisPositionUncertaintyDegrees = null;
       localState.g112PathTainted = true;
       continue;
     }
@@ -1573,6 +2384,7 @@ function contourFor(records, startIndex, endIndex, state, xMode, warnings) {
   const invalidState = localState.g112Active
     || localState.unconfiguredG112Active
     || localState.g112PathTainted
+    || localState.turningPathTainted
     || activeMotionBlocker(localState)
     || localState.executionBlocked;
   const invalidWarning = contourWarnings.some((warning) => !warning.info || warning.verificationBlocked);
@@ -1588,8 +2400,57 @@ function profileGeometry(contourSegments) {
   const first = contourSegments[0].end;
   const profileSegments = contourSegments.slice(1);
   const points = [{...first}];
-  for (const segment of profileSegments) points.push(...segment.points.slice(1).map((point) => ({...point})));
-  return {points, segments: profileSegments, startLine: contourSegments[0].line};
+  const pointUncertaintiesMm = [{
+    x: Number(contourSegments[0].coordinateUncertaintyMm?.end?.x) || 0,
+    z: Number(contourSegments[0].coordinateUncertaintyMm?.end?.z) || 0,
+  }];
+  for (const segment of profileSegments) {
+    const additions = segment.points.slice(1);
+    additions.forEach((point, index) => {
+      points.push({...point});
+      const endpoint = index === additions.length - 1;
+      pointUncertaintiesMm.push(endpoint ? {
+        x: Number(segment.coordinateUncertaintyMm?.end?.x) || 0,
+        z: Number(segment.coordinateUncertaintyMm?.end?.z) || 0,
+      } : {
+        x: Number(segment.geometryUncertaintyMm) || 0,
+        z: Number(segment.geometryUncertaintyMm) || 0,
+      });
+    });
+  }
+  const geometryUncertaintyMm = contourSegments.reduce(
+    (maximum, segment) => Math.max(maximum, Number(segment.geometryUncertaintyMm) || 0),
+    0,
+  );
+  return {
+    points,
+    pointUncertaintiesMm,
+    segments: profileSegments,
+    startLine: contourSegments[0].line,
+    geometryUncertaintyMm,
+  };
+}
+
+function coordinateAverageWithUncertainty(points, key, pointUncertainties) {
+  let sum = 0;
+  let arithmeticBound = 0;
+  for (const point of points) {
+    const next = sum + point[key];
+    arithmeticBound = boundedUncertaintySum(
+      arithmeticBound,
+      arithmeticUncertainty(sum, point[key], next),
+    );
+    sum = next;
+  }
+  const value = sum / points.length;
+  return {
+    value,
+    uncertainty: boundedUncertaintySum(
+      pointUncertainties.reduce((sum, uncertainty) => sum + uncertainty, 0) / points.length,
+      arithmeticBound / points.length,
+      arithmeticUncertainty(sum, points.length, value),
+    ),
+  };
 }
 
 function directionReversals(points, key) {
@@ -1605,42 +2466,226 @@ function directionReversals(points, key) {
   return reversals;
 }
 
+function extremePointIndex(points, key, minimum) {
+  let selected = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    if (minimum ? points[index][key] < points[selected][key] : points[index][key] > points[selected][key]) {
+      selected = index;
+    }
+  }
+  return selected;
+}
+
 function shiftedProfile(geometry, offsetX, offsetZ, xCoordinateScale) {
-  return {
-    startLine: geometry.startLine,
-    points: geometry.points.map((point) => ({x: point.x + offsetX, z: point.z + offsetZ})),
-    segments: geometry.segments.map((segment) => ({
+  const points = geometry.points.map((point) => ({x: point.x + offsetX, z: point.z + offsetZ}));
+  const pointUncertaintiesMm = points.map((point, index) => {
+    const source = geometry.pointUncertaintiesMm?.[index] || {};
+    return {
+      x: boundedUncertaintySum(
+        source.x,
+        numericUncertainty(offsetX) * Math.abs(xCoordinateScale),
+        arithmeticUncertainty(geometry.points[index].x, offsetX, point.x) * Math.abs(xCoordinateScale),
+      ),
+      z: boundedUncertaintySum(
+        source.z,
+        numericUncertainty(offsetZ),
+        arithmeticUncertainty(geometry.points[index].z, offsetZ, point.z),
+      ),
+    };
+  });
+  const segments = geometry.segments.map((segment) => {
+    const start = {x: segment.start.x + offsetX, z: segment.start.z + offsetZ};
+    const end = {x: segment.end.x + offsetX, z: segment.end.z + offsetZ};
+    const shiftUncertaintyMm = boundedUncertaintySum(
+      numericUncertainty(offsetX) * Math.abs(xCoordinateScale),
+      numericUncertainty(offsetZ),
+      arithmeticUncertainty(segment.start.x, offsetX, start.x) * Math.abs(xCoordinateScale),
+      arithmeticUncertainty(segment.start.z, offsetZ, start.z),
+      arithmeticUncertainty(segment.end.x, offsetX, end.x) * Math.abs(xCoordinateScale),
+      arithmeticUncertainty(segment.end.z, offsetZ, end.z),
+    );
+    return {
       ...segment,
-      start: {x: segment.start.x + offsetX, z: segment.start.z + offsetZ},
-      end: {x: segment.end.x + offsetX, z: segment.end.z + offsetZ},
+      start,
+      end,
       points: segment.points.map((point) => ({x: point.x + offsetX, z: point.z + offsetZ})),
       center: segment.center ? {
         x: segment.center.x + offsetX * xCoordinateScale,
         z: segment.center.z + offsetZ,
       } : undefined,
-    })),
-  };
+      geometryUncertaintyMm: boundedUncertaintySum(
+        segment.geometryUncertaintyMm,
+        shiftUncertaintyMm,
+      ),
+      coordinateUncertaintyMm: {
+        start: {
+          x: boundedUncertaintySum(
+            segment.coordinateUncertaintyMm?.start?.x,
+            numericUncertainty(offsetX) * Math.abs(xCoordinateScale),
+            arithmeticUncertainty(segment.start.x, offsetX, start.x) * Math.abs(xCoordinateScale),
+          ),
+          z: boundedUncertaintySum(
+            segment.coordinateUncertaintyMm?.start?.z,
+            numericUncertainty(offsetZ),
+            arithmeticUncertainty(segment.start.z, offsetZ, start.z),
+          ),
+        },
+        end: {
+          x: boundedUncertaintySum(
+            segment.coordinateUncertaintyMm?.end?.x,
+            numericUncertainty(offsetX) * Math.abs(xCoordinateScale),
+            arithmeticUncertainty(segment.end.x, offsetX, end.x) * Math.abs(xCoordinateScale),
+          ),
+          z: boundedUncertaintySum(
+            segment.coordinateUncertaintyMm?.end?.z,
+            numericUncertainty(offsetZ),
+            arithmeticUncertainty(segment.end.z, offsetZ, end.z),
+          ),
+        },
+      },
+    };
+  });
+  const geometryUncertaintyMm = segments.reduce(
+    (maximum, segment) => Math.max(maximum, segment.geometryUncertaintyMm),
+    Number(geometry.geometryUncertaintyMm) || 0,
+  );
+  return {startLine: geometry.startLine, geometryUncertaintyMm, points, pointUncertaintiesMm, segments};
 }
 
-function crossingPoint(points, level, key, outsideDirection) {
-  if (!points.length) return null;
+function crossingPoint(
+  points,
+  level,
+  key,
+  outsideDirection,
+  {
+    pointUncertaintiesMm = [],
+    levelUncertaintyMm = 0,
+    xCoordinateScale = 1,
+    levelIsResolvedTarget = false,
+  } = {},
+) {
+  if (!points.length) return {point: null, uncertaintyMm: 0, conditioningBlocked: false};
   const safe = (point) => (level - point[key]) * outsideDirection >= -EPSILON;
-  if (!safe(points[0])) return {...points[0]};
+  const axisScale = key === "x" ? Math.abs(xCoordinateScale) : 1;
+  const levelAxisUncertainty = levelUncertaintyMm / axisScale;
+  const uncertaintyAt = (index, coordinateKey) => (
+    Math.max(0, Number(pointUncertaintiesMm[index]?.[coordinateKey]) || 0)
+  );
+  const predicateUncertainty = (point, index) => {
+    const difference = level - point[key];
+    return boundedUncertaintySum(
+      levelAxisUncertainty,
+      uncertaintyAt(index, key) / axisScale,
+      arithmeticUncertainty(level, point[key], difference),
+    );
+  };
+  const firstPredicateUncertainty = predicateUncertainty(points[0], 0);
+  let priorPredicateUnresolved = Math.abs(level - points[0][key]) <= firstPredicateUncertainty;
+  let priorPredicateIndex = priorPredicateUnresolved ? 0 : -1;
+  if (!safe(points[0])) {
+    return {
+      point: {...points[0]},
+      uncertaintyMm: Math.hypot(uncertaintyAt(0, "x"), uncertaintyAt(0, "z")),
+      conditioningBlocked: priorPredicateUnresolved,
+    };
+  }
   for (let index = 1; index < points.length; index += 1) {
-    if (safe(points[index])) continue;
+    const nextPredicateUncertainty = predicateUncertainty(points[index], index);
+    const nextPredicateUnresolved = Math.abs(level - points[index][key]) <= nextPredicateUncertainty;
+    const otherKey = key === "x" ? "z" : "x";
+    const otherScale = otherKey === "x" ? Math.abs(xCoordinateScale) : 1;
+    const ambiguousSpanMm = priorPredicateUnresolved && nextPredicateUnresolved
+      ? Math.abs(points[index][otherKey] - points[priorPredicateIndex][otherKey]) * otherScale
+      : 0;
+    const ambiguousSpanBlocked = !levelIsResolvedTarget
+      && ambiguousSpanMm > PROFILE_NUMERICAL_BUDGET_MM
+      && Math.max(
+        uncertaintyAt(priorPredicateIndex, key),
+        uncertaintyAt(index, key),
+        levelUncertaintyMm,
+      ) > 0;
+    if (safe(points[index])) {
+      priorPredicateUnresolved = nextPredicateUnresolved;
+      priorPredicateIndex = nextPredicateUnresolved ? index : -1;
+      if (ambiguousSpanBlocked) {
+        return {point: {...points[index - 1]}, uncertaintyMm: Number.MAX_VALUE, conditioningBlocked: true};
+      }
+      continue;
+    }
     const before = points[index - 1];
     const after = points[index];
     const denominator = after[key] - before[key];
+    const beforeAxisUncertainty = uncertaintyAt(index - 1, key) / axisScale;
+    const afterAxisUncertainty = uncertaintyAt(index, key) / axisScale;
+    const denominatorUncertainty = boundedUncertaintySum(
+      beforeAxisUncertainty,
+      afterAxisUncertainty,
+      arithmeticUncertainty(after[key], before[key], denominator),
+    );
+    const numerator = level - before[key];
+    const numeratorUncertainty = boundedUncertaintySum(
+      levelAxisUncertainty,
+      beforeAxisUncertainty,
+      arithmeticUncertainty(level, before[key], numerator),
+    );
+    if (Math.abs(denominator) <= denominatorUncertainty) {
+      return {point: {...before}, uncertaintyMm: Number.MAX_VALUE, conditioningBlocked: true};
+    }
     const ratio = Math.abs(denominator) < EPSILON ? 0 : (level - before[key]) / denominator;
-    return {
+    const ratioUncertainty = (
+      numeratorUncertainty * Math.abs(denominator)
+      + Math.abs(numerator) * denominatorUncertainty
+    ) / (Math.abs(denominator) * (Math.abs(denominator) - denominatorUncertainty));
+    const clampedRatio = Math.max(0, Math.min(1, ratio));
+    const point = {
       x: before.x + (after.x - before.x) * Math.max(0, Math.min(1, ratio)),
       z: before.z + (after.z - before.z) * Math.max(0, Math.min(1, ratio)),
     };
+    const interpolationUncertaintyMm = boundedUncertaintySum(
+      Math.hypot(
+        Math.max(uncertaintyAt(index - 1, "x"), uncertaintyAt(index, "x")),
+        Math.max(uncertaintyAt(index - 1, "z"), uncertaintyAt(index, "z")),
+      ),
+      Math.abs(after[otherKey] - before[otherKey]) * otherScale * ratioUncertainty,
+      arithmeticUncertainty(
+        before[otherKey],
+        after[otherKey] - before[otherKey],
+        clampedRatio,
+        point[otherKey],
+      ) * otherScale,
+    );
+    return {
+      point,
+      uncertaintyMm: interpolationUncertaintyMm,
+      conditioningBlocked: ambiguousSpanBlocked
+        || !Number.isFinite(ratioUncertainty)
+        || interpolationUncertaintyMm > PROFILE_NUMERICAL_BUDGET_MM,
+    };
   }
-  return {...points.at(-1)};
+  const lastIndex = points.length - 1;
+  return {
+    point: {...points.at(-1)},
+    uncertaintyMm: Math.hypot(
+      uncertaintyAt(lastIndex, "x"),
+      uncertaintyAt(lastIndex, "z"),
+    ),
+    conditioningBlocked: false,
+  };
 }
 
-function generatedSegment(type, start, end, cycle, line, pass, points = null, rapidState = null, xMode = "diameter", geometry = null) {
+function generatedSegment(
+  type,
+  start,
+  end,
+  cycle,
+  line,
+  pass,
+  points = null,
+  rapidState = null,
+  xMode = "diameter",
+  geometry = null,
+  cycleUncertaintyMm = 0,
+) {
   const path = points || (type === "rapid" && rapidState ? rapidPath(start, end, rapidState, xMode) : [{...start}, {...end}]);
   const timingSource = geometry && type !== "rapid" ? geometry : rapidState;
   const executionSpindle = timingSnapshot(rapidState || {});
@@ -1656,6 +2701,10 @@ function generatedSegment(type, start, end, cycle, line, pass, points = null, ra
     toolKey: rapidState?.activeToolKey ?? null,
     toolCallLine: rapidState?.activeToolCallLine ?? null,
   };
+  segment.geometryUncertaintyMm = boundedUncertaintySum(
+    cycleUncertaintyMm,
+    geometry?.geometryUncertaintyMm,
+  );
   if (geometry?.center && Number.isFinite(geometry.radius) && Number.isFinite(geometry.sweep)) {
     Object.assign(segment, {
       sourceMotion: geometry.type,
@@ -1667,15 +2716,86 @@ function generatedSegment(type, start, end, cycle, line, pass, points = null, ra
   return segment;
 }
 
-function expandCycle({code, start, geometry, depth, retract, finishU, finishW, xMode, line, p, q, rapidState}) {
+function expandCycle({
+  code,
+  start,
+  startUncertaintyMm = 0,
+  geometry,
+  depth,
+  retract,
+  finishU,
+  finishW,
+  xMode,
+  line,
+  p,
+  q,
+  rapidState,
+}) {
   const warnings = [];
   const segments = [];
   const xCoordinateScale = xMode === "diameter" ? 0.5 : 1;
   const points = geometry.points;
-  if (points.length < 2) return {segments, warnings: [{line, message: `${code} P${p}/Q${q} does not define a usable profile.`}], passes: 0, type: "I"};
+  if (points.length < 2) {
+    return {
+      segments,
+      warnings: [{
+        line,
+        code: "cycle-profile-empty",
+        verificationBlocked: true,
+        message: `${code} P${p}/Q${q} does not define a usable profile; cycle verification is blocked.`,
+      }],
+      passes: 0,
+      type: "I",
+    };
+  }
+  const cycleUncertaintyMm = boundedUncertaintySum(
+    startUncertaintyMm,
+    geometry.geometryUncertaintyMm,
+    numericUncertainty(depth),
+    numericUncertainty(retract),
+    numericUncertainty(finishU),
+    numericUncertainty(finishW),
+    numericUncertainty(Math.max(
+      Math.abs(start.x),
+      Math.abs(start.z),
+      Math.abs(depth),
+      Math.abs(retract),
+      Math.abs(finishU),
+      Math.abs(finishW),
+    )) * 32,
+  );
 
-  const averageX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
-  const averageZ = points.reduce((sum, point) => sum + point.z, 0) / points.length;
+  const averageXResult = coordinateAverageWithUncertainty(
+    points,
+    "x",
+    geometry.pointUncertaintiesMm.map((uncertainty) => uncertainty.x / xCoordinateScale),
+  );
+  const averageZResult = coordinateAverageWithUncertainty(
+    points,
+    "z",
+    geometry.pointUncertaintiesMm.map((uncertainty) => uncertainty.z),
+  );
+  const averageX = averageXResult.value;
+  const averageZ = averageZResult.value;
+  const outsideXMarginMm = Math.abs(start.x - averageX) * xCoordinateScale;
+  const outsideZMarginMm = Math.abs(start.z - averageZ);
+  const outsideXUncertaintyMm = boundedUncertaintySum(
+    startUncertaintyMm,
+    averageXResult.uncertainty * xCoordinateScale,
+    arithmeticUncertainty(start.x, averageX, start.x - averageX) * xCoordinateScale,
+  );
+  const outsideZUncertaintyMm = boundedUncertaintySum(
+    startUncertaintyMm,
+    averageZResult.uncertainty,
+    arithmeticUncertainty(start.z, averageZ, start.z - averageZ),
+  );
+  const outsideDirectionUnresolved = (
+    (code === "G71" || Math.abs(finishU) > EPSILON)
+      && outsideXMarginMm <= outsideXUncertaintyMm
+  ) || (
+    (code === "G72" || Math.abs(finishW) > EPSILON)
+      && outsideZMarginMm <= outsideZUncertaintyMm
+  );
   const outsideX = Math.sign(start.x - averageX) || 1;
   const outsideZ = Math.sign(start.z - averageZ) || 1;
   const profile = shiftedProfile(geometry, outsideX * Math.abs(finishU), outsideZ * Math.abs(finishW), xCoordinateScale);
@@ -1686,21 +2806,72 @@ function expandCycle({code, start, geometry, depth, retract, finishU, finishW, x
 
   let current = {...start};
   let passCount = 0;
+  let derivedCycleUncertaintyMm = cycleUncertaintyMm;
+  let crossingConditioningBlocked = false;
   const push = (type, end, pass = null, customPoints = null, geometrySource = null) => {
     if (distance(current, end) < EPSILON && !customPoints) return;
-    const segment = generatedSegment(type, current, end, code, line, pass, customPoints, rapidState, xMode, geometrySource);
+    const segment = generatedSegment(
+      type,
+      current,
+      end,
+      code,
+      line,
+      pass,
+      customPoints,
+      rapidState,
+      xMode,
+      geometrySource,
+      derivedCycleUncertaintyMm,
+    );
     segments.push(segment);
     current = {...end};
   };
 
   if (code === "G71") {
     const step = Math.max(EPSILON, Math.abs(depth) / xCoordinateScale);
-    const target = outsideX > 0 ? Math.min(...profile.points.map((point) => point.x)) : Math.max(...profile.points.map((point) => point.x));
+    const targetIndex = extremePointIndex(profile.points, "x", outsideX > 0);
+    const target = profile.points[targetIndex].x;
+    const targetUncertaintyMm = profile.pointUncertaintiesMm[targetIndex].x;
+    const stepUncertaintyMm = numericUncertainty(step) * xCoordinateScale;
     const travelZ = Math.sign(profile.points.at(-1).z - profile.points[0].z) || -1;
     let level = start.x;
+    let levelUncertaintyMm = startUncertaintyMm;
     while ((level - target) * outsideX > EPSILON && passCount < 250) {
-      level += -outsideX * Math.min(step, Math.abs(level - target));
-      const hit = crossingPoint(profile.points, level, "x", outsideX);
+      const remaining = Math.abs(level - target);
+      const clampMarginMm = Math.abs(remaining - step) * xCoordinateScale;
+      const clampUncertaintyMm = boundedUncertaintySum(
+        levelUncertaintyMm,
+        targetUncertaintyMm,
+        stepUncertaintyMm,
+        arithmeticUncertainty(level, target, level - target) * xCoordinateScale,
+      );
+      const clampDecisionUnresolved = clampMarginMm <= clampUncertaintyMm;
+      const clampedToTarget = remaining <= step;
+      const nextLevel = clampedToTarget
+        ? target
+        : level + -outsideX * step;
+      crossingConditioningBlocked ||= clampDecisionUnresolved;
+      levelUncertaintyMm = clampedToTarget && !clampDecisionUnresolved
+        ? targetUncertaintyMm
+        : boundedUncertaintySum(
+            levelUncertaintyMm,
+            stepUncertaintyMm,
+            arithmeticUncertainty(level, step, nextLevel) * xCoordinateScale,
+          );
+      derivedCycleUncertaintyMm = boundedUncertaintySum(
+        derivedCycleUncertaintyMm,
+        levelUncertaintyMm,
+      );
+      level = nextLevel;
+      const crossing = crossingPoint(profile.points, level, "x", outsideX, {
+        pointUncertaintiesMm: profile.pointUncertaintiesMm,
+        levelUncertaintyMm,
+        xCoordinateScale,
+        levelIsResolvedTarget: clampedToTarget && !clampDecisionUnresolved,
+      });
+      const hit = crossing.point;
+      derivedCycleUncertaintyMm = Math.max(derivedCycleUncertaintyMm, crossing.uncertaintyMm);
+      crossingConditioningBlocked ||= crossing.conditioningBlocked;
       passCount += 1;
       push("rapid", {x: level, z: start.z}, passCount);
       if (hit && Math.abs(hit.z - start.z) > EPSILON) push("rough", {x: level, z: hit.z}, passCount);
@@ -1710,12 +2881,49 @@ function expandCycle({code, start, geometry, depth, retract, finishU, finishW, x
     }
   } else {
     const step = Math.max(EPSILON, Math.abs(depth));
-    const target = outsideZ > 0 ? Math.min(...profile.points.map((point) => point.z)) : Math.max(...profile.points.map((point) => point.z));
+    const targetIndex = extremePointIndex(profile.points, "z", outsideZ > 0);
+    const target = profile.points[targetIndex].z;
+    const targetUncertaintyMm = profile.pointUncertaintiesMm[targetIndex].z;
+    const stepUncertaintyMm = numericUncertainty(step);
     const travelX = Math.sign(profile.points.at(-1).x - profile.points[0].x) || -1;
     let level = start.z;
+    let levelUncertaintyMm = startUncertaintyMm;
     while ((level - target) * outsideZ > EPSILON && passCount < 250) {
-      level += -outsideZ * Math.min(step, Math.abs(level - target));
-      const hit = crossingPoint(profile.points, level, "z", outsideZ);
+      const remaining = Math.abs(level - target);
+      const clampMarginMm = Math.abs(remaining - step);
+      const clampUncertaintyMm = boundedUncertaintySum(
+        levelUncertaintyMm,
+        targetUncertaintyMm,
+        stepUncertaintyMm,
+        arithmeticUncertainty(level, target, level - target),
+      );
+      const clampDecisionUnresolved = clampMarginMm <= clampUncertaintyMm;
+      const clampedToTarget = remaining <= step;
+      const nextLevel = clampedToTarget
+        ? target
+        : level + -outsideZ * step;
+      crossingConditioningBlocked ||= clampDecisionUnresolved;
+      levelUncertaintyMm = clampedToTarget && !clampDecisionUnresolved
+        ? targetUncertaintyMm
+        : boundedUncertaintySum(
+            levelUncertaintyMm,
+            stepUncertaintyMm,
+            arithmeticUncertainty(level, step, nextLevel),
+          );
+      derivedCycleUncertaintyMm = boundedUncertaintySum(
+        derivedCycleUncertaintyMm,
+        levelUncertaintyMm,
+      );
+      level = nextLevel;
+      const crossing = crossingPoint(profile.points, level, "z", outsideZ, {
+        pointUncertaintiesMm: profile.pointUncertaintiesMm,
+        levelUncertaintyMm,
+        xCoordinateScale,
+        levelIsResolvedTarget: clampedToTarget && !clampDecisionUnresolved,
+      });
+      const hit = crossing.point;
+      derivedCycleUncertaintyMm = Math.max(derivedCycleUncertaintyMm, crossing.uncertaintyMm);
+      crossingConditioningBlocked ||= crossing.conditioningBlocked;
       passCount += 1;
       push("rapid", {x: start.x, z: level}, passCount);
       if (hit && Math.abs(hit.x - start.x) > EPSILON) push("rough", {x: hit.x, z: level}, passCount);
@@ -1737,6 +2945,30 @@ function expandCycle({code, start, geometry, depth, retract, finishU, finishW, x
     }
   }
   push("rapid", start);
+  if (outsideDirectionUnresolved || crossingConditioningBlocked) {
+    warnings.push({
+      line,
+      code: "cycle-numerical-conditioning",
+      verificationBlocked: true,
+      message: "Canned-cycle direction or contour-intersection arithmetic is numerically unresolved; generated motion remains display-only and verification is blocked.",
+    });
+    for (const segment of segments) {
+      segment.verificationBlocked = true;
+      segment.verificationIssues = [...new Set([...(segment.verificationIssues || []), "cycle-numerical-conditioning"])];
+    }
+  }
+  if (segments.some((segment) => segment.geometryUncertaintyMm > PROFILE_NUMERICAL_BUDGET_MM)) {
+    warnings.push({
+      line,
+      code: "cycle-numerical-resolution",
+      verificationBlocked: true,
+      message: "Canned-cycle geometry cannot retain the required 0.00005 in numerical budget; generated motion remains display-only and verification is blocked.",
+    });
+    for (const segment of segments) {
+      segment.verificationBlocked = true;
+      segment.verificationIssues = [...new Set([...(segment.verificationIssues || []), "cycle-numerical-resolution"])];
+    }
+  }
   if (truncated) {
     warnings.push({
       line,
@@ -1790,6 +3022,8 @@ export function parseGcode(source, {
   const state = {
     x: Number.isFinite(initialPosition?.x) ? initialPosition.x : null,
     z: Number.isFinite(initialPosition?.z) ? initialPosition.z : null,
+    xUncertaintyMm: Number.isFinite(initialPosition?.x) ? numericUncertainty(initialPosition.x) : null,
+    zUncertaintyMm: Number.isFinite(initialPosition?.z) ? numericUncertainty(initialPosition.z) : null,
     xMode,
     referencePosition: isKnownPoint(referencePosition) ? {...referencePosition} : null,
     rapidBehavior, rapidXMax, rapidZMax, arcChordTolerance,
@@ -1816,12 +3050,17 @@ export function parseGcode(source, {
     cAxisEngaged: null,
     cAxisEngagementSource: "unknown",
     cAxisPosition: null,
+    cAxisPositionUncertaintyDegrees: null,
     g112Active: false,
     unconfiguredG112Active: false,
     faceX: null,
     faceY: null,
     faceZ: null,
+    faceXUncertaintyMm: null,
+    faceYUncertaintyMm: null,
+    faceZUncertaintyMm: null,
     g112PathTainted: false,
+    turningPathTainted: false,
     turningMode: "turning",
     unsupportedGroup01MotionMode: null,
     unsupportedGroup09MotionMode: null,
@@ -1966,10 +3205,16 @@ export function parseGcode(source, {
           });
           state.x = null;
           state.z = null;
+          state.xUncertaintyMm = null;
+          state.zUncertaintyMm = null;
           state.cAxisPosition = null;
+          state.cAxisPositionUncertaintyDegrees = null;
           state.faceX = null;
           state.faceY = null;
           state.faceZ = null;
+          state.faceXUncertaintyMm = null;
+          state.faceYUncertaintyMm = null;
+          state.faceZUncertaintyMm = null;
           state.g112PathTainted = true;
           if (unsupportedSpecialAxes.some((letter) => letter === "C" || letter === "H")) {
             cAxisMotions.push({
@@ -2040,8 +3285,10 @@ export function parseGcode(source, {
           } else warnings.push({line: record.line, message});
           continue;
         }
-        if (!isKnownPoint(state)) {
-          const message = `${code} cannot be expanded until the current X/Z position is known.`;
+        if (!isKnownPoint(state) || state.turningPathTainted) {
+          const message = state.turningPathTainted
+            ? `${code} cannot be expanded until a complete absolute G0 X/Z re-establishes the turning baseline.`
+            : `${code} cannot be expanded until the current X/Z position is known.`;
           if (state.liveToolDialect === "haas-lathe-ngc") {
             warningOnce(warnings, {line: record.line, code: "cycle-start-position-unresolved", verificationBlocked: true, message: `${message} Execution is blocked.`});
             invalidateExecutionState(state);
@@ -2059,12 +3306,19 @@ export function parseGcode(source, {
           });
           state.x = null;
           state.z = null;
+          state.xUncertaintyMm = null;
+          state.zUncertaintyMm = null;
           state.cAxisPosition = null;
+          state.cAxisPositionUncertaintyDegrees = null;
           continue;
         }
         const geometry = profileGeometry(contour.segments);
         const expanded = expandCycle({
           code, start: {x: state.x, z: state.z}, geometry,
+          startUncertaintyMm: physicalPointUncertaintyMm(
+            {x: state.xUncertaintyMm, z: state.zUncertaintyMm},
+            xMode === "diameter" ? 0.5 : 1,
+          ),
           depth: call.depth, retract: call.retract, finishU: call.finishU, finishW: call.finishW,
           xMode, line: record.line, p, q, rapidState: state,
         });
@@ -2093,6 +3347,15 @@ export function parseGcode(source, {
           }
           continue;
         }
+        if (state.turningPathTainted) {
+          warningOnce(warnings, {
+            line: record.line,
+            code: "cycle-start-position-unresolved",
+            verificationBlocked: true,
+            message: "G70 cannot execute until a complete absolute G0 X/Z re-establishes the turning baseline.",
+          });
+          continue;
+        }
         const contour = contourFor(records, startIndex, endIndex, state, xMode, warnings);
         if (!contour.validTurningContour) {
           warningOnce(warnings, {
@@ -2103,7 +3366,10 @@ export function parseGcode(source, {
           });
           state.x = null;
           state.z = null;
+          state.xUncertaintyMm = null;
+          state.zUncertaintyMm = null;
           state.cAxisPosition = null;
+          state.cAxisPositionUncertaintyDegrees = null;
           continue;
         }
         for (const segment of contour.segments) {
@@ -2122,6 +3388,8 @@ export function parseGcode(source, {
         }
         state.x = contour.state.x;
         state.z = contour.state.z;
+        state.xUncertaintyMm = contour.state.xUncertaintyMm;
+        state.zUncertaintyMm = contour.state.zUncertaintyMm;
         cycles.push({code: "G70", line: record.line, p, q, passes: 1, type: "finish"});
         continue;
       }
@@ -2168,9 +3436,6 @@ export function parseGcode(source, {
     const label = normalizedDefaultUnits === "in" ? "inches" : "millimeters";
     warnings.unshift({line: null, info: true, message: `No G20/G21 was found before motion; Program units are assuming ${label}.`});
   }
-  if (!state.sawPlane && segments.some((segment) => segment.type.startsWith("arc"))) {
-    warnings.unshift({line: null, message: "G18 was not present; arcs are assumed to use the lathe X/Z plane."});
-  }
   const liveToolAttempts = [...state.liveToolAttempts.values()].map((attempt) => {
     const sameLine = segments.filter((segment) => (segment.liveTool || segment.machiningMode === "live-tool")
       && (segment.executionLine || segment.line) === attempt.line);
@@ -2206,12 +3471,14 @@ export function parseGcode(source, {
       cAxisEngaged: state.cAxisEngaged,
       cAxisEngagementSource: state.cAxisEngagementSource,
       cAxisPosition: state.cAxisPosition,
+      cAxisPositionUncertaintyDegrees: state.cAxisPositionUncertaintyDegrees,
       plane: state.plane,
       coordinateMode: state.g112Active ? "g112-face" : "turning-xz",
       feedMode: state.feedMode,
       spindleRunning: state.spindleRunning,
       spindleDirection: state.spindleDirection,
       turningMode: state.turningMode,
+      turningPathTainted: state.turningPathTainted,
       executionBlocked: state.executionBlocked,
     },
   };

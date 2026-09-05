@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="application-name" content="G-Code Studio">
-  <meta name="description" content="Offline-first lathe G-code backplotter with stock-removal and chuck keep-out previews.">
+  <meta name="description" content="Offline-first lathe and 3-axis mill G-code backplotter with bounded, explicit machining semantics.">
   <meta name="robots" content="index,follow">
   <meta name="apple-mobile-web-app-title" content="G-Code Studio">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#071012">
-  <title>G-Code Studio — Lathe G-code backplotter</title>
+  <title>G-Code Studio — CNC G-code backplotter</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
@@ -26,7 +26,7 @@
             <h1><span class="brand-wordmark"><em>G-CODE</em> <b>STUDIO</b></span></h1>
             <span class="brand-signature">by Joseph H. Smith</span>
           </div>
-          <div class="brand-subline"><i aria-hidden="true"></i><span class="brand-subtitle">LATHE BACKPLOT</span></div>
+          <div class="brand-subline"><i aria-hidden="true"></i><span id="brandSubtitle" class="brand-subtitle">LATHE BACKPLOT</span></div>
         </div>
       </div>
       <div class="header-status">
@@ -38,8 +38,12 @@
       <div class="header-actions">
         <input id="fileInput" type="file" accept=".nc,.cnc,.tap,.gcode,.txt" hidden>
         <input id="originalFileInput" type="file" accept=".nc,.cnc,.tap,.gcode,.txt" hidden>
+        <input id="geometryFileInput" type="file" accept=".dxf" hidden>
+        <input id="stepFileInput" type="file" accept=".step,.stp" hidden>
         <button id="installButton" class="button secondary optional-action" hidden>Install</button>
         <button id="openButton" class="button secondary">Open G-code</button>
+        <button id="importGeometryButton" class="button secondary">Import DXF</button>
+        <button id="importStepButton" class="button secondary">Import STEP</button>
         <button id="compareButton" class="button secondary">Compare</button>
         <button id="saveButton" class="button secondary optional-action">Save as</button>
         <button id="plotButton" class="button primary">Plot program</button>
@@ -84,6 +88,7 @@
         <div class="editor-footer">
           <span>Graphics selection follows the source line</span>
           <span class="editor-sample-actions">
+            <button id="loadMillSampleButton" class="text-button">Mill sample</button>
             <button id="loadLiveBoreSampleButton" class="text-button">Live bore sample</button>
             <button id="loadSampleButton" class="text-button">Reset turning sample</button>
           </span>
@@ -111,14 +116,16 @@
             <button id="dimensionButton" class="toolbar-tool" type="button" aria-pressed="false" title="Pin exact line and radius dimensions in the 2D view">Dimension</button>
             <button id="clearDimensionsButton" class="toolbar-tool clear-tool" type="button" title="Remove all pinned dimensions" disabled>Clear dims</button>
           </div>
-          <div class="readout"><span>Z</span><strong id="zReadout">0.0000</strong><span>X</span><strong id="xReadout">0.0000</strong><small id="unitReadout">in</small></div>
+          <div id="latheReadout" class="readout"><span>Z</span><strong id="zReadout">0.0000</strong><span>X</span><strong id="xReadout">0.0000</strong><small id="unitReadout">in</small></div>
+          <div id="millReadout" class="readout" hidden><span>X</span><strong id="millXReadout">0.0000</strong><span>Y</span><strong id="millYReadout">0.0000</strong><span>Z</span><strong id="millZReadout">0.0000</strong><small id="millUnitReadout">in</small></div>
           <div class="legend">
             <span><i class="pending"></i>Pending</span>
             <span><i class="rapid"></i>Rapid</span>
-            <span><i class="rough"></i>Rough</span>
+            <span data-lathe-legend><i class="rough"></i>Rough</span>
             <span><i class="cut"></i>Cut</span>
             <span><i class="arc"></i>Arc</span>
-            <span><i class="live"></i>Live tool</span>
+            <span data-lathe-legend><i class="live"></i>Live tool</span>
+            <span data-lathe-legend><i class="reference"></i>Reference geometry</span>
           </div>
         </div>
         <div id="canvasWrap" class="canvas-wrap">
@@ -126,6 +133,10 @@
           <div id="faceViewStatus" class="face-view-status" role="status" aria-live="polite" hidden>
             <strong>FACE VIEW · PATH ONLY</strong>
             <span>Programmed live-tool centerlines and stock face only. No material-removal or cutter/holder collision claim.</span>
+          </div>
+          <div id="millViewStatus" class="mill-view-status" role="status" aria-live="polite" hidden>
+            <strong>3-AXIS MILL · COMMAND CENTERLINE · PATH ONLY</strong>
+            <span>Native XYZ programmed motion only. Stock, cutter diameter/length, compensation, work-offset transforms, fixtures, machine travel, and collision are not modeled.</span>
           </div>
           <div id="viewCube" class="view-cube" role="group" aria-label="3D view navigation" hidden>
             <canvas id="viewCubeCanvas" role="img" aria-label="Clickable view cube. Select a face, edge, or corner to orient the model."></canvas>
@@ -178,24 +189,30 @@
       <aside class="controls-panel panel">
         <div class="panel-heading machine-heading">
           <div class="machine-select-group">
-            <span class="eyebrow">SETUP</span>
-            <span class="machine-select-row">
+            <label class="machine-mode-control"><span class="eyebrow">MACHINE TYPE</span>
+              <select id="machineModeSelect" aria-label="Machine type">
+                <option value="lathe" selected>Lathe</option>
+                <option value="mill">3-axis mill</option>
+              </select>
+            </label>
+            <span id="latheMachineSelectRow" class="machine-select-row">
               <select id="machineSelect" aria-label="Selected machine">
                 <option value="hardinge-conquest-t42" selected>Hardinge Conquest T42 · Fanuc 18-T (Draft)</option>
                 <option value="generic-lathe">Generic lathe</option>
               </select>
               <button id="editMachineButton" type="button" aria-label="View or edit selected machine">Edit</button>
             </span>
+            <span id="millSetupIdentity" class="mill-setup-identity" hidden>Generic Fanuc-style 3-axis mill · bounded path subset</span>
           </div>
         </div>
         <div class="control-stack">
-          <label>Orientation
+          <label id="latheOrientationControl">Orientation
             <select id="orientationSelect">
               <option value="left">Chuck left</option>
               <option value="right">Chuck right</option>
             </select>
           </label>
-          <label>X programming
+          <label id="latheXModeControl">X programming
             <select id="xModeSelect">
               <option value="diameter">Diameter</option>
               <option value="radius">Radius</option>
@@ -223,6 +240,91 @@
             </select>
             <small id="graphicsQualityHint" class="quality-hint">Maximum surface resolution and 0.0001 in arc display chord.</small>
           </label>
+          <div id="latheSetupControls" class="lathe-setup-controls">
+          <details id="referenceGeometrySetup" class="reference-geometry-setup">
+            <summary><span>REFERENCE GEOMETRY</span><strong id="referenceGeometrySummary">NONE</strong></summary>
+            <div class="reference-geometry-body">
+              <p id="referenceGeometryFile">Import an ASCII DXF or a STEP solid to create an analytic 2D reference.</p>
+              <label class="reference-shared-tolerance"><span>Path tolerance (<span data-unit-label>in</span>)</span><input id="referenceGeometryTolerance" type="number" min="0.000001" step="0.0001" value="0.0005"></label>
+              <div id="referenceDxfControls">
+                <div class="field-pair">
+                  <label>DXF units
+                    <select id="referenceGeometryUnits">
+                      <option value="">Select explicitly</option>
+                      <option value="inch">Inches</option>
+                      <option value="mm">Millimeters</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="field-pair">
+                  <label>DXF X at program Z0 (DXF units)<input id="referenceGeometryOriginX" type="number" step="any" value="0"></label>
+                  <label>DXF Y at spindle X0 (DXF units)<input id="referenceGeometryOriginY" type="number" step="any" value="0"></label>
+                </div>
+                <div class="field-pair">
+                  <label>DXF +X maps to
+                    <select id="referenceGeometryZDirection">
+                      <option value="1">Program +Z</option>
+                      <option value="-1">Program −Z</option>
+                    </select>
+                  </label>
+                  <label>DXF +Y maps to
+                    <select id="referenceGeometryXDirection">
+                      <option value="1">Physical +X radius</option>
+                      <option value="-1">Physical −X radius</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div id="referenceStepControls" class="reference-step-controls" hidden>
+                <p>Choose the longitudinal section explicitly. This bounded slice accepts one valid solid (not an assembly). STEP geometry is transferred to millimeters by Open CASCADE; no display mesh enters the dimensional comparison.</p>
+                <div class="field-pair three-fields">
+                  <label>Model axial axis
+                    <select id="stepAxialAxis">
+                      <option value="">Select</option><option value="x">X</option><option value="y">Y</option><option value="z">Z</option>
+                    </select>
+                  </label>
+                  <label>Model radial axis
+                    <select id="stepRadialAxis">
+                      <option value="">Select</option><option value="x">X</option><option value="y">Y</option><option value="z">Z</option>
+                    </select>
+                  </label>
+                  <label>Plane normal
+                    <select id="stepNormalAxis">
+                      <option value="">Select</option><option value="x">X</option><option value="y">Y</option><option value="z">Z</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="field-pair">
+                  <label>Plane coordinate (mm)<input id="stepPlaneOffset" type="number" step="any" value="0"></label>
+                  <label>Section contour
+                    <select id="stepContour"><option value="">Build section first</option></select>
+                  </label>
+                </div>
+                <div class="field-pair">
+                  <label>Axial coordinate at program Z0 (mm)<input id="stepAxialOrigin" type="number" step="any" value="0"></label>
+                  <label>Radial coordinate at spindle X0 (mm)<input id="stepRadialOrigin" type="number" step="any" value="0"></label>
+                </div>
+                <div class="field-pair">
+                  <label>Model axial + maps to
+                    <select id="stepAxialDirection"><option value="1">Program +Z</option><option value="-1">Program −Z</option></select>
+                  </label>
+                  <label>Model radial + maps to
+                    <select id="stepRadialDirection"><option value="1">Physical +X radius</option><option value="-1">Physical −X radius</option></select>
+                  </label>
+                </div>
+                <button id="buildStepSectionButton" type="button" class="build-step-section">Build analytic section</button>
+              </div>
+              <label class="toggle-row"><input id="referenceGeometryToggle" type="checkbox" checked><span>Show reference overlay</span></label>
+              <div class="reference-geometry-results" aria-live="polite">
+                <div><span>Import</span><strong id="referenceGeometryImportStatus">NO FILE</strong></div>
+                <div><span>Path alignment</span><strong id="referenceGeometryAlignmentStatus">—</strong></div>
+                <div><span>Maximum deviation</span><strong id="referenceGeometryDeviation">—</strong></div>
+              </div>
+              <ul id="referenceGeometryDiagnostics" class="reference-geometry-diagnostics"><li>Import an analytic DXF profile or section an exact STEP solid locally.</li></ul>
+              <button id="removeGeometryButton" type="button" class="remove-reference-geometry" disabled>Remove reference geometry</button>
+              <p class="reference-geometry-boundary">This is a directed programmed-path comparison against the selected analytic reference contour. It does not prove finished-part size, machine accuracy, tool compensation, assembly correctness, or collision clearance.</p>
+            </div>
+          </details>
           <details id="programToolsSetup" class="tool-assembly-setup">
             <summary><span>PROGRAM TOOLS</span><strong id="programToolSummary">NO T CALLS</strong></summary>
             <div class="tool-assembly-body">
@@ -252,17 +354,22 @@
           <label><span>Safety clearance (<span data-unit-label>in</span>)</span><input id="clearanceInput" type="number" min="0" step="0.005" value="0.12"></label>
           <label class="toggle-row"><input id="collisionToggle" type="checkbox" checked><span>Show collision envelope</span></label>
           <p class="quality-note">Image quality controls display tessellation only. Stock proof uses a separate fixed physical sampling tolerance; neither setting changes G-code or certifies machining accuracy.</p>
+          </div>
+          <div id="millSetupBoundary" class="mill-setup-boundary" hidden>
+            <strong>FANUC-STYLE 3-AXIS PATH SUBSET</strong>
+            <p>G0/G1 XYZ and G2/G3 in G17 are rendered as programmed command centerlines. Startup requires explicit G40, G49 or G43 H, G80, G90/G91, G94, and G54; I/J arcs also require G90.1/G91.1. Dashed multi-axis G0 lines connect commanded endpoints only. Unsupported controller behavior blocks downstream geometry instead of being ignored.</p>
+          </div>
         </div>
 
         <div class="stats-grid">
           <div><span>BLOCKS</span><strong id="motionCount">0</strong></div>
           <div><span>CYCLES</span><strong id="cycleCount">0</strong></div>
-          <div><span>LIVE TOOL</span><strong id="liveToolStatus" class="muted-value" aria-live="polite">UNKNOWN</strong></div>
+          <div><span id="operationModeLabel">LIVE TOOL</span><strong id="liveToolStatus" class="muted-value" aria-live="polite">UNKNOWN</strong></div>
           <div class="runtime-stat"><span>PROGRAM CYCLE TIME</span><strong id="cycleTimeStat" aria-live="polite">—</strong></div>
           <div><span>CUT DIST.</span><strong id="cutDistance">0 mm</strong></div>
           <div><span>RAPID DIST.</span><strong id="rapidDistance">0 mm</strong></div>
-          <div><span>STOCK REMOVED</span><strong id="stockRemoved">0%</strong></div>
-          <div><span>CLEARANCE</span><strong id="collisionStatus" class="safe-value">CLEAR</strong></div>
+          <div><span id="stockStatusLabel">STOCK REMOVED</span><strong id="stockRemoved">0%</strong></div>
+          <div><span id="clearanceStatusLabel">CLEARANCE</span><strong id="collisionStatus" class="safe-value">CLEAR</strong></div>
           <div><span>BOUNDS</span><strong id="boundsReadout">—</strong></div>
         </div>
 
@@ -270,7 +377,7 @@
           <div class="section-title"><span>PROGRAM NOTES</span><span id="warningCount" class="chip">0</span></div>
           <ul id="warningList"><li class="muted">No parser warnings.</li></ul>
         </div>
-        <p class="safety-note">Preview only — the keep-out is a tool-point envelope, not full machine collision verification. Prove out with the control's approved process.</p>
+        <p id="workspaceSafetyNote" class="safety-note">Preview only — the keep-out is a tool-point envelope, not full machine collision verification. Prove out with the control's approved process.</p>
       </aside>
     </main>
 
@@ -573,7 +680,7 @@
         </footer>
       </div>
     </dialog>
-    <div id="dropOverlay" class="drop-overlay" hidden><strong>Drop G-code to open</strong><span>.nc · .cnc · .tap · .gcode · .txt</span></div>
+    <div id="dropOverlay" class="drop-overlay" hidden><strong>Drop G-code, DXF, or STEP to open</strong><span>.nc · .cnc · .tap · .gcode · .txt · .dxf · .step · .stp</span></div>
   </div>
   <script type="module" src="app.mjs"></script>
 </body>

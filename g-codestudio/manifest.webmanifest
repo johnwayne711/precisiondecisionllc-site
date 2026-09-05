@@ -1,7 +1,7 @@
 {
-  "name": "G-Code Studio — Lathe G-code Backplotter",
+  "name": "G-Code Studio — CNC G-code Backplotter",
   "short_name": "G-Code Studio",
-  "description": "Preview lathe G-code motion, canned cycles, stock removal, and chuck keep-out locally.",
+  "description": "Preview bounded lathe and 3-axis mill G-code motion locally.",
   "id": "./",
   "start_url": "./",
   "scope": "./",

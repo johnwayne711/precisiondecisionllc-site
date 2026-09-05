@@ -163,7 +163,17 @@ function cubePoint(values = {}) {
   return {x: values.x || 0, y: values.y || 0, z: values.z || 0};
 }
 
-function cubeDirectionLabel(direction) {
+function cubeDirectionLabel(direction, coordinateSystem = "lathe") {
+  if (coordinateSystem === "mill") {
+    const labels = [];
+    if (direction.z > 0) labels.push("Top +Z");
+    if (direction.z < 0) labels.push("Bottom -Z");
+    if (direction.y > 0) labels.push("+Y");
+    if (direction.y < 0) labels.push("-Y");
+    if (direction.x > 0) labels.push("+X");
+    if (direction.x < 0) labels.push("-X");
+    return labels.join(" ");
+  }
   const labels = [];
   if (direction.y > 0) labels.push("Top");
   if (direction.y < 0) labels.push("Bottom");
@@ -178,7 +188,7 @@ function cubeZoneId(direction) {
   return CUBE_AXES.map((axis) => `${axis}${direction[axis] > 0 ? "+" : direction[axis] < 0 ? "-" : "0"}`).join("");
 }
 
-export function viewCubeZones() {
+export function viewCubeZones(coordinateSystem = "lathe") {
   const zones = [];
   for (const axis of CUBE_AXES) {
     const others = CUBE_AXES.filter((candidate) => candidate !== axis);
@@ -190,7 +200,7 @@ export function viewCubeZones() {
         cubePoint({[axis]: sign, [others[0]]: CUBE_BEVEL, [others[1]]: CUBE_BEVEL}),
         cubePoint({[axis]: sign, [others[0]]: -CUBE_BEVEL, [others[1]]: CUBE_BEVEL}),
       ];
-      zones.push({id: `face-${cubeZoneId(direction)}`, kind: "face", label: cubeDirectionLabel(direction), direction, points});
+      zones.push({id: `face-${cubeZoneId(direction)}`, kind: "face", label: cubeDirectionLabel(direction, coordinateSystem), direction, points});
     }
   }
 
@@ -208,7 +218,7 @@ export function viewCubeZones() {
             cubePoint({[first]: firstSign * CUBE_BEVEL, [second]: secondSign, [remaining]: CUBE_BEVEL}),
             cubePoint({[first]: firstSign * CUBE_BEVEL, [second]: secondSign, [remaining]: -CUBE_BEVEL}),
           ];
-          const label = `${cubeDirectionLabel(direction)} edge`;
+          const label = `${cubeDirectionLabel(direction, coordinateSystem)} edge`;
           zones.push({id: `edge-${cubeZoneId(direction)}`, kind: "edge", label, direction, points});
         }
       }
@@ -224,7 +234,7 @@ export function viewCubeZones() {
           {x: x * CUBE_BEVEL, y, z: z * CUBE_BEVEL},
           {x: x * CUBE_BEVEL, y: y * CUBE_BEVEL, z},
         ];
-        const label = `${cubeDirectionLabel(direction)} corner`;
+        const label = `${cubeDirectionLabel(direction, coordinateSystem)} corner`;
         zones.push({id: `corner-${cubeZoneId(direction)}`, kind: "corner", label, direction, points});
       }
     }
@@ -265,11 +275,12 @@ export function viewCubeHitTarget(regions, x, y) {
 
 export function renderViewCube(context, {
   width = 124, height = 116, camera = {yaw: -Math.PI / 4, pitch: Math.asin(1 / Math.sqrt(3))}, hoverTarget = null,
+  coordinateSystem = "lathe",
 } = {}) {
   context.clearRect(0, 0, width, height);
   const center = {x: width * 0.58, y: height * 0.49};
   const scale = Math.min(width, height) * 0.265;
-  const regions = viewCubeZones().map((zone) => {
+  const regions = viewCubeZones(coordinateSystem).map((zone) => {
     const normal = rotateForCube(zone.direction, camera);
     const rotatedPoints = zone.points.map((point) => rotateForCube(point, camera));
     const points = sortPolygonPoints(rotatedPoints.map((point) => ({
@@ -321,11 +332,17 @@ export function renderViewCube(context, {
   }
 
   const axisOrigin = {x: 16, y: height - 17};
-  const axes = [
-    {point: {x: 1, y: 0, z: 0}, label: "Z", color: "#f59e0b"},
-    {point: {x: 0, y: 1, z: 0}, label: "X", color: "#56e39f"},
-    {point: {x: 0, y: 0, z: 1}, label: "", color: "#38bdf8"},
-  ];
+  const axes = coordinateSystem === "mill"
+    ? [
+      {point: {x: 1, y: 0, z: 0}, label: "X", color: "#fb7185"},
+      {point: {x: 0, y: 1, z: 0}, label: "Y", color: "#56e39f"},
+      {point: {x: 0, y: 0, z: 1}, label: "Z", color: "#38bdf8"},
+    ]
+    : [
+      {point: {x: 1, y: 0, z: 0}, label: "Z", color: "#f59e0b"},
+      {point: {x: 0, y: 1, z: 0}, label: "X", color: "#56e39f"},
+      {point: {x: 0, y: 0, z: 1}, label: "", color: "#38bdf8"},
+    ];
   for (const axis of axes) {
     const rotated = rotateForCube(axis.point, camera);
     const end = {x: axisOrigin.x + rotated.x * 16, y: axisOrigin.y - rotated.y * 16};
