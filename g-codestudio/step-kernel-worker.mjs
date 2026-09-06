@@ -31,6 +31,8 @@ async function execute(request) {
       }
     } else if (type === "section") {
       result = await runtime.section(request.section ?? {});
+    } else if (type === "preview") {
+      result = await runtime.preview();
     } else if (type === "release") {
       result = runtime.release();
     } else {

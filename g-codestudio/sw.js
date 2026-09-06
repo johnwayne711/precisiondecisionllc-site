@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "verify-app-";
-const CACHE_NAME = "verify-app-v59";
+const CACHE_NAME = "verify-app-v64";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -13,6 +13,13 @@ const APP_ASSETS = [
   "./step-worker-client.mjs",
   "./step-kernel-worker.mjs",
   "./step-kernel-runtime.mjs",
+  "./solid-preview.mjs",
+  "./solid-navigation.mjs",
+  "./solid-mesh-renderer.mjs",
+  "./vendor/three/0.180.0/cad-controls.mjs",
+  "./solid-setup.mjs",
+  "./solid-setup-dialog.mjs",
+  "./samples/sample-g71-finished-part.step",
   "./view3d.mjs",
   "./graphics-quality.mjs",
   "./render-scheduler.mjs",

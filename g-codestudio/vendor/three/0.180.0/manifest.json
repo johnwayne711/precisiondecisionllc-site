@@ -1,0 +1,13 @@
+{
+  "package": "three",
+  "version": "0.180.0",
+  "upstream": "https://github.com/mrdoob/three.js/tree/r180",
+  "license": "MIT",
+  "patches": [
+    "Orthographic onPinchMove: scale around the previous touch midpoint before midpoint pan",
+    "Orthographic onRotateMove: twist around the previous touch midpoint before midpoint pan"
+  ],
+  "file": "cad-controls.mjs",
+  "bytes": 540357,
+  "sha256": "d1dc59b5d528542155cd0422c0ab38f4a084f3f644077fba0352b87732134d78"
+}

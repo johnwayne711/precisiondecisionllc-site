@@ -1,5 +1,6 @@
 export const MAX_STEP_BYTES = 25 * 1024 * 1024;
 export const STEP_KERNEL_TIMEOUT_MS = 120_000;
+export const STEP_PREVIEW_TIMEOUT_MS = 35_000;
 
 function normalizeWorkerError(error, fallback = "The STEP geometry worker failed.") {
   if (error instanceof Error) return error;
@@ -20,16 +21,20 @@ export class StepKernelClient {
   #pending = new Map();
   #nextId = 1;
   #timeoutMs;
+  #previewTimeoutMs;
   #closed = false;
 
   constructor({
     WorkerImpl = globalThis.Worker,
     workerUrl = new URL("./step-kernel-worker.mjs", import.meta.url),
     timeoutMs = STEP_KERNEL_TIMEOUT_MS,
+    previewTimeoutMs = STEP_PREVIEW_TIMEOUT_MS,
   } = {}) {
     if (typeof WorkerImpl !== "function") throw new Error("This browser cannot run the local STEP geometry worker.");
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError("STEP worker timeout must be positive.");
+    if (!Number.isFinite(previewTimeoutMs) || previewTimeoutMs <= 0) throw new RangeError("STEP preview timeout must be positive.");
     this.#timeoutMs = timeoutMs;
+    this.#previewTimeoutMs = previewTimeoutMs;
     this.#worker = new WorkerImpl(workerUrl, {type: "module", name: "gcode-studio-step-kernel"});
     this.#worker.addEventListener("message", (event) => this.#onMessage(event.data));
     this.#worker.addEventListener("error", (event) => {
@@ -64,6 +69,10 @@ export class StepKernelClient {
       return Promise.reject(new TypeError("STEP section requires an explicit principal normal axis and finite millimeter plane coordinate."));
     }
     return this.#request("section", {section: {...section}});
+  }
+
+  preview() {
+    return this.#request("preview", {}, [], Math.min(this.#timeoutMs, this.#previewTimeoutMs));
   }
 
   async release() {

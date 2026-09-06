@@ -15,6 +15,10 @@ export const STEP_KERNEL_LIMITS = Object.freeze({
   maxVertices: 100_000,
   maxSectionEdges: 4_096,
   maxSectionVertices: 8_192,
+  maxPreviewFaces: 4_096,
+  maxPreviewTriangles: 100_000,
+  maxPreviewNodes: 300_000,
+  maxPreviewElapsedMs: 30_000,
   maxCoordinateAbsMm: 1_000_000_000,
   maxWasmMemoryBytes: 512 * MEBIBYTE,
   maxImportElapsedMs: 60_000,
@@ -245,7 +249,8 @@ function ensureMemoryLimit(module) {
 }
 
 function ensureElapsed(startedAt, ceiling, stage, now) {
-  if (now() - startedAt > ceiling) fail(`${stage}_TIME_LIMIT`, `${stage === "STEP_IMPORT" ? "STEP import" : "STEP section"} exceeded its processing-time ceiling.`);
+  const label = stage === "STEP_IMPORT" ? "STEP import" : stage === "STEP_PREVIEW" ? "STEP solid preview" : "STEP section";
+  if (now() - startedAt > ceiling) fail(`${stage}_TIME_LIMIT`, `${label} exceeded its processing-time ceiling.`);
 }
 
 function validateSourceRequest(source, bytes) {
@@ -724,6 +729,140 @@ function groupContours(records) {
   return contours;
 }
 
+// These bounds and tessellation are only for viewport framing and face picking.
+// Analytic sections never consume a triangulation or a displayed extent.
+function previewBounds(module, shape) {
+  const box = new module.Bnd_Box();
+  let minimum;
+  let maximum;
+  try {
+    module.BRepBndLib.AddOptimal(shape, box, false, false);
+    if (box.IsVoid() || box.IsOpen() || box.IsWhole()) {
+      fail("STEP_PREVIEW_BOUNDS", "The solid does not have bounded finite display extents.");
+    }
+    minimum = box.CornerMin();
+    maximum = box.CornerMax();
+    return {min: pointDto(minimum), max: pointDto(maximum)};
+  } finally {
+    dispose(maximum, minimum, box);
+  }
+}
+
+function previewSurface(module, face) {
+  const adaptor = new module.BRepAdaptor_Surface(face, true);
+  let surface;
+  let position;
+  let origin;
+  let direction;
+  try {
+    const type = adaptor.GetType();
+    const plane = type === module.GeomAbs_SurfaceType.GeomAbs_Plane;
+    const cylinder = type === module.GeomAbs_SurfaceType.GeomAbs_Cylinder;
+    if (!plane && !cylinder) return {kind: "other"};
+    surface = plane ? adaptor.Plane() : adaptor.Cylinder();
+    position = surface.Axis();
+    origin = position.Location();
+    direction = position.Direction();
+    const nativeDirection = directionDto(direction);
+    const shared = {origin: pointDto(origin), metadataAuthority: "analytic-brep-surface"};
+    if (plane) {
+      const reversed = face.Orientation() === module.TopAbs_Orientation.TopAbs_REVERSED;
+      return {kind: "plane", ...shared, normal: reversed ? reverseVector(nativeDirection) : nativeDirection};
+    }
+    const radiusMm = surface.Radius();
+    if (!Number.isFinite(radiusMm) || radiusMm <= 0 || radiusMm > STEP_KERNEL_LIMITS.maxCoordinateAbsMm) {
+      fail("STEP_PREVIEW_SURFACE", "The solid contains an invalid cylindrical face radius.");
+    }
+    return {kind: "cylinder", ...shared, axis: nativeDirection, radiusMm};
+  } finally {
+    dispose(direction, origin, position, surface, adaptor);
+  }
+}
+
+function extractSolidPreview(module, shape, topology, now, startedAt) {
+  if (topology.faceCount > STEP_KERNEL_LIMITS.maxPreviewFaces) {
+    fail("STEP_PREVIEW_FACE_LIMIT", `Solid preview exceeds the ${STEP_KERNEL_LIMITS.maxPreviewFaces}-face display limit. Analytic import remains available.`);
+  }
+  const bounds = previewBounds(module, shape);
+  const map = new module.NCollection_IndexedMap_TopoDS_Shape_TopTools_ShapeMapHasher();
+  const faces = [];
+  let triangleCount = 0;
+  let nodeCount = 0;
+  // A fixed visual chord target, deliberately unrelated to comparison tolerance.
+  const displayDeflectionMm = 0.00254;
+  try {
+    module.TopExp.MapShapes(shape, module.TopAbs_ShapeEnum.TopAbs_FACE, map);
+    for (let index = 1; index <= map.Extent(); index += 1) {
+      ensureElapsed(startedAt, STEP_KERNEL_LIMITS.maxPreviewElapsedMs, "STEP_PREVIEW", now);
+      const generic = map.FindKey(index);
+      const face = module.TopoDS.Face(generic);
+      const location = new module.TopLoc_Location();
+      let mesher;
+      let triangulation;
+      let transform;
+      try {
+        const metadata = previewSurface(module, face);
+        // Per-face meshing permits resource checks between faces. No approximation
+        // of the underlying B-rep, healing, or comparison tolerance is requested.
+        mesher = new module.BRepMesh_IncrementalMesh(face, displayDeflectionMm, false, 0.25, false);
+        if (!mesher.IsDone() || mesher.GetStatusFlags() !== 0) {
+          fail("STEP_PREVIEW_MESH_FAILED", "The solid could not be completely tessellated for display.");
+        }
+        triangulation = module.BRep_Tool.Triangulation(face, location, 0);
+        if (!triangulation) fail("STEP_PREVIEW_MESH_FAILED", "A solid face has no display triangulation.");
+        const faceTriangles = triangulation.NbTriangles();
+        const faceNodes = triangulation.NbNodes();
+        if (!Number.isSafeInteger(faceTriangles) || faceTriangles < 1 || !Number.isSafeInteger(faceNodes) || faceNodes < 3) {
+          fail("STEP_PREVIEW_MESH_FAILED", "A solid face has an invalid display triangulation.");
+        }
+        triangleCount += faceTriangles;
+        nodeCount += faceNodes;
+        if (triangleCount > STEP_KERNEL_LIMITS.maxPreviewTriangles || nodeCount > STEP_KERNEL_LIMITS.maxPreviewNodes) {
+          fail("STEP_PREVIEW_MESH_LIMIT", "Solid preview exceeds the bounded triangle/node display budget. Analytic import remains available.");
+        }
+        ensureMemoryLimit(module);
+        transform = location.Transformation();
+        const triangles = [];
+        const reversed = face.Orientation() === module.TopAbs_Orientation.TopAbs_REVERSED;
+        for (let triangleIndex = 1; triangleIndex <= faceTriangles; triangleIndex += 1) {
+          const triangle = triangulation.Triangle(triangleIndex);
+          try {
+            for (const corner of reversed ? [1, 3, 2] : [1, 2, 3]) {
+              const nodeIndex = triangle.Value(corner);
+              if (!Number.isSafeInteger(nodeIndex) || nodeIndex < 1 || nodeIndex > faceNodes) {
+                fail("STEP_PREVIEW_MESH_FAILED", "A display triangle references an invalid vertex.");
+              }
+              const node = triangulation.Node(nodeIndex);
+              let transformed;
+              try {
+                transformed = node.Transformed(transform);
+                const point = pointDto(transformed);
+                triangles.push(point.x, point.y, point.z);
+              } finally {
+                dispose(transformed, node);
+              }
+            }
+          } finally {
+            dispose(triangle);
+          }
+          if (triangleIndex % 1_000 === 0) ensureElapsed(startedAt, STEP_KERNEL_LIMITS.maxPreviewElapsedMs, "STEP_PREVIEW", now);
+        }
+        faces.push({id: `face-${index}`, ...metadata, triangles});
+      } finally {
+        dispose(transform, triangulation, mesher, location, face, generic);
+      }
+    }
+    ensureMemoryLimit(module);
+    ensureElapsed(startedAt, STEP_KERNEL_LIMITS.maxPreviewElapsedMs, "STEP_PREVIEW", now);
+    return {bounds, boundsAuthority: "brep-derived-display-extents", faces, triangleCount, displayDeflectionMm};
+  } finally {
+    dispose(map);
+    // Do not retain an extra mesh in the worker after returning the DTO. The
+    // original analytic B-rep remains the dimensional section source of truth.
+    module.BRepTools.Clean(shape, false);
+  }
+}
+
 export class StepKernelRuntime {
   #fetchImpl;
   #cryptoImpl;
@@ -933,6 +1072,27 @@ export class StepKernelRuntime {
       fail("STEP_SECTION_FAILED", "The local geometry kernel blocked this STEP section.");
     } finally {
       dispose(sectionShape, algorithm, plane, direction, point);
+    }
+  }
+
+  async preview() {
+    if (!this.#shape || !this.#metadata) fail("STEP_NOT_LOADED", "Load one authorized STEP solid before requesting a preview.");
+    const startedAt = this.#now();
+    const module = await this.#module();
+    try {
+      const preview = extractSolidPreview(module, this.#shape, this.#metadata.topology, this.#now, startedAt);
+      return {
+        schemaVersion: 1,
+        format: "step-solid-preview",
+        source: {...this.#metadata.source},
+        coordinateUnits: {...this.#metadata.coordinateUnits},
+        kernel: {...this.#metadata.kernel},
+        displayOnly: true,
+        ...preview,
+      };
+    } catch (error) {
+      if (error instanceof StepKernelError) throw error;
+      fail("STEP_PREVIEW_FAILED", "The local geometry kernel could not create the solid display. Analytic import remains available.");
     }
   }
 

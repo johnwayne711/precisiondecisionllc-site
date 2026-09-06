@@ -351,6 +351,10 @@ function validateMapping(mapping, limits, state) {
   if (!validContourId(mapping.selectedContourId, limits.maxStringLength)) {
     state.add("error", "selected-contour-required", "An explicit selectedContourId is required, even when the section contains one contour.");
   }
+  const profileSide = mapping.profileSide === undefined ? null : mapping.profileSide;
+  if (profileSide !== null && profileSide !== "positive") {
+    state.add("error", "mapping-profile-side-invalid", "STEP lathe-profile extraction supports only the explicitly mapped physical positive-radius side.");
+  }
   return {
     axialAxis,
     radialAxis,
@@ -361,6 +365,7 @@ function validateMapping(mapping, limits, state) {
     axialDirection: mapping.axialDirection,
     radialDirection: mapping.radialDirection,
     selectedContourId: mapping.selectedContourId,
+    profileSide,
   };
 }
 
@@ -690,6 +695,267 @@ function processContour(contour, contourIndex, mapping, baseToleranceMm, limits,
   };
 }
 
+function primitiveEndpointBound(primitive) {
+  return Math.max(primitive.geometryUncertaintyMm ?? 0, primitive.endpointUncertaintyMm ?? 0);
+}
+
+function profileSource(primitive, start, end) {
+  return {...primitive.source, profileSide: "positive-radius", sourceParameterRange: [start, end]};
+}
+
+function clipLineToPositiveRadius(primitive, state) {
+  const {start, end} = primitive;
+  const sideBoundMm = primitiveEndpointBound(primitive);
+  if (start.x === 0 && end.x === 0) {
+    state.add("error", "profile-centerline-edge-ambiguous", "The selected section contains an edge on the spindle centerline, so a unique machining-side profile cannot be extracted.");
+    return null;
+  }
+  const classify = (value) => value === 0 ? 0 : value > sideBoundMm ? 1 : value < -sideBoundMm ? -1 : null;
+  const startSide = classify(start.x), endSide = classify(end.x);
+  if (startSide === null || endSide === null) {
+    state.add("error", "profile-line-side-uncertain", "A section line endpoint is uncertainty-close to the spindle centerline, so its machining side is not provable.");
+    return null;
+  }
+  const dx = end.x - start.x;
+  const dz = end.z - start.z;
+  const length = Math.hypot(dx, dz);
+  const arithmeticMm = roundingBound([start.x, start.z, end.x, end.z, dx, dz], 64);
+  const radialSlope = Math.abs(dx) / length;
+  let axisEndpointBoundMm = 0;
+  if (startSide === 0 || endSide === 0) {
+    axisEndpointBoundMm = (sideBoundMm + arithmeticMm) / radialSlope;
+    if (!finite(axisEndpointBoundMm) || axisEndpointBoundMm > STEP_NUMERICAL_BUDGET_MM) {
+      state.add("error", "profile-line-crossing-ill-conditioned", "A section edge meets the spindle centerline too shallowly to preserve the STEP numerical budget.");
+      return null;
+    }
+  }
+  if (startSide >= 0 && endSide >= 0) return [{
+    ...primitive,
+    source: profileSource(primitive, 0, 1),
+    endpointUncertaintyMm: Math.max(primitive.endpointUncertaintyMm ?? 0, axisEndpointBoundMm),
+    geometryUncertaintyMm: Math.max(primitive.geometryUncertaintyMm, axisEndpointBoundMm),
+  }];
+  if (startSide <= 0 && endSide <= 0) return [];
+  const parameter = -start.x / dx;
+  const crossingArithmeticMm = arithmeticMm + roundingBound([parameter], 64);
+  const crossingUncertaintyMm = (primitiveEndpointBound(primitive) + crossingArithmeticMm) / radialSlope;
+  if (!finite(parameter) || !(parameter > 0 && parameter < 1) || !finite(crossingUncertaintyMm)
+    || crossingUncertaintyMm > STEP_NUMERICAL_BUDGET_MM) {
+    state.add("error", "profile-line-crossing-ill-conditioned", "A section edge crosses the spindle centerline too shallowly to preserve the STEP numerical budget.");
+    return null;
+  }
+  const crossing = {z: start.z + dz * parameter, x: 0};
+  const keepStart = start.x > 0;
+  const clipped = {
+    ...primitive,
+    id: `${String(primitive.id)}:profile`,
+    start: keepStart ? start : crossing,
+    end: keepStart ? crossing : end,
+    source: profileSource(primitive, keepStart ? 0 : parameter, keepStart ? parameter : 1),
+    endpointUncertaintyMm: Math.max(primitive.endpointUncertaintyMm ?? 0, crossingUncertaintyMm),
+    geometryUncertaintyMm: Math.max(primitive.geometryUncertaintyMm, crossingUncertaintyMm),
+  };
+  if (distance2(clipped.start, clipped.end) <= clipped.geometryUncertaintyMm) {
+    state.add("error", "profile-line-sliver", "Clipping produced a line fragment too small to distinguish from its uncertainty envelope.");
+    return null;
+  }
+  return [clipped];
+}
+
+function arcPoint(primitive, angle, parameter) {
+  if (primitive.type === "arc" && parameter === 0) return primitive.start;
+  if (primitive.type === "arc" && parameter === 1) return primitive.end;
+  return {z: primitive.center.z + Math.cos(angle) * primitive.radius, x: primitive.center.x + Math.sin(angle) * primitive.radius};
+}
+
+function clipRoundPrimitiveToPositiveRadius(primitive, state) {
+  const startAngle = primitive.type === "circle" ? 0 : primitive.startAngle;
+  const sweep = primitive.type === "circle" ? TAU : primitive.sweep;
+  const ratio = -primitive.center.x / primitive.radius;
+  const radialEnvelopeMm = primitiveEndpointBound(primitive)
+    + roundingBound([primitive.center.z, primitive.center.x, primitive.radius, startAngle, sweep], 64);
+  const tangentAngle = primitive.center.x >= 0 ? -Math.PI / 2 : Math.PI / 2;
+  const tangentFallsOnPrimitive = primitive.type === "circle" || angleOnSweep(tangentAngle, startAngle, sweep);
+  if (tangentFallsOnPrimitive && Math.abs(Math.abs(primitive.center.x) - primitive.radius) <= radialEnvelopeMm) {
+    state.add("error", "profile-arc-tangent-ambiguous", "A circular section edge is tangent or uncertainty-close to the spindle centerline, so its machining side is ambiguous.");
+    return null;
+  }
+  if (primitive.type === "arc" && [primitive.start, primitive.end]
+    .some((endpoint) => endpoint.x !== 0 && Math.abs(endpoint.x) <= radialEnvelopeMm)) {
+    state.add("error", "profile-arc-side-uncertain", "A circular section endpoint is uncertainty-close to the spindle centerline, so its machining side is not provable.");
+    return null;
+  }
+  const rootBounds = new Map();
+  if (primitive.type === "arc") {
+    for (const [parameter, angle, endpoint] of [[0, startAngle, primitive.start], [1, startAngle + sweep, primitive.end]]) {
+      if (endpoint.x !== 0) continue;
+      const crossingUncertaintyMm = radialEnvelopeMm / Math.abs(Math.cos(angle));
+      if (!finite(crossingUncertaintyMm) || crossingUncertaintyMm > STEP_NUMERICAL_BUDGET_MM) {
+        state.add("error", "profile-arc-crossing-ill-conditioned", "A circular section edge meets the spindle centerline too close to tangency to preserve the STEP numerical budget.");
+        return null;
+      }
+      rootBounds.set(parameter, crossingUncertaintyMm);
+    }
+  }
+  const roots = [];
+  if (Math.abs(ratio) < 1) {
+    const base = Math.asin(ratio);
+    const low = Math.min(startAngle, startAngle + sweep);
+    const high = Math.max(startAngle, startAngle + sweep);
+    for (const family of [base, Math.PI - base]) {
+      const first = Math.floor((low - family) / TAU) - 1;
+      const last = Math.ceil((high - family) / TAU) + 1;
+      for (let turn = first; turn <= last; turn += 1) {
+        const angle = family + turn * TAU;
+        const parameter = (angle - startAngle) / sweep;
+        if (!(parameter > 0 && parameter < 1)) continue;
+        const slope = Math.abs(Math.cos(angle));
+        const crossingUncertaintyMm = radialEnvelopeMm / slope;
+        if (!finite(crossingUncertaintyMm) || crossingUncertaintyMm > STEP_NUMERICAL_BUDGET_MM) {
+          state.add("error", "profile-arc-crossing-ill-conditioned", "A circular section edge crosses the spindle centerline too close to tangency to preserve the STEP numerical budget.");
+          return null;
+        }
+        roots.push(parameter);
+        rootBounds.set(parameter, crossingUncertaintyMm);
+      }
+    }
+  }
+  roots.sort((a, b) => a - b);
+  if (roots.some((value, index) => index && value === roots[index - 1])) {
+    state.add("error", "profile-arc-roots-ambiguous", "A circular section edge produced duplicate spindle-centerline intersections.");
+    return null;
+  }
+  const parameters = [0, ...roots, 1];
+  const fragments = [];
+  for (let index = 0; index < parameters.length - 1; index += 1) {
+    const from = parameters[index];
+    const to = parameters[index + 1];
+    const midpoint = (from + to) / 2;
+    const midpointX = primitive.center.x + Math.sin(startAngle + sweep * midpoint) * primitive.radius;
+    if (midpointX < 0) continue;
+    if (!(midpointX > 0)) {
+      state.add("error", "profile-arc-side-ambiguous", "A circular section fragment cannot be assigned uniquely to one side of the spindle centerline.");
+      return null;
+    }
+    const fragmentSweep = sweep * (to - from);
+    const fragmentLength = Math.abs(fragmentSweep) * primitive.radius;
+    const fromAngle = startAngle + sweep * from;
+    const toAngle = startAngle + sweep * to;
+    const crossingBound = Math.max(rootBounds.get(from) ?? 0, rootBounds.get(to) ?? 0);
+    const geometryUncertaintyMm = Math.max(primitive.geometryUncertaintyMm, crossingBound);
+    const start = arcPoint(primitive, fromAngle, from);
+    const end = arcPoint(primitive, toAngle, to);
+    if (roots.includes(from)) start.x = 0;
+    if (roots.includes(to)) end.x = 0;
+    if ((start.x !== 0 && Math.abs(start.x) <= radialEnvelopeMm)
+      || (end.x !== 0 && Math.abs(end.x) <= radialEnvelopeMm)) {
+      state.add("error", "profile-arc-side-uncertain", "A circular section endpoint is uncertainty-close to the spindle centerline, so its machining side is not provable.");
+      return null;
+    }
+    if (fragmentLength <= geometryUncertaintyMm) {
+      state.add("error", "profile-arc-sliver", "Clipping produced an arc fragment too small to distinguish from its uncertainty envelope.");
+      return null;
+    }
+    if (from === 0 && to === 1) {
+      fragments.push({
+        ...primitive,
+        source: profileSource(primitive, 0, 1),
+        endpointUncertaintyMm: Math.max(primitive.endpointUncertaintyMm ?? 0, crossingBound),
+        geometryUncertaintyMm,
+      });
+      continue;
+    }
+    fragments.push({
+      ...primitive,
+      id: `${String(primitive.id)}:profile:${index}`,
+      type: "arc",
+      start,
+      end,
+      startAngle: fromAngle,
+      sweep: fragmentSweep,
+      source: profileSource(primitive, from, to),
+      endpointUncertaintyMm: Math.max(primitive.endpointUncertaintyMm ?? 0, crossingBound),
+      geometryUncertaintyMm,
+    });
+  }
+  return fragments;
+}
+
+function endpointsConnect(first, second) {
+  return distance2(first.end, second.start) <= primitiveEndpointBound(first.primitive) + primitiveEndpointBound(second.primitive);
+}
+
+function extractPositiveRadialProfile(primitives, limits, state) {
+  const fragmentsByPrimitive = [];
+  for (const primitive of primitives) {
+    const fragments = primitive.type === "line"
+      ? clipLineToPositiveRadius(primitive, state)
+      : clipRoundPrimitiveToPositiveRadius(primitive, state);
+    if (fragments === null) return null;
+    fragmentsByPrimitive.push(fragments);
+  }
+  const entries = [];
+  for (const fragments of fragmentsByPrimitive) {
+    for (const primitive of fragments) entries.push({primitive, start: primitive.start, end: primitive.end});
+    if (!fragments.length) entries.push(null);
+  }
+  const retained = fragmentsByPrimitive.flat();
+  if (retained.length === 1 && retained[0].type === "circle") {
+    return {primitives: retained, closed: true, endpoints: [], intersectionCount: 0};
+  }
+  const chains = [];
+  let chain = [];
+  for (const entry of entries) {
+    if (entry === null) {
+      if (chain.length) chains.push(chain);
+      chain = [];
+      continue;
+    }
+    if (chain.length && !endpointsConnect({primitive: chain.at(-1), end: chain.at(-1).end}, entry)) {
+      chains.push(chain);
+      chain = [];
+    }
+    chain.push(entry.primitive);
+  }
+  if (chain.length) chains.push(chain);
+  if (chains.length > 1) {
+    const last = chains.at(-1), first = chains[0];
+    const lastEntry = {primitive: last.at(-1), start: last.at(-1).start, end: last.at(-1).end};
+    const firstEntry = {primitive: first[0], start: first[0].start, end: first[0].end};
+    if (endpointsConnect(lastEntry, firstEntry)) {
+      chains[0] = [...last, ...first];
+      chains.pop();
+    }
+  }
+  if (chains.length !== 1 || !chains[0].length) {
+    state.add("error", "profile-side-not-unique", "The selected contour does not produce one unambiguous connected machining-side profile.");
+    return null;
+  }
+  const result = chains[0];
+  if (result.length > limits.maxTotalEdges) {
+    state.add("error", "profile-fragment-limit-exceeded", `The machining-side profile exceeds the ${limits.maxTotalEdges}-fragment safety limit.`);
+    return null;
+  }
+  const first = result[0].start;
+  const last = result.at(-1).end;
+  const closed = distance2(first, last) <= primitiveEndpointBound(result[0]) + primitiveEndpointBound(result.at(-1));
+  const vertices = [first, ...result.map((primitive) => primitive.end)];
+  const axisContacts = (closed ? vertices.slice(0, -1) : vertices).filter((point) => point.x === 0);
+  if (closed && axisContacts.length) {
+    state.add("error", "profile-closed-axis-contact-ambiguous", "A closed machining-side profile must remain wholly on the positive-radius side without touching the spindle centerline.");
+    return null;
+  }
+  if (!closed && (first.x !== 0 || last.x !== 0)) {
+    state.add("error", "profile-axis-endpoints-required", "An open machining-side profile must terminate at two exact spindle-centerline intersections.");
+    return null;
+  }
+  if (!closed && vertices.slice(1, -1).some((point) => point.x === 0)) {
+    state.add("error", "profile-extra-axis-contact-ambiguous", "The machining-side profile touches the spindle centerline between its endpoints, so its topology is ambiguous.");
+    return null;
+  }
+  return {primitives: result, closed, endpoints: closed ? [] : [first, last], intersectionCount: closed ? 0 : 2};
+}
+
 function normalizeAngle(angle) {
   const result = angle % TAU;
   return result < 0 ? result + TAU : result;
@@ -860,14 +1126,14 @@ export function mapStepSectionToLatheGeometry(dto, mapping, {limits: limitOverri
     state.add("error", "selected-contour-not-found", "The explicitly selected STEP contour is not present in the section result.");
   }
 
-  const primitives = selected?.primitives ?? [];
-  const maximumUncertaintyMm = primitives.reduce(
+  const selectedPrimitives = selected?.primitives ?? [];
+  const selectedMaximumUncertaintyMm = selectedPrimitives.reduce(
     (maximum, primitive) => Math.max(maximum, primitive.geometryUncertaintyMm),
     Number.NEGATIVE_INFINITY,
   );
-  if (primitives.some((primitive) => !finite(primitive.geometryUncertaintyMm) || primitive.geometryUncertaintyMm < 0)
-    || !finite(maximumUncertaintyMm)
-    || maximumUncertaintyMm > STEP_NUMERICAL_BUDGET_MM) {
+  if (selectedPrimitives.some((primitive) => !finite(primitive.geometryUncertaintyMm) || primitive.geometryUncertaintyMm < 0)
+    || !finite(selectedMaximumUncertaintyMm)
+    || selectedMaximumUncertaintyMm > STEP_NUMERICAL_BUDGET_MM) {
     state.add(
       "error",
       "step-precision-budget-exceeded",
@@ -875,7 +1141,23 @@ export function mapStepSectionToLatheGeometry(dto, mapping, {limits: limitOverri
     );
   }
   const blocking = state.diagnostics.some((diagnostic) => BLOCKING_DIAGNOSTIC_SEVERITIES.has(diagnostic.severity));
-  if (blocking || !selected || !primitives.length) {
+  if (blocking || !selected || !selectedPrimitives.length) {
+    return failedResult(dto, source, kernel, units, normalizedMapping, state.diagnostics, state.suppressed, complexity);
+  }
+
+  const extractedProfile = normalizedMapping.profileSide === "positive"
+    ? extractPositiveRadialProfile(selectedPrimitives, limits, state)
+    : null;
+  const primitives = normalizedMapping.profileSide === "positive" ? (extractedProfile?.primitives ?? []) : selectedPrimitives;
+  const maximumUncertaintyMm = primitives.reduce(
+    (maximum, primitive) => Math.max(maximum, primitive.geometryUncertaintyMm),
+    Number.NEGATIVE_INFINITY,
+  );
+  if (state.diagnostics.some((diagnostic) => BLOCKING_DIAGNOSTIC_SEVERITIES.has(diagnostic.severity))
+    || !primitives.length || !finite(maximumUncertaintyMm) || maximumUncertaintyMm > STEP_NUMERICAL_BUDGET_MM) {
+    if (maximumUncertaintyMm > STEP_NUMERICAL_BUDGET_MM) {
+      state.add("error", "profile-precision-budget-exceeded", `STEP machining-side extraction cannot preserve the ${STEP_NUMERICAL_BUDGET_MM} mm numerical/tolerance budget.`);
+    }
     return failedResult(dto, source, kernel, units, normalizedMapping, state.diagnostics, state.suppressed, complexity);
   }
 
@@ -894,6 +1176,7 @@ export function mapStepSectionToLatheGeometry(dto, mapping, {limits: limitOverri
     radialOriginMm: normalizedMapping.radialOriginMm,
     axialDirection: normalizedMapping.axialDirection,
     radialDirection: normalizedMapping.radialDirection,
+    profileSide: normalizedMapping.profileSide,
   };
   return {
     schemaVersion: 1,
@@ -914,6 +1197,13 @@ export function mapStepSectionToLatheGeometry(dto, mapping, {limits: limitOverri
     geometry: primitives,
     bounds,
     geometryUncertaintyMm: maximumUncertaintyMm,
+    profile: extractedProfile ? {
+      sourceContourId: selected.id,
+      modelRadialSide: normalizedMapping.radialDirection,
+      closed: extractedProfile.closed,
+      endpoints: extractedProfile.endpoints,
+      intersectionCount: extractedProfile.intersectionCount,
+    } : null,
     diagnostics: state.diagnostics,
     diagnosticSummary: diagnosticSummary(state.diagnostics, state.suppressed),
     complexity,

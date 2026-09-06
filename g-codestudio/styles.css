@@ -22,6 +22,69 @@ button, input, select, textarea { font: inherit; }
 button, select, input { color: var(--text); }
 button { cursor: pointer; }
 
+/* STEP placement stays in the normal graphics pane; exact B-rep data remains authoritative. */
+.solid-setup-workspace { position: absolute; z-index: 8; inset: 0; display: flex; min-width: 0; min-height: 0; flex-direction: column; color: var(--text); background: #071216; }
+.solid-setup-workspace[hidden] { display: none; }
+.solid-setup-header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border-bottom: 1px solid #29464d; background: #0a1b20; }
+.solid-setup-header h2 { display: inline; margin: 0 8px 0 0; font-size: 18px; letter-spacing: -.02em; }
+.solid-setup-header p { display: inline; margin: 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.solid-eyebrow { color: var(--accent); font-size: 12px; letter-spacing: .12em; font-weight: 700; }
+.solid-setup-workspace button, .solid-setup-steps { min-width: 0; }
+.solid-setup-workspace button, .solid-setup-steps button { min-height: 36px; padding: 7px 10px; border: 1px solid #35505c; border-radius: 6px; background: #122530; color: #edf5f7; font-size: 13px; font-weight: 650; }
+.solid-setup-workspace button:hover:not(:disabled), .solid-setup-steps button:hover:not(:disabled) { border-color: var(--accent); background: #17362e; }
+.solid-setup-workspace button:disabled, .solid-setup-steps button:disabled { cursor: not-allowed; opacity: .45; }
+.solid-setup-workspace :focus-visible, .solid-setup-steps :focus-visible { outline: 2px solid #85f8cd; outline-offset: 2px; }
+.solid-setup-header > button { flex: 0 0 auto; min-height: 32px; }
+.solid-view-toolbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 14px; }
+.solid-view-toolbar button:last-child { margin-left: auto; }
+.solid-canvas-wrap { position: relative; flex: 1; min-height: 220px; }
+#solidPreviewCanvas { display: block; width: 100%; height: 100%; position: absolute; inset: 0; touch-action: none; }
+.solid-mesh-canvas { display: block; width: 100%; height: 100%; position: absolute; inset: 0; pointer-events: none; }
+.solid-preview-message { position: absolute; left: 16px; right: 16px; top: 42%; margin: 0; padding: 16px; background: #102631ed; border: 1px solid #2b4e5e; border-radius: 8px; text-align: center; font-size: 16px; pointer-events: none; }
+.solid-preview-message[hidden] { display: none; }
+.solid-preview-caption { display: flex; justify-content: space-between; gap: 8px; padding: 10px 16px; color: #b5cad0; font-size: 12px; border-top: 1px solid #18323b; }
+.solid-model-size { margin: 0; padding: 8px 16px 10px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.solid-setup-steps { margin: 12px 0; padding: 12px; border: 1px solid #31525a; border-radius: 8px; background: #09191e; }
+.solid-setup-steps[hidden] { display: none; }
+.solid-machine-context { padding: 10px 12px; margin: 0 0 14px; border-left: 2px solid var(--accent); background: #112923; color: #bfe9d9; font-size: 13px; line-height: 1.5; }
+.solid-setup-steps fieldset { min-width: 0; margin: 0 0 16px; padding: 0; border: 0; }
+.solid-setup-steps legend { font-size: 14px; font-weight: 700; }
+.solid-setup-steps legend span { display: inline-grid; place-items: center; height: 24px; width: 24px; margin-right: 6px; border: 1px solid #3d6569; border-radius: 50%; color: #8cf3c2; font-size: 13px; }
+.solid-setup-steps fieldset > p, .solid-manual, .solid-plane-options { font-size: 13px; color: #abc0c6; line-height: 1.45; }
+.solid-setup-steps label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: #d2e2e8; }
+.solid-setup-steps select, .solid-setup-steps input { width: 100%; min-width: 0; min-height: 40px; padding: 8px; border: 1px solid #34515b; border-radius: 6px; background: #081820; font-size: 14px; }
+.solid-manual { margin-top: 12px; }
+.solid-manual summary, .solid-plane-options summary, #stepAdvancedControls summary { cursor: pointer; }
+.solid-manual label { margin-top: 10px; }
+.solid-center-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.solid-center-fields label { font-size: 12px; }
+.solid-manual button { margin-top: 10px; }
+.solid-plane-buttons { display: flex; gap: 8px; }
+.solid-plane-buttons button { flex: 1; }
+.solid-plane-buttons button[aria-pressed="true"] { border-color: #64e4ae; background: #1b4638; color: #aeffd7; }
+.solid-setup-steps p.solid-setup-summary { padding: 10px; background: #0a1319; border: 1px solid #233e47; border-radius: 6px; color: #cbdee6; font-size: 13px; overflow-wrap: anywhere; }
+.solid-setup-steps button.solid-primary { width: 100%; min-height: 42px; background: #59e1a5; border-color: #59e1a5; color: #07281c; }
+.solid-setup-steps button.solid-primary:hover:not(:disabled) { background: #87f3bd; color: #07281c; }
+#solidBuildPreview { width: 100%; }
+.solid-contour-label { margin-top: 12px; }
+.solid-setup-status { color: #a7dcd0; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.solid-setup-status.is-error { color: #ffc3a1; }
+.solid-placement-boundary { margin: 9px 0 0; color: #829da5; font-size: 12px; line-height: 1.4; }
+.canvas-wrap.solid-placement-active + .transport { opacity: .45; pointer-events: none; }
+#stepAdvancedControls { margin-top: 12px; }
+#stepAdvancedControls > summary { margin-bottom: 10px; font-size: 12px; }
+@media (max-width: 760px) {
+  .solid-setup-header { align-items: flex-start; padding: 10px; }
+  .solid-setup-header h2 { display: block; font-size: 17px; }
+  .solid-setup-header p { font-size: 11px; }
+  .solid-setup-header > button { max-width: 120px; font-size: 11px; }
+  .solid-view-toolbar { padding: 8px; }
+  .solid-view-toolbar button { min-height: 32px; padding: 5px 7px; font-size: 11px; }
+  .solid-canvas-wrap { min-height: 260px; }
+  .solid-preview-caption { flex-wrap: wrap; }
+  .solid-model-size { font-size: 11px; }
+}
+
 .app-shell { min-height: 100vh; display: flex; flex-direction: column; }
 .topbar { flex: 0 0 auto; min-height: 68px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 20px; padding: 10px 18px; border-bottom: 1px solid var(--border); background: rgba(7, 16, 18, 0.86); backdrop-filter: blur(14px); }
 .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
@@ -233,6 +296,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .reference-geometry-setup.blocked summary strong { color: #fb7185; }
 .reference-geometry-body { display: flex; flex-direction: column; gap: 9px; padding: 9px; border-top: 1px solid rgba(56, 189, 248, .18); }
 .reference-geometry-body p { margin: 0; color: #91afb5; font-size: 8px; line-height: 1.45; }
+.reference-geometry-body .solid-machine-context,
+.reference-geometry-body .solid-setup-steps fieldset > p,
+.reference-geometry-body .solid-setup-status { font-size: 13px; }
+.reference-geometry-body .solid-placement-boundary { font-size: 12px; }
 .reference-geometry-body [hidden] { display: none !important; }
 #referenceDxfControls, .reference-step-controls { display: flex; flex-direction: column; gap: 9px; }
 .reference-shared-tolerance { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -553,6 +620,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .drop-overlay span { color: var(--muted); font: 11px "Cascadia Code", Consolas, monospace; }
 .drop-overlay[hidden] { display: none; }
 
+/* Placement is one focused workspace: solid and setup remain adjacent while
+   the editor, playback, statistics and unrelated machine controls step aside. */
+.workspace.solid-placement-mode { grid-template-columns: minmax(420px, 1fr) minmax(280px, 340px); }
+.workspace.solid-placement-mode .editor-panel,
+.workspace.solid-placement-mode .plot-toolbar,
+.workspace.solid-placement-mode .transport,
+.workspace.solid-placement-mode .controls-panel > :not(.control-stack),
+.workspace.solid-placement-mode .control-stack > :not(#latheSetupControls):not(#displayUnitsControl),
+.workspace.solid-placement-mode #latheSetupControls > :not(#referenceGeometrySetup) { display: none; }
+.workspace.solid-placement-mode .plot-panel,
+.workspace.solid-placement-mode .controls-panel { min-height: 0; }
+.workspace.solid-placement-mode .controls-panel { grid-column: auto; display: flex; overflow-x: hidden; overflow-y: auto; }
+.workspace.solid-placement-mode .controls-panel .control-stack { display: block; padding: 0; border: 0; }
+.workspace.solid-placement-mode #referenceGeometrySetup { border: 0; }
+
 @media (max-width: 1100px) {
   .workspace { grid-template-columns: minmax(230px, 30%) 1fr; }
   .controls-panel { grid-column: 1 / -1; min-height: auto; display: grid; grid-template-columns: 200px 1fr 1fr; }
@@ -613,6 +695,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .plot-panel { order: 1; min-height: 520px; }
   .editor-panel { order: 2; min-height: 430px; }
   .controls-panel { order: 3; display: flex; min-height: auto; }
+  .workspace.solid-placement-mode .controls-panel { order: 2; }
   .gcode-editor, #gcodeInput { min-height: 340px; }
   .canvas-wrap { min-height: 400px; }
   .face-view-status, .mill-view-status { right: 8px; bottom: 8px; max-width: calc(100% - 16px); }

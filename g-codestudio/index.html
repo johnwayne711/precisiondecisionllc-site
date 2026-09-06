@@ -90,6 +90,7 @@
           <span class="editor-sample-actions">
             <button id="loadMillSampleButton" class="text-button">Mill sample</button>
             <button id="loadLiveBoreSampleButton" class="text-button">Live bore sample</button>
+            <button id="loadStepSampleButton" class="text-button">G71 + solid sample</button>
             <button id="loadSampleButton" class="text-button">Reset turning sample</button>
           </span>
         </div>
@@ -130,6 +131,18 @@
         </div>
         <div id="canvasWrap" class="canvas-wrap">
           <canvas id="plotCanvas" role="img" aria-label="Interactive lathe backplot. In 2D, click component geometry to inspect it, or use Dimension to pin exact line and radius measurements." title="In 2D, click component geometry to measure it. Turn on Dimension to pin exact line and radius measurements."></canvas>
+          <section id="solidSetupWorkspace" class="solid-setup-workspace" aria-labelledby="solidSetupTitle" hidden>
+            <header class="solid-setup-header">
+              <div><span class="solid-eyebrow">STEP PLACEMENT · LOCAL</span><h2 id="solidSetupTitle">Place the solid</h2><p id="solidSetupFile"></p></div>
+              <button id="solidSetupClose" type="button" aria-label="Return to the toolpath">Return to toolpath</button>
+            </header>
+            <div class="solid-view-toolbar" role="group" aria-label="Solid camera views">
+              <button type="button" data-solid-view="iso">Isometric</button><button type="button" data-solid-view="xy">XY</button><button type="button" data-solid-view="xz">XZ</button><button type="button" data-solid-view="yz">YZ</button><button id="solidFit" type="button">Fit solid</button>
+            </div>
+            <div class="solid-canvas-wrap"><canvas id="solidPreviewCanvas" tabindex="0" aria-label="STEP solid. Middle-drag rotates, Ctrl+middle-drag pans, Shift+middle-drag zooms. Wheel zooms at the pointer. Left-click selects; double-click a face to center. Ctrl+left-drag rotates; Shift+left-drag pans. Touch: one finger rotates, two fingers pan and pinch. F fits."></canvas><p id="solidPreviewMessage" class="solid-preview-message" role="status">Loading solid…</p></div>
+            <div class="solid-preview-caption"><span>Choose the spindle axis, then the face or shoulder used as program Z0</span><span>Display mesh only · exact CAD controls the result</span></div>
+            <p id="solidModelSize" class="solid-model-size"></p>
+          </section>
           <div id="faceViewStatus" class="face-view-status" role="status" aria-live="polite" hidden>
             <strong>FACE VIEW · PATH ONLY</strong>
             <span>Programmed live-tool centerlines and stock face only. No material-removal or cutter/holder collision claim.</span>
@@ -226,9 +239,9 @@
             </select>
             <small id="programUnitsHint" class="quality-hint">Machine default: Inches. Used when G20/G21 is absent.</small>
           </label>
-          <label>Display / setup units
+          <label id="displayUnitsControl">Display / setup units
             <select id="displayUnits">
-              <option value="inch">Inches</option>
+              <option value="inch" selected>Inches</option>
               <option value="mm">Millimeters</option>
             </select>
           </label>
@@ -276,7 +289,39 @@
                 </div>
               </div>
               <div id="referenceStepControls" class="reference-step-controls" hidden>
-                <p>Choose the longitudinal section explicitly. This bounded slice accepts one valid solid (not an assembly). STEP geometry is transferred to millimeters by Open CASCADE; no display mesh enters the dimensional comparison.</p>
+                <button id="openSolidSetupButton" type="button" class="build-step-section">Place solid in 3D</button>
+                <p>Placement happens in the main graphics view. Your existing chuck orientation and X programming mode stay unchanged.</p>
+                <section id="solidPlacementControls" class="solid-setup-steps" aria-label="Lathe solid placement" hidden>
+                  <p id="solidMachineContext" class="solid-machine-context"></p>
+                  <fieldset><legend><span>1</span> Spindle axis</legend>
+                    <p>Coaxial cylindrical surfaces propose a centerline automatically. Confirm it here or click a different cylinder.</p>
+                    <label>Cylindrical surface<select id="solidCylinder"><option value="">Select a cylindrical surface</option></select></label>
+                    <button id="solidConfirmCylinder" type="button" hidden>Use proposed spindle axis</button>
+                    <details class="solid-manual"><summary>No suitable cylinder? Enter the centerline</summary>
+                      <label>Model spindle axis<select id="solidManualAxis"><option value="">Select</option><option value="x">Model X</option><option value="y">Model Y</option><option value="z">Model Z</option></select></label>
+                      <div class="solid-center-fields"><label>Center X (<span data-unit-label>in</span>)<input id="solidCenterX" type="number" step="any" placeholder="Required"></label><label>Center Y (<span data-unit-label>in</span>)<input id="solidCenterY" type="number" step="any" placeholder="Required"></label><label>Center Z (<span data-unit-label>in</span>)<input id="solidCenterZ" type="number" step="any" placeholder="Required"></label></div>
+                      <button id="solidUseManualAxis" type="button">Use this centerline</button>
+                    </details>
+                  </fieldset>
+                  <fieldset><legend><span>2</span> Program Z0 datum</legend>
+                    <p>Click the planar face or shoulder used as Z0. The app shows the resulting program direction before anything is applied.</p>
+                    <label>Z0 face or shoulder<select id="solidFrontFace" disabled><option value="">Choose the spindle axis first</option></select></label>
+                  </fieldset>
+                  <fieldset><legend><span>3</span> Machining profile</legend>
+                    <label>Side facing physical +X<select id="solidRadialSide" disabled><option value="1">Positive model side</option><option value="-1">Negative model side</option></select></label>
+                    <details class="solid-plane-options"><summary>Section plane options</summary>
+                      <p>The exact longitudinal plane passes through the selected spindle centerline.</p>
+                      <div class="solid-plane-buttons" role="group" aria-label="Longitudinal section plane"><button type="button" data-solid-plane="z" disabled>XY</button><button type="button" data-solid-plane="y" disabled>XZ</button><button type="button" data-solid-plane="x" disabled>YZ</button></div>
+                    </details>
+                    <p id="solidSetupSummary" class="solid-setup-summary">Select a spindle axis to begin.</p>
+                    <button id="solidBuildPreview" type="button" disabled>Rebuild exact profile</button>
+                    <label class="solid-contour-label">Section contour<select id="solidSectionContour" disabled><option value="">Build profile first</option></select></label>
+                  </fieldset>
+                  <p id="solidSetupStatus" class="solid-setup-status" role="status" aria-live="polite"></p>
+                  <button id="solidApplySection" type="button" class="solid-primary" disabled>Use this placement</button>
+                  <p class="solid-placement-boundary">The original solid remains unchanged. Placement uses the exact analytic section, never the display mesh.</p>
+                </section>
+                <details id="stepAdvancedControls"><summary>Advanced model coordinates (<span data-unit-label>in</span>)</summary>
                 <div class="field-pair three-fields">
                   <label>Model axial axis
                     <select id="stepAxialAxis">
@@ -295,14 +340,14 @@
                   </label>
                 </div>
                 <div class="field-pair">
-                  <label>Plane coordinate (mm)<input id="stepPlaneOffset" type="number" step="any" value="0"></label>
+                  <label>Plane coordinate (<span data-unit-label>in</span>)<input id="stepPlaneOffset" type="number" step="any" value="0"></label>
                   <label>Section contour
                     <select id="stepContour"><option value="">Build section first</option></select>
                   </label>
                 </div>
                 <div class="field-pair">
-                  <label>Axial coordinate at program Z0 (mm)<input id="stepAxialOrigin" type="number" step="any" value="0"></label>
-                  <label>Radial coordinate at spindle X0 (mm)<input id="stepRadialOrigin" type="number" step="any" value="0"></label>
+                  <label>Axial coordinate at program Z0 (<span data-unit-label>in</span>)<input id="stepAxialOrigin" type="number" step="any" value="0"></label>
+                  <label>Radial coordinate at spindle X0 (<span data-unit-label>in</span>)<input id="stepRadialOrigin" type="number" step="any" value="0"></label>
                 </div>
                 <div class="field-pair">
                   <label>Model axial + maps to
@@ -313,6 +358,7 @@
                   </label>
                 </div>
                 <button id="buildStepSectionButton" type="button" class="build-step-section">Build analytic section</button>
+                </details>
               </div>
               <label class="toggle-row"><input id="referenceGeometryToggle" type="checkbox" checked><span>Show reference overlay</span></label>
               <div class="reference-geometry-results" aria-live="polite">
