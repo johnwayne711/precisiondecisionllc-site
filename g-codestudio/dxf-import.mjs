@@ -4,6 +4,11 @@ const ARC_ANGLE_ROUNDING_ULPS = 8;
 const DERIVED_GEOMETRY_ROUNDING_ULPS = 8;
 const BULGE_DERIVATION_ROUNDING_ULPS = 4096;
 const TRANSFORM_ROUNDING_ULPS = 256;
+const MATERIAL_ROUNDING_ULPS = 512;
+const MATERIAL_TRIG_ROUNDING_ULPS = 128;
+export const DXF_MATERIAL_REGION_QUALIFICATION = "dxf-explicit-closed-contour-inside-v1";
+export const MAX_DXF_MATERIAL_CONTOURS = 256;
+export const MAX_DXF_MATERIAL_TOPOLOGY_TESTS = 250000;
 const NUMBER_PATTERN = /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eEdD][+-]?\d+)?$/;
 const UNIT_DIAGNOSTIC_CODES = new Set([
   "units-invalid",
@@ -636,7 +641,23 @@ function buildPolyline(record, entityId, vertices, closed, state) {
       state.add("error", "degenerate-polyline-segment", `${record.type} segment ${index + 1} has identical endpoints.`, context);
       continue;
     }
-    const primitive = polylinePrimitive(entityId, entityLayer(record), vertex, next, vertex.bulge, index, source);
+    const segmentSource = record.type === "POLYLINE"
+      ? {
+        ...source,
+        classicPolylineHeaderLayer: entityLayer(record),
+        classicPolylineVertexLayers: [vertex.layer ?? null, next.layer ?? null],
+        classicPolylineVertexLines: [vertex.sourceLine ?? null, next.sourceLine ?? null],
+      }
+      : source;
+    const primitive = polylinePrimitive(
+      entityId,
+      entityLayer(record),
+      vertex,
+      next,
+      vertex.bulge,
+      index,
+      segmentSource,
+    );
     if (!Number.isFinite(primitive.radius ?? 1)
       || (primitive.center && (!Number.isFinite(primitive.center.x) || !Number.isFinite(primitive.center.y)))) {
       state.add("error", "invalid-bulge-arc", `${record.type} segment ${index + 1} cannot form a finite bulge arc.`, context);
@@ -652,7 +673,12 @@ function buildPolyline(record, entityId, vertices, closed, state) {
       dxfType: record.type,
       layer: entityLayer(record),
       closed,
-      vertices: vertices.map(({x, y, bulge}) => ({x, y, bulge})),
+      vertices: vertices.map(({x, y, bulge, layer, sourceLine}) => ({
+        x,
+        y,
+        bulge,
+        ...(record.type === "POLYLINE" ? {layer: layer ?? null, sourceLine: sourceLine ?? null} : {}),
+      })),
       primitiveIds: primitives.map((primitive) => primitive.id),
       source,
     },
@@ -771,7 +797,13 @@ function parseClassicPolyline(record, vertexRecords, hasSeqend, entityId, state,
     const bulge = readNumber(vertexRecord.groups, 42, "bulge", state, vertexContext, {defaultValue: 0});
     if (z !== 0) state.add("error", "non-2d-entity", "VERTEX has a nonzero Z coordinate.", vertexContext);
     flagUnsupportedPolylineWidth(vertexRecord.groups, state, vertexContext, [40, 41]);
-    vertices.push({x, y, bulge});
+    vertices.push({
+      x,
+      y,
+      bulge,
+      layer: entityLayer(vertexRecord),
+      sourceLine: vertexRecord.line,
+    });
   }
   if (state.errors > errorStart) return null;
   return buildPolyline(record, entityId, vertices, Boolean(flags & 1), state);
@@ -887,6 +919,93 @@ function parseUnits(headerPairs, state) {
 function parseVersion(headerPairs) {
   const declaration = extractHeaderVariable(headerPairs, "$ACADVER")[0];
   return declaration?.pairs.find((pair) => pair.code === 1)?.value ?? null;
+}
+
+function tableRecords(pairs, recordType) {
+  const records = [];
+  let current = null;
+  for (const pair of pairs) {
+    if (pair.code === 0) {
+      if (current) records.push(current);
+      current = normalizedUpper(pair.value) === recordType
+        ? {line: pair.line, groups: []}
+        : null;
+      continue;
+    }
+    if (current) current.groups.push(pair);
+  }
+  if (current) records.push(current);
+  return records;
+}
+
+function uniqueTableValue(groups, code) {
+  const matches = groups.filter((group) => group.code === code);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function parseLayerTable(tablePairs) {
+  const layerTables = [];
+  for (let index = 0; index < tablePairs.length; index += 1) {
+    const pair = tablePairs[index];
+    if (pair.code !== 0 || normalizedUpper(pair.value) !== "TABLE") continue;
+    const namePair = tablePairs[index + 1];
+    const tableName = namePair?.code === 2 ? normalizedUpper(namePair.value) : null;
+    let endIndex = index + 1;
+    while (endIndex < tablePairs.length
+      && !(tablePairs[endIndex].code === 0 && normalizedUpper(tablePairs[endIndex].value) === "ENDTAB")) {
+      endIndex += 1;
+    }
+    if (tableName === "LAYER") {
+      layerTables.push({
+        line: pair.line,
+        closed: endIndex < tablePairs.length,
+        pairs: tablePairs.slice(index + 2, endIndex),
+      });
+    }
+    index = endIndex;
+  }
+  if (layerTables.length !== 1 || !layerTables[0].closed) {
+    return {
+      status: layerTables.length > 1 ? "duplicate-table" : "missing-table",
+      tableCount: layerTables.length,
+      records: [],
+    };
+  }
+
+  const records = tableRecords(layerTables[0].pairs, "LAYER").map((record) => {
+    const namePair = uniqueTableValue(record.groups, 2);
+    const flagsPair = uniqueTableValue(record.groups, 70);
+    const colorPair = uniqueTableValue(record.groups, 62);
+    const plotPairs = record.groups.filter((group) => group.code === 290);
+    const name = namePair?.value ?? null;
+    const flags = flagsPair ? parseNumericLexeme(flagsPair.value) : null;
+    const color = colorPair ? parseNumericLexeme(colorPair.value) : null;
+    const plot = plotPairs.length === 0 ? true : parseNumericLexeme(plotPairs[0].value);
+    const issues = [];
+    if (!namePair || !name) issues.push("name");
+    if (!flagsPair || !Number.isInteger(flags) || flags < 0 || flags > 255) issues.push("flags");
+    if (!colorPair || !Number.isInteger(color) || color === 0 || Math.abs(color) > 255) issues.push("color");
+    if (plotPairs.length > 1 || (plotPairs.length === 1 && plot !== 0 && plot !== 1)) issues.push("plot");
+    return {
+      name,
+      normalizedName: name ? normalizedUpper(name) : null,
+      line: record.line,
+      flags,
+      color,
+      plot: plot === 1 || plot === true,
+      plotValueSupplied: plotPairs.length > 0,
+      issues,
+    };
+  });
+  const counts = new Map();
+  for (const record of records) {
+    if (!record.normalizedName) continue;
+    counts.set(record.normalizedName, (counts.get(record.normalizedName) || 0) + 1);
+  }
+  for (const record of records) {
+    if (record.normalizedName && counts.get(record.normalizedName) !== 1) record.issues.push("duplicate");
+  }
+  return {status: "ready", tableCount: 1, records};
 }
 
 function moduloTau(angle) {
@@ -1171,8 +1290,10 @@ export function parseDxf(text, {sourceName = null, sourceHash = null, limits: li
   const pairs = tokenizeAsciiDxf(text, state, limits.maxGroupPairs);
   const sections = partitionSections(pairs, state);
   const headerPairs = sections.get("HEADER") ?? [];
+  const tablePairs = sections.get("TABLES") ?? [];
   const entityPairs = sections.get("ENTITIES");
   const units = parseUnits(headerPairs, state);
+  const layers = parseLayerTable(tablePairs);
   const entities = [];
   const primitives = [];
   const budget = {limits, totalVertices: 0};
@@ -1296,6 +1417,7 @@ export function parseDxf(text, {sourceName = null, sourceHash = null, limits: li
     },
     dxfVersion: parseVersion(headerPairs),
     units,
+    layers,
     entities,
     primitives,
     bounds,
@@ -1314,9 +1436,1271 @@ export function parseDxf(text, {sourceName = null, sourceHash = null, limits: li
 
 export const parseAsciiDxf = parseDxf;
 
+function materialFinitePoint(candidate) {
+  return Number.isFinite(candidate?.z) && Number.isFinite(candidate?.x);
+}
+
+function materialDistance(first, second) {
+  return Math.hypot(second.z - first.z, second.x - first.x);
+}
+
+function materialSubtract(first, second) {
+  return {z: first.z - second.z, x: first.x - second.x};
+}
+
+function materialDot(first, second) {
+  return first.z * second.z + first.x * second.x;
+}
+
+function materialCross(first, second) {
+  return first.z * second.x - first.x * second.z;
+}
+
+function materialRoundingBound(values, ulps = MATERIAL_ROUNDING_ULPS) {
+  const magnitude = Math.max(1, ...values.filter(Number.isFinite).map(Math.abs));
+  const result = magnitude * Number.EPSILON * ulps;
+  return Number.isFinite(result) ? result : Number.POSITIVE_INFINITY;
+}
+
+function materialNormalizeAngle(angle) {
+  const result = angle % TAU;
+  return result < 0 ? result + TAU : result;
+}
+
+function materialArcContainsAngle(primitive, angle) {
+  if (primitive.type === "circle") return true;
+  const magnitude = Math.abs(primitive.sweep);
+  const delta = primitive.sweep >= 0
+    ? materialNormalizeAngle(angle - primitive.startAngle)
+    : materialNormalizeAngle(primitive.startAngle - angle);
+  const allowance = materialRoundingBound(
+    [angle, primitive.startAngle, primitive.sweep],
+    MATERIAL_TRIG_ROUNDING_ULPS,
+  );
+  return delta <= magnitude + allowance;
+}
+
+function materialArcContainsPoint(primitive, candidate) {
+  if (primitive.type !== "circle") {
+    const endpointAllowance = materialRoundingBound([
+      candidate.z, candidate.x,
+      primitive.start?.z, primitive.start?.x,
+      primitive.end?.z, primitive.end?.x,
+    ]);
+    if (materialDistance(candidate, primitive.start) <= endpointAllowance
+      || materialDistance(candidate, primitive.end) <= endpointAllowance) return true;
+  }
+  const angle = Math.atan2(candidate.x - primitive.center.x, candidate.z - primitive.center.z);
+  return Number.isFinite(angle) && materialArcContainsAngle(primitive, angle);
+}
+
+function uniqueMaterialIntersections(points) {
+  const unique = [];
+  for (const candidate of points) {
+    const allowance = materialRoundingBound([candidate.z, candidate.x], 128);
+    if (!unique.some((existing) => materialDistance(existing, candidate) <= allowance)) unique.push(candidate);
+  }
+  return unique;
+}
+
+function materialLineLineIntersections(first, second) {
+  const firstDirection = materialSubtract(first.end, first.start);
+  const secondDirection = materialSubtract(second.end, second.start);
+  const offset = materialSubtract(second.start, first.start);
+  const denominatorTerms = [
+    firstDirection.z * secondDirection.x,
+    firstDirection.x * secondDirection.z,
+  ];
+  const denominator = denominatorTerms[0] - denominatorTerms[1];
+  const denominatorRoundoff = materialRoundingBound(denominatorTerms, 64);
+  if (Math.abs(denominator) <= denominatorRoundoff) {
+    const collinearTerms = [offset.z * firstDirection.x, offset.x * firstDirection.z];
+    if (Math.abs(collinearTerms[0] - collinearTerms[1]) > materialRoundingBound(collinearTerms, 64)) {
+      return {points: [], overlap: false};
+    }
+    const component = Math.abs(firstDirection.z) >= Math.abs(firstDirection.x) ? "z" : "x";
+    const divisor = firstDirection[component];
+    if (!Number.isFinite(divisor) || divisor === 0) return {points: [], overlap: true};
+    const firstParameter = (second.start[component] - first.start[component]) / divisor;
+    const secondParameter = (second.end[component] - first.start[component]) / divisor;
+    const overlapStart = Math.max(0, Math.min(firstParameter, secondParameter));
+    const overlapEnd = Math.min(1, Math.max(firstParameter, secondParameter));
+    const parameterRoundoff = materialRoundingBound([firstParameter, secondParameter], 64);
+    if (overlapStart > overlapEnd + parameterRoundoff) return {points: [], overlap: false};
+    return {
+      points: [{
+        z: first.start.z + firstDirection.z * overlapStart,
+        x: first.start.x + firstDirection.x * overlapStart,
+      }],
+      overlap: overlapEnd - overlapStart > parameterRoundoff,
+    };
+  }
+  const firstParameter = materialCross(offset, secondDirection) / denominator;
+  const secondParameter = materialCross(offset, firstDirection) / denominator;
+  const parameterRoundoff = materialRoundingBound([firstParameter, secondParameter], 64);
+  if (firstParameter < -parameterRoundoff || firstParameter > 1 + parameterRoundoff
+    || secondParameter < -parameterRoundoff || secondParameter > 1 + parameterRoundoff) {
+    return {points: [], overlap: false};
+  }
+  const boundedParameter = Math.max(0, Math.min(1, firstParameter));
+  return {
+    points: [{
+      z: first.start.z + firstDirection.z * boundedParameter,
+      x: first.start.x + firstDirection.x * boundedParameter,
+    }],
+    overlap: false,
+  };
+}
+
+function materialLineArcIntersections(linePrimitive, arcPrimitive) {
+  const direction = materialSubtract(linePrimitive.end, linePrimitive.start);
+  const offset = materialSubtract(linePrimitive.start, arcPrimitive.center);
+  const quadratic = materialDot(direction, direction);
+  const linear = 2 * materialDot(offset, direction);
+  const constant = materialDot(offset, offset) - arcPrimitive.radius ** 2;
+  const discriminantTerms = [linear ** 2, 4 * quadratic * constant];
+  const discriminant = discriminantTerms[0] - discriminantTerms[1];
+  const discriminantRoundoff = materialRoundingBound(discriminantTerms, 128);
+  if (discriminant < -discriminantRoundoff) return {points: [], overlap: false};
+  const root = Math.sqrt(Math.max(0, discriminant));
+  const parameters = root <= materialRoundingBound([root], 32)
+    ? [-linear / (2 * quadratic)]
+    : [(-linear - root) / (2 * quadratic), (-linear + root) / (2 * quadratic)];
+  const points = [];
+  for (const parameter of parameters) {
+    const parameterRoundoff = materialRoundingBound([parameter], 64);
+    if (parameter < -parameterRoundoff || parameter > 1 + parameterRoundoff) continue;
+    const boundedParameter = Math.max(0, Math.min(1, parameter));
+    const candidate = {
+      z: linePrimitive.start.z + direction.z * boundedParameter,
+      x: linePrimitive.start.x + direction.x * boundedParameter,
+    };
+    if (materialArcContainsPoint(arcPrimitive, candidate)) points.push(candidate);
+  }
+  return {points: uniqueMaterialIntersections(points), overlap: false};
+}
+
+function materialArcStrictlyContainsAngle(primitive, angle) {
+  if (primitive.type === "circle") return true;
+  const magnitude = Math.abs(primitive.sweep);
+  const delta = primitive.sweep >= 0
+    ? materialNormalizeAngle(angle - primitive.startAngle)
+    : materialNormalizeAngle(primitive.startAngle - angle);
+  const allowance = materialRoundingBound(
+    [angle, primitive.startAngle, primitive.sweep],
+    MATERIAL_TRIG_ROUNDING_ULPS,
+  );
+  return delta > allowance && delta < magnitude - allowance;
+}
+
+function materialArcMidpoint(primitive) {
+  const angle = primitive.startAngle + primitive.sweep / 2;
+  return {
+    angle,
+    point: {
+      z: primitive.center.z + Math.cos(angle) * primitive.radius,
+      x: primitive.center.x + Math.sin(angle) * primitive.radius,
+    },
+  };
+}
+
+function materialCircularIntersections(first, second) {
+  const centerOffset = materialSubtract(second.center, first.center);
+  const centerDistance = Math.hypot(centerOffset.z, centerOffset.x);
+  const linearRoundoff = materialRoundingBound([
+    first.center.z, first.center.x, second.center.z, second.center.x,
+    first.radius, second.radius, centerDistance,
+  ], 128);
+  if (centerDistance <= linearRoundoff) {
+    if (Math.abs(first.radius - second.radius) > linearRoundoff) return {points: [], overlap: false};
+    if (centerDistance !== 0 || first.radius !== second.radius) return {points: [], overlap: true};
+    if (first.type === "circle" || second.type === "circle") return {points: [], overlap: true};
+    const sharedEndpoints = [
+      ...[first.start, first.end].filter((candidate) => materialArcContainsPoint(second, candidate)),
+      ...[second.start, second.end].filter((candidate) => materialArcContainsPoint(first, candidate)),
+    ];
+    const firstMiddle = materialArcMidpoint(first);
+    const secondMiddle = materialArcMidpoint(second);
+    const overlap = [first.start, first.end].some((candidate) => (
+      materialArcStrictlyContainsAngle(
+        second,
+        Math.atan2(candidate.x - second.center.x, candidate.z - second.center.z),
+      )
+    )) || [second.start, second.end].some((candidate) => (
+      materialArcStrictlyContainsAngle(
+        first,
+        Math.atan2(candidate.x - first.center.x, candidate.z - first.center.z),
+      )
+    )) || materialArcStrictlyContainsAngle(second, firstMiddle.angle)
+      || materialArcStrictlyContainsAngle(first, secondMiddle.angle);
+    return {points: uniqueMaterialIntersections(sharedEndpoints), overlap};
+  }
+  const radiusSum = first.radius + second.radius;
+  const radiusDifference = Math.abs(first.radius - second.radius);
+  if (centerDistance > radiusSum + linearRoundoff || centerDistance < radiusDifference - linearRoundoff) {
+    return {points: [], overlap: false};
+  }
+  const along = (first.radius ** 2 - second.radius ** 2 + centerDistance ** 2) / (2 * centerDistance);
+  const heightSquared = first.radius ** 2 - along ** 2;
+  const squaredRoundoff = materialRoundingBound([first.radius ** 2, along ** 2], 128);
+  if (heightSquared < -squaredRoundoff) return {points: [], overlap: false};
+  if (heightSquared < 0) return {points: [], overlap: true};
+  const height = Math.sqrt(Math.max(0, heightSquared));
+  const base = {
+    z: first.center.z + centerOffset.z * along / centerDistance,
+    x: first.center.x + centerOffset.x * along / centerDistance,
+  };
+  const perpendicular = {z: -centerOffset.x / centerDistance, x: centerOffset.z / centerDistance};
+  const points = height <= linearRoundoff
+    ? [base]
+    : [
+      {z: base.z + perpendicular.z * height, x: base.x + perpendicular.x * height},
+      {z: base.z - perpendicular.z * height, x: base.x - perpendicular.x * height},
+    ];
+  return {
+    points: points.filter((candidate) => (
+      materialArcContainsPoint(first, candidate) && materialArcContainsPoint(second, candidate)
+    )),
+    overlap: false,
+  };
+}
+
+function materialPrimitiveIntersections(first, second) {
+  if (first.type === "line" && second.type === "line") return materialLineLineIntersections(first, second);
+  if (first.type === "line") return materialLineArcIntersections(first, second);
+  if (second.type === "line") return materialLineArcIntersections(second, first);
+  return materialCircularIntersections(first, second);
+}
+
+function materialPointToLineDistance(candidate, primitive) {
+  const direction = materialSubtract(primitive.end, primitive.start);
+  const denominator = materialDot(direction, direction);
+  const parameter = Math.max(
+    0,
+    Math.min(1, materialDot(materialSubtract(candidate, primitive.start), direction) / denominator),
+  );
+  return materialDistance(candidate, {
+    z: primitive.start.z + direction.z * parameter,
+    x: primitive.start.x + direction.x * parameter,
+  });
+}
+
+function materialPointToArcDistance(candidate, primitive) {
+  const centerOffset = materialSubtract(candidate, primitive.center);
+  const distanceFromCenter = Math.hypot(centerOffset.z, centerOffset.x);
+  if (distanceFromCenter > 0) {
+    const angle = Math.atan2(centerOffset.x, centerOffset.z);
+    if (materialArcContainsAngle(primitive, angle)) return Math.abs(distanceFromCenter - primitive.radius);
+  }
+  if (primitive.type === "circle") return primitive.radius;
+  return Math.min(
+    materialDistance(candidate, primitive.start),
+    materialDistance(candidate, primitive.end),
+  );
+}
+
+function materialPointToPrimitiveDistance(candidate, primitive) {
+  return primitive.type === "line"
+    ? materialPointToLineDistance(candidate, primitive)
+    : materialPointToArcDistance(candidate, primitive);
+}
+
+function materialMinimumLineArcDistance(linePrimitive, arcPrimitive) {
+  let minimum = Math.min(
+    materialPointToArcDistance(linePrimitive.start, arcPrimitive),
+    materialPointToArcDistance(linePrimitive.end, arcPrimitive),
+    ...(arcPrimitive.type === "circle" ? [] : [
+      materialPointToLineDistance(arcPrimitive.start, linePrimitive),
+      materialPointToLineDistance(arcPrimitive.end, linePrimitive),
+    ]),
+  );
+  const direction = materialSubtract(linePrimitive.end, linePrimitive.start);
+  const denominator = materialDot(direction, direction);
+  const centerParameter = materialDot(
+    materialSubtract(arcPrimitive.center, linePrimitive.start),
+    direction,
+  ) / denominator;
+  if (centerParameter >= 0 && centerParameter <= 1) {
+    const projection = {
+      z: linePrimitive.start.z + direction.z * centerParameter,
+      x: linePrimitive.start.x + direction.x * centerParameter,
+    };
+    const radial = materialSubtract(projection, arcPrimitive.center);
+    const radialLength = Math.hypot(radial.z, radial.x);
+    if (radialLength > 0) {
+      for (const sign of [-1, 1]) {
+        const candidate = {
+          z: arcPrimitive.center.z + sign * radial.z * arcPrimitive.radius / radialLength,
+          x: arcPrimitive.center.x + sign * radial.x * arcPrimitive.radius / radialLength,
+        };
+        if (materialArcContainsPoint(arcPrimitive, candidate)) {
+          minimum = Math.min(minimum, materialPointToLineDistance(candidate, linePrimitive));
+        }
+      }
+    }
+  }
+  return minimum;
+}
+
+function materialCircularEndpoints(primitive) {
+  return primitive.type === "circle" ? [] : [primitive.start, primitive.end];
+}
+
+function materialMinimumCircularDistance(first, second) {
+  let minimum = Number.POSITIVE_INFINITY;
+  for (const candidate of materialCircularEndpoints(first)) {
+    minimum = Math.min(minimum, materialPointToArcDistance(candidate, second));
+  }
+  for (const candidate of materialCircularEndpoints(second)) {
+    minimum = Math.min(minimum, materialPointToArcDistance(candidate, first));
+  }
+  const centerOffset = materialSubtract(second.center, first.center);
+  const centerDistance = Math.hypot(centerOffset.z, centerOffset.x);
+  if (centerDistance === 0) {
+    const firstCandidates = first.type === "circle" ? [] : [first.start, first.end];
+    const overlappingAngle = first.type === "circle" || second.type === "circle"
+      || firstCandidates.some((candidate) => materialArcContainsPoint(second, candidate))
+      || materialCircularEndpoints(second).some((candidate) => materialArcContainsPoint(first, candidate));
+    if (overlappingAngle) minimum = Math.min(minimum, Math.abs(first.radius - second.radius));
+    return minimum;
+  }
+  const unit = {z: centerOffset.z / centerDistance, x: centerOffset.x / centerDistance};
+  for (const firstSign of [-1, 1]) {
+    const firstPoint = {
+      z: first.center.z + firstSign * unit.z * first.radius,
+      x: first.center.x + firstSign * unit.x * first.radius,
+    };
+    if (!materialArcContainsPoint(first, firstPoint)) continue;
+    for (const secondSign of [-1, 1]) {
+      const secondPoint = {
+        z: second.center.z + secondSign * unit.z * second.radius,
+        x: second.center.x + secondSign * unit.x * second.radius,
+      };
+      if (materialArcContainsPoint(second, secondPoint)) {
+        minimum = Math.min(minimum, materialDistance(firstPoint, secondPoint));
+      }
+    }
+  }
+  return minimum;
+}
+
+function materialMinimumPrimitiveDistance(first, second) {
+  if (first.type === "line" && second.type === "line") {
+    return Math.min(
+      materialPointToLineDistance(first.start, second),
+      materialPointToLineDistance(first.end, second),
+      materialPointToLineDistance(second.start, first),
+      materialPointToLineDistance(second.end, first),
+    );
+  }
+  if (first.type === "line") return materialMinimumLineArcDistance(first, second);
+  if (second.type === "line") return materialMinimumLineArcDistance(second, first);
+  return materialMinimumCircularDistance(first, second);
+}
+
+function materialAnalyticEndpoint(primitive, atStart) {
+  if (primitive.type === "line") return atStart ? primitive.start : primitive.end;
+  if (primitive.type !== "arc") return null;
+  const angle = atStart ? primitive.startAngle : primitive.startAngle + primitive.sweep;
+  return {
+    z: primitive.center.z + Math.cos(angle) * primitive.radius,
+    x: primitive.center.x + Math.sin(angle) * primitive.radius,
+  };
+}
+
+function materialAdjacentJoints(primitives, firstIndex, secondIndex) {
+  const joints = [];
+  if (secondIndex === firstIndex + 1) {
+    joints.push([
+      materialAnalyticEndpoint(primitives[firstIndex], false),
+      materialAnalyticEndpoint(primitives[secondIndex], true),
+    ]);
+  }
+  if (firstIndex === 0 && secondIndex === primitives.length - 1) {
+    joints.push([
+      materialAnalyticEndpoint(primitives[firstIndex], true),
+      materialAnalyticEndpoint(primitives[secondIndex], false),
+    ]);
+  }
+  return joints;
+}
+
+function materialExpectedJointIntersection(candidate, joints) {
+  return joints.some(([first, second]) => {
+    const allowance = materialRoundingBound([
+      candidate.z, candidate.x, first?.z, first?.x, second?.z, second?.x,
+    ]);
+    return materialFinitePoint(first) && materialFinitePoint(second)
+      && materialDistance(candidate, first) <= allowance
+      && materialDistance(candidate, second) <= allowance;
+  });
+}
+
+function materialExpectedJointCoincides([first, second]) {
+  if (!materialFinitePoint(first) || !materialFinitePoint(second)) return false;
+  const allowance = materialRoundingBound([first.z, first.x, second.z, second.x]);
+  return materialDistance(first, second) <= allowance;
+}
+
+function cloneClosedDxfMaterialBoundary(primitives) {
+  if (primitives.length === 1 && primitives[0].type === "circle") {
+    return [{
+      ...primitives[0],
+      center: {...primitives[0].center},
+      source: {...primitives[0].source},
+    }];
+  }
+  const boundary = primitives.map((primitive) => ({
+    ...primitive,
+    ...(primitive.start ? {start: {...primitive.start}} : {}),
+    ...(primitive.end ? {end: {...primitive.end}} : {}),
+    ...(primitive.center ? {center: {...primitive.center}} : {}),
+    ...(primitive.source ? {source: {...primitive.source}} : {}),
+  }));
+  const connectors = new Map();
+  const closeLineEndpoint = (primitive, key, candidate, closureLengthMm) => {
+    primitive[key] = {...candidate};
+    primitive.geometryUncertaintyMm = (Number(primitive.geometryUncertaintyMm) || 0) + closureLengthMm;
+    primitive.source = {
+      ...primitive.source,
+      numericalJoinAdjustment: true,
+      numericalJoinAdjustmentMm: closureLengthMm,
+    };
+  };
+  for (let index = 0; index < boundary.length; index += 1) {
+    const primitive = boundary[index];
+    const next = boundary[(index + 1) % boundary.length];
+    const end = materialAnalyticEndpoint(primitive, false);
+    const nextStart = materialAnalyticEndpoint(next, true);
+    if (!materialFinitePoint(end) || !materialFinitePoint(nextStart)) continue;
+    const closureLengthMm = materialDistance(end, nextStart);
+    if (closureLengthMm === 0) continue;
+    if (primitive.type === "line") {
+      closeLineEndpoint(primitive, "end", nextStart, closureLengthMm);
+      continue;
+    }
+    if (next.type === "line") {
+      closeLineEndpoint(next, "start", end, closureLengthMm);
+      continue;
+    }
+    connectors.set(index, {
+      id: `dxf-calculation-closure-${index}`,
+      type: "line",
+      start: {...end},
+      end: {...nextStart},
+      geometryUncertaintyMm: Math.max(
+        Number(primitive.geometryUncertaintyMm) || 0,
+        Number(next.geometryUncertaintyMm) || 0,
+      ) + closureLengthMm,
+      source: {
+        format: "ascii-dxf",
+        numericalClosure: true,
+        precedingPrimitiveId: primitive.id ?? index,
+        followingPrimitiveId: next.id ?? ((index + 1) % primitives.length),
+      },
+    });
+  }
+  return boundary.flatMap((primitive, index) => (
+    connectors.has(index) ? [primitive, connectors.get(index)] : [primitive]
+  ));
+}
+
+function qualifySimpleDxfMaterialBoundary(primitives) {
+  const pairCount = primitives.length * (primitives.length - 1) / 2;
+  if (!Number.isSafeInteger(pairCount) || pairCount > MAX_DXF_MATERIAL_TOPOLOGY_TESTS) {
+    return {qualified: false, reason: "workload"};
+  }
+  for (let firstIndex = 0; firstIndex < primitives.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < primitives.length; secondIndex += 1) {
+      const adjacent = secondIndex === firstIndex + 1
+        || (firstIndex === 0 && secondIndex === primitives.length - 1);
+      const first = primitives[firstIndex];
+      const second = primitives[secondIndex];
+      const joints = adjacent ? materialAdjacentJoints(primitives, firstIndex, secondIndex) : [];
+      if (joints.some((joint) => !materialExpectedJointCoincides(joint))) {
+        return {qualified: false, reason: "gap", firstIndex, secondIndex};
+      }
+      const intersections = materialPrimitiveIntersections(first, second);
+      if (intersections.overlap
+        || intersections.points.some((candidate) => !materialExpectedJointIntersection(candidate, joints))) {
+        return {qualified: false, reason: "intersection", firstIndex, secondIndex};
+      }
+      if (!adjacent) {
+        const minimumDistanceMm = intersections.points.length
+          ? 0
+          : materialMinimumPrimitiveDistance(first, second);
+        const combinedUncertaintyMm = Math.max(0, Number(first.geometryUncertaintyMm) || 0)
+          + Math.max(0, Number(second.geometryUncertaintyMm) || 0);
+        const clearanceRoundoffMm = materialRoundingBound([
+          minimumDistanceMm,
+          first.start?.z, first.start?.x, first.end?.z, first.end?.x,
+          first.center?.z, first.center?.x, first.radius,
+          second.start?.z, second.start?.x, second.end?.z, second.end?.x,
+          second.center?.z, second.center?.x, second.radius,
+        ], 256);
+        if (!Number.isFinite(minimumDistanceMm)
+          || minimumDistanceMm <= combinedUncertaintyMm + clearanceRoundoffMm) {
+          return {qualified: false, reason: "clearance", firstIndex, secondIndex};
+        }
+      }
+    }
+  }
+  return {qualified: true, reason: null, boundary: cloneClosedDxfMaterialBoundary(primitives)};
+}
+
+function materialEndpointKey(candidate) {
+  const z = Object.is(candidate.z, -0) ? 0 : candidate.z;
+  const x = Object.is(candidate.x, -0) ? 0 : candidate.x;
+  return `${z}\u0000${x}`;
+}
+
+function materialJoinRoundoff(firstEndpoint, secondEndpoint, records) {
+  const values = [
+    firstEndpoint.point.z, firstEndpoint.point.x,
+    secondEndpoint.point.z, secondEndpoint.point.x,
+  ];
+  for (const endpoint of [firstEndpoint, secondEndpoint]) {
+    if (!endpoint.sourceDerived) continue;
+    const primitive = records[endpoint.edgeIndex]?.primitive;
+    values.push(primitive?.center?.z, primitive?.center?.x, primitive?.radius);
+  }
+  const magnitude = Math.max(Number.MIN_VALUE, ...values.filter(Number.isFinite).map(Math.abs));
+  const result = magnitude * Number.EPSILON * 32;
+  return Number.isFinite(result) ? result : Number.POSITIVE_INFINITY;
+}
+
+function orientedMaterialPrimitive(primitive, reversed) {
+  const source = {...primitive.source, ...(reversed ? {materialBoundaryReversed: true} : {})};
+  if (!reversed) {
+    return {
+      ...primitive,
+      ...(primitive.start ? {start: {...primitive.start}} : {}),
+      ...(primitive.end ? {end: {...primitive.end}} : {}),
+      ...(primitive.center ? {center: {...primitive.center}} : {}),
+      source,
+    };
+  }
+  if (primitive.type === "line") {
+    return {...primitive, start: {...primitive.end}, end: {...primitive.start}, source};
+  }
+  return {
+    ...primitive,
+    start: {...primitive.end},
+    end: {...primitive.start},
+    center: {...primitive.center},
+    startAngle: primitive.startAngle + primitive.sweep,
+    sweep: -primitive.sweep,
+    source,
+  };
+}
+
+function deterministicDxfContourId(model, primitives) {
+  const sourceIdentity = typeof model.source?.hash === "string" && model.source.hash
+    ? model.source.hash
+    : `unhashed-${model.source?.characterLength ?? 0}-${model.source?.lineCount ?? 0}`;
+  const ids = primitives.map((primitive) => String(primitive.id)).sort();
+  return `dxf-contour:${encodeURIComponent(sourceIdentity)}:${ids.map(encodeURIComponent).join(",")}`;
+}
+
+function orderedClosedComponent(component, records, nodeIncidence) {
+  const sorted = [...component].sort((firstIndex, secondIndex) => (
+    String(records[firstIndex].primitive.id).localeCompare(String(records[secondIndex].primitive.id))
+  ));
+  const firstIndex = sorted[0];
+  const firstRecord = records[firstIndex];
+  const reverseFirst = firstRecord.endKey.localeCompare(firstRecord.startKey) < 0;
+  const startingNode = reverseFirst ? firstRecord.endKey : firstRecord.startKey;
+  let currentNode = reverseFirst ? firstRecord.startKey : firstRecord.endKey;
+  let currentIndex = firstIndex;
+  let reversed = reverseFirst;
+  const visited = new Set();
+  const ordered = [];
+  while (true) {
+    if (visited.has(currentIndex)) return null;
+    visited.add(currentIndex);
+    ordered.push(orientedMaterialPrimitive(records[currentIndex].primitive, reversed));
+    const nextEndpoints = (nodeIncidence.get(currentNode) || []).filter((entry) => entry.edgeIndex !== currentIndex);
+    if (nextEndpoints.length !== 1) return null;
+    const next = nextEndpoints[0];
+    if (visited.has(next.edgeIndex)) {
+      return next.edgeIndex === firstIndex
+        && currentNode === startingNode
+        && visited.size === component.size
+        ? ordered
+        : null;
+    }
+    currentIndex = next.edgeIndex;
+    reversed = next.atStart === false;
+    const nextRecord = records[currentIndex];
+    currentNode = reversed ? nextRecord.startKey : nextRecord.endKey;
+  }
+}
+
+function dxfMaterialLayerQualification(model, primitives) {
+  const rawLayers = [...new Set(primitives.flatMap((primitive) => [
+    primitive.layer,
+    ...(primitive.source?.dxfType === "POLYLINE"
+      ? (Array.isArray(primitive.source.classicPolylineVertexLayers)
+        ? primitive.source.classicPolylineVertexLayers
+        : [null])
+      : []),
+  ]))];
+  const normalizedLayers = [...new Set(rawLayers.map((layer) => (
+    typeof layer === "string" && layer ? normalizedUpper(layer) : null
+  )))];
+  if (normalizedLayers.length !== 1 || normalizedLayers[0] === null) {
+    return {
+      qualified: false,
+      layers: rawLayers,
+      reason: {
+        code: "material-region-single-layer-required",
+        message: "The selected DXF contour must be entirely on one explicitly named layer; cross-layer and unspecified-layer joins are not material authority.",
+      },
+    };
+  }
+  if (model.layers?.status !== "ready") {
+    return {
+      qualified: false,
+      layers: rawLayers,
+      reason: {
+        code: "material-region-layer-table-required",
+        message: "The DXF LAYER table is missing, duplicated, or unterminated, so the selected contour's visible layer state is not proven.",
+      },
+    };
+  }
+  const matching = model.layers.records.filter((record) => record.normalizedName === normalizedLayers[0]);
+  if (matching.length !== 1 || matching[0].issues.length) {
+    return {
+      qualified: false,
+      layers: rawLayers,
+      reason: {
+        code: "material-region-layer-record-ambiguous",
+        message: "The selected contour's LAYER record is missing, duplicated, or malformed, so its visibility state is not authoritative.",
+      },
+    };
+  }
+  const layer = matching[0];
+  if (layer.color < 0) {
+    return {
+      qualified: false,
+      layers: rawLayers,
+      reason: {
+        code: "material-region-layer-off",
+        message: `Layer '${layer.name}' is marked off by its negative color value and cannot define nominal material.`,
+      },
+    };
+  }
+  if (layer.flags & 1) {
+    return {
+      qualified: false,
+      layers: rawLayers,
+      reason: {
+        code: "material-region-layer-frozen",
+        message: `Layer '${layer.name}' is frozen and cannot define nominal material.`,
+      },
+    };
+  }
+  if (layer.flags !== 0) {
+    return {
+      qualified: false,
+      layers: rawLayers,
+      reason: {
+        code: "material-region-layer-state-unsupported",
+        message: `Layer '${layer.name}' uses unsupported state flags ${layer.flags}; its material visibility is not proven.`,
+      },
+    };
+  }
+  if (layer.plotValueSupplied && !layer.plot) {
+    return {
+      qualified: false,
+      layers: rawLayers,
+      reason: {
+        code: "material-region-layer-not-plotted",
+        message: `Layer '${layer.name}' is explicitly marked not plotted and cannot define nominal material.`,
+      },
+    };
+  }
+  return {
+    qualified: true,
+    layers: rawLayers,
+    layer: {
+      name: layer.name,
+      flags: layer.flags,
+      color: layer.color,
+      plot: layer.plot,
+      plotValueSupplied: layer.plotValueSupplied,
+      sourceLine: layer.line,
+    },
+    reason: null,
+  };
+}
+
+function dxfMaterialBoundaryReason(result) {
+  if (result.reason === "workload") {
+    return {
+      code: "material-region-intersection-workload-exceeded",
+      message: `The selected DXF contour exceeds the ${MAX_DXF_MATERIAL_TOPOLOGY_TESTS.toLocaleString()}-pair analytic topology limit.`,
+    };
+  }
+  if (result.reason === "clearance") {
+    return {
+      code: "material-region-self-intersection-clearance",
+      message: "Non-adjacent DXF contour edges are closer than their combined geometry-uncertainty envelope, so one simple boundary is not proven.",
+    };
+  }
+  if (result.reason === "gap") {
+    return {
+      code: "material-region-boundary-gap",
+      message: `DXF contour edges ${result.firstIndex + 1} and ${result.secondIndex + 1} do not share one endpoint within calculation roundoff.`,
+    };
+  }
+  return {
+    code: "material-region-self-intersection",
+    message: `The selected DXF contour has an unexpected analytic intersection or overlap between edges ${result.firstIndex + 1} and ${result.secondIndex + 1}.`,
+  };
+}
+
+function discoverDxfMaterialContours(model, primitives) {
+  const records = [];
+  const endpoints = [];
+  const circles = [];
+  const invalidPrimitiveIds = [];
+  for (const primitive of primitives) {
+    if (!["line", "arc", "circle"].includes(primitive.type) || !primitive.id) {
+      invalidPrimitiveIds.push(primitive.id ?? null);
+      continue;
+    }
+    if (primitive.type === "circle") {
+      circles.push(primitive);
+      continue;
+    }
+    if (!materialFinitePoint(primitive.start) || !materialFinitePoint(primitive.end)) {
+      invalidPrimitiveIds.push(primitive.id);
+      continue;
+    }
+    const record = {
+      primitive,
+      startKey: null,
+      endKey: null,
+    };
+    const edgeIndex = records.length;
+    records.push(record);
+    endpoints.push({
+      edgeIndex,
+      atStart: true,
+      point: primitive.start,
+      sourceDerived: primitive.source?.dxfType === "ARC",
+    }, {
+      edgeIndex,
+      atStart: false,
+      point: primitive.end,
+      sourceDerived: primitive.source?.dxfType === "ARC",
+    });
+  }
+
+  const graphPairTests = endpoints.length * (endpoints.length - 1) / 2;
+  const graphWorkloadBlocked = !Number.isSafeInteger(graphPairTests)
+    || graphPairTests > MAX_DXF_MATERIAL_TOPOLOGY_TESTS;
+  const nodeIncidence = new Map();
+  if (!graphWorkloadBlocked) {
+    const parents = endpoints.map((_, index) => index);
+    const root = (index) => {
+      let cursor = index;
+      while (parents[cursor] !== cursor) cursor = parents[cursor];
+      while (parents[index] !== index) {
+        const next = parents[index];
+        parents[index] = cursor;
+        index = next;
+      }
+      return cursor;
+    };
+    const join = (first, second) => {
+      const firstRoot = root(first);
+      const secondRoot = root(second);
+      if (firstRoot !== secondRoot) parents[secondRoot] = firstRoot;
+    };
+    for (let firstIndex = 0; firstIndex < endpoints.length; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < endpoints.length; secondIndex += 1) {
+        const first = endpoints[firstIndex];
+        const second = endpoints[secondIndex];
+        const exact = materialEndpointKey(first.point) === materialEndpointKey(second.point);
+        if (!exact && !first.sourceDerived && !second.sourceDerived) continue;
+        const arithmeticAllowance = materialJoinRoundoff(first, second, records);
+        if (exact || materialDistance(first.point, second.point) <= arithmeticAllowance) {
+          join(firstIndex, secondIndex);
+        }
+      }
+    }
+    endpoints.forEach((endpoint, endpointIndex) => {
+      const key = `node-${root(endpointIndex)}`;
+      const record = records[endpoint.edgeIndex];
+      if (endpoint.atStart) record.startKey = key;
+      else record.endKey = key;
+      if (!nodeIncidence.has(key)) nodeIncidence.set(key, []);
+      nodeIncidence.get(key).push({edgeIndex: endpoint.edgeIndex, atStart: endpoint.atStart});
+    });
+  }
+
+  const components = [];
+  const visited = new Set();
+  for (let seed = 0; !graphWorkloadBlocked && seed < records.length; seed += 1) {
+    if (visited.has(seed)) continue;
+    const component = new Set();
+    const pending = [seed];
+    while (pending.length) {
+      const edgeIndex = pending.pop();
+      if (visited.has(edgeIndex)) continue;
+      visited.add(edgeIndex);
+      component.add(edgeIndex);
+      const record = records[edgeIndex];
+      for (const key of [record.startKey, record.endKey]) {
+        for (const incident of nodeIncidence.get(key) || []) {
+          if (!visited.has(incident.edgeIndex)) pending.push(incident.edgeIndex);
+        }
+      }
+    }
+    components.push(component);
+  }
+
+  const closedComponents = [];
+  let openComponentCount = graphWorkloadBlocked ? records.length : 0;
+  let branchedComponentCount = 0;
+  for (const component of components) {
+    const componentNodes = new Set();
+    for (const edgeIndex of component) {
+      componentNodes.add(records[edgeIndex].startKey);
+      componentNodes.add(records[edgeIndex].endKey);
+    }
+    const degrees = [...componentNodes].map((key) => (
+      (nodeIncidence.get(key) || []).filter((entry) => component.has(entry.edgeIndex)).length
+    ));
+    if (degrees.some((degree) => degree > 2)) {
+      branchedComponentCount += 1;
+      continue;
+    }
+    if (degrees.some((degree) => degree !== 2)) {
+      openComponentCount += 1;
+      continue;
+    }
+    const ordered = orderedClosedComponent(component, records, nodeIncidence);
+    if (ordered) closedComponents.push(ordered);
+    else branchedComponentCount += 1;
+  }
+  const closedContourCount = closedComponents.length + circles.length;
+  const contourLimitExceeded = closedContourCount > MAX_DXF_MATERIAL_CONTOURS;
+  if (!contourLimitExceeded) {
+    closedComponents.push(...circles.map((circle) => [orientedMaterialPrimitive(circle, false)]));
+    closedComponents.sort((first, second) => (
+      deterministicDxfContourId(model, first).localeCompare(deterministicDxfContourId(model, second))
+    ));
+  }
+
+  const requiredPairTests = graphPairTests + closedComponents.reduce(
+    (total, boundary) => total + boundary.length * (boundary.length - 1) / 2,
+    0,
+  );
+  const workloadBlocked = !Number.isSafeInteger(requiredPairTests)
+    || requiredPairTests > MAX_DXF_MATERIAL_TOPOLOGY_TESTS;
+  const candidates = (contourLimitExceeded ? [] : closedComponents).map((orderedPrimitives) => {
+    const contourId = deterministicDxfContourId(model, orderedPrimitives);
+    const simple = workloadBlocked
+      ? {qualified: false, reason: "workload"}
+      : qualifySimpleDxfMaterialBoundary(orderedPrimitives);
+    const layerQualification = dxfMaterialLayerQualification(model, orderedPrimitives);
+    const primitiveIds = orderedPrimitives.map((primitive) => String(primitive.id));
+    const sourceEntityIds = [...new Set(orderedPrimitives.map((primitive) => (
+      primitive.source?.entityId ?? null
+    )).filter(Boolean))].sort();
+    const sourceEntityTypes = [...new Set(orderedPrimitives.map((primitive) => (
+      primitive.source?.dxfType ?? null
+    )).filter(Boolean))].sort();
+    const topologyReason = simple.qualified ? null : dxfMaterialBoundaryReason(simple);
+    return {
+      contourId,
+      primitiveIds,
+      sourceEntityIds,
+      sourceEntityTypes,
+      layers: layerQualification.layers,
+      layerState: layerQualification.layer ?? null,
+      primitiveCount: orderedPrimitives.length,
+      bounds: transformedBounds(orderedPrimitives),
+      closed: true,
+      eligible: simple.qualified && layerQualification.qualified,
+      unqualifiedReason: topologyReason || layerQualification.reason,
+      orderedPrimitives,
+      simpleBoundary: simple.qualified ? simple.boundary : null,
+      simpleTopologyQualified: simple.qualified,
+    };
+  });
+  return {
+    candidates,
+    summary: {
+      qualified: !workloadBlocked && !contourLimitExceeded,
+      closedContours: closedContourCount,
+      openComponents: openComponentCount,
+      branchedComponents: branchedComponentCount,
+      invalidPrimitives: invalidPrimitiveIds.length,
+      maximumContours: MAX_DXF_MATERIAL_CONTOURS,
+      contourLimitExceeded,
+      requiredPairTests,
+      maximumPairTests: MAX_DXF_MATERIAL_TOPOLOGY_TESTS,
+      workloadBlocked,
+    },
+  };
+}
+
+function materialRepresentativePoint(boundary) {
+  const primitive = boundary[0];
+  if (primitive.type === "line") {
+    return {
+      z: (primitive.start.z + primitive.end.z) / 2,
+      x: (primitive.start.x + primitive.end.x) / 2,
+    };
+  }
+  const angle = primitive.type === "circle" ? 0 : primitive.startAngle + primitive.sweep / 2;
+  return {
+    z: primitive.center.z + Math.cos(angle) * primitive.radius,
+    x: primitive.center.x + Math.sin(angle) * primitive.radius,
+  };
+}
+
+function materialRayArcMembership(primitive, angle) {
+  if (primitive.type === "circle") return {onArc: true, ambiguous: false};
+  const magnitude = Math.abs(primitive.sweep);
+  const delta = primitive.sweep >= 0
+    ? materialNormalizeAngle(angle - primitive.startAngle)
+    : materialNormalizeAngle(primitive.startAngle - angle);
+  const angularRoundoff = materialRoundingBound(
+    [angle, primitive.startAngle, primitive.sweep],
+    MATERIAL_TRIG_ROUNDING_ULPS,
+  );
+  const dimensionalAllowance = (
+    Math.max(0, Number(primitive.geometryUncertaintyMm) || 0)
+    + materialRoundingBound([
+      primitive.center.z, primitive.center.x, primitive.radius,
+      primitive.start?.z, primitive.start?.x, primitive.end?.z, primitive.end?.x,
+    ])
+  ) / primitive.radius;
+  const endpointAllowance = Math.max(angularRoundoff, dimensionalAllowance);
+  const fromStart = Math.min(delta, TAU - delta);
+  const fromEnd = Math.abs(delta - magnitude);
+  if (fromStart <= endpointAllowance || fromEnd <= endpointAllowance) {
+    return {onArc: delta <= magnitude + endpointAllowance, ambiguous: true};
+  }
+  return {onArc: delta < magnitude, ambiguous: false};
+}
+
+function materialRayParityAt(candidate, boundary) {
+  let crossings = 0;
+  let ambiguous = false;
+  for (const primitive of boundary) {
+    if (primitive.type === "line") {
+      const endpointAllowance = materialRoundingBound([
+        candidate.z, candidate.x,
+        primitive.start.z, primitive.start.x, primitive.end.z, primitive.end.x,
+      ]);
+      if (Math.abs(candidate.z - primitive.start.z) <= endpointAllowance
+        || Math.abs(candidate.z - primitive.end.z) <= endpointAllowance) {
+        ambiguous = true;
+      }
+      const startAbove = primitive.start.z > candidate.z;
+      const endAbove = primitive.end.z > candidate.z;
+      if (startAbove === endAbove) continue;
+      const parameter = (candidate.z - primitive.start.z) / (primitive.end.z - primitive.start.z);
+      const crossingX = primitive.start.x + (primitive.end.x - primitive.start.x) * parameter;
+      if (!Number.isFinite(crossingX)) return {inside: null, ambiguous: true};
+      if (Math.abs(crossingX - candidate.x) <= endpointAllowance) ambiguous = true;
+      else if (crossingX > candidate.x) crossings += 1;
+      continue;
+    }
+    const ratio = (candidate.z - primitive.center.z) / primitive.radius;
+    if (!Number.isFinite(ratio)) return {inside: null, ambiguous: true};
+    const ratioAllowance = materialRoundingBound([
+      candidate.z, primitive.center.z, primitive.radius,
+    ]) / primitive.radius;
+    if (ratio < -1 - ratioAllowance || ratio > 1 + ratioAllowance) continue;
+    if (Math.abs(Math.abs(ratio) - 1) <= ratioAllowance) {
+      ambiguous = true;
+      continue;
+    }
+    const angle = Math.acos(Math.max(-1, Math.min(1, ratio)));
+    for (const possibleAngle of [angle, -angle]) {
+      const membership = materialRayArcMembership(primitive, possibleAngle);
+      if (!membership.onArc) continue;
+      if (membership.ambiguous) {
+        ambiguous = true;
+        continue;
+      }
+      const crossingX = primitive.center.x + Math.sin(possibleAngle) * primitive.radius;
+      const crossingAllowance = Math.max(
+        Math.max(0, Number(primitive.geometryUncertaintyMm) || 0),
+        materialRoundingBound([crossingX, candidate.x, primitive.center.x, primitive.radius]),
+      );
+      if (Math.abs(crossingX - candidate.x) <= crossingAllowance) ambiguous = true;
+      else if (crossingX > candidate.x) crossings += 1;
+    }
+  }
+  return {inside: crossings % 2 === 1, ambiguous};
+}
+
+function classifyPointAgainstMaterialBoundary(candidate, boundary) {
+  const boundaryUncertaintyMm = Math.max(
+    0,
+    ...boundary.map((primitive) => Number(primitive.geometryUncertaintyMm) || 0),
+  );
+  const nearestDistanceMm = Math.min(
+    ...boundary.map((primitive) => materialPointToPrimitiveDistance(candidate, primitive)),
+  );
+  const localRoundoffMm = materialRoundingBound([
+    candidate.z, candidate.x, nearestDistanceMm,
+    ...boundary.flatMap((primitive) => [
+      primitive.start?.z, primitive.start?.x, primitive.end?.z, primitive.end?.x,
+      primitive.center?.z, primitive.center?.x, primitive.radius,
+    ]),
+  ]);
+  if (!Number.isFinite(nearestDistanceMm)
+    || nearestDistanceMm <= boundaryUncertaintyMm + localRoundoffMm) return "ambiguous";
+  const shiftMm = Math.max(localRoundoffMm * 8, Number.MIN_VALUE);
+  if (!Number.isFinite(shiftMm) || shiftMm >= nearestDistanceMm / 2) return "ambiguous";
+  const classifications = [-shiftMm, 0, shiftMm].map((shift) => (
+    materialRayParityAt({z: candidate.z + shift, x: candidate.x}, boundary)
+  ));
+  if (classifications.some((classification) => classification.ambiguous || classification.inside === null)) {
+    return "ambiguous";
+  }
+  const first = classifications[0].inside;
+  return classifications.every((classification) => classification.inside === first)
+    ? (first ? "inside" : "outside")
+    : "ambiguous";
+}
+
+function selectedContourAmbiguity(selected, candidates) {
+  const others = candidates.filter((candidate) => (
+    candidate !== selected && candidate.simpleTopologyQualified && candidate.simpleBoundary?.length
+  ));
+  const requiredPairTests = others.reduce(
+    (total, candidate) => total + selected.simpleBoundary.length * candidate.simpleBoundary.length,
+    0,
+  );
+  if (!Number.isSafeInteger(requiredPairTests)
+    || requiredPairTests > MAX_DXF_MATERIAL_TOPOLOGY_TESTS) {
+    return {
+      code: "material-region-contour-relationship-workload-exceeded",
+      message: `The selected contour's relationship to other closed DXF contours exceeds the ${MAX_DXF_MATERIAL_TOPOLOGY_TESTS.toLocaleString()}-pair topology limit.`,
+    };
+  }
+  for (const other of others) {
+    let minimumDistanceMm = Number.POSITIVE_INFINITY;
+    for (const first of selected.simpleBoundary) {
+      for (const second of other.simpleBoundary) {
+        const intersections = materialPrimitiveIntersections(first, second);
+        if (intersections.overlap || intersections.points.length) {
+          return {
+            code: "material-region-other-contour-intersection",
+            message: "The explicitly selected contour intersects or touches another closed contour, so inside material versus a hole is ambiguous.",
+          };
+        }
+        minimumDistanceMm = Math.min(
+          minimumDistanceMm,
+          materialMinimumPrimitiveDistance(first, second),
+        );
+      }
+    }
+    const combinedUncertaintyMm = Math.max(
+      ...selected.simpleBoundary.map((primitive) => Number(primitive.geometryUncertaintyMm) || 0),
+    ) + Math.max(
+      ...other.simpleBoundary.map((primitive) => Number(primitive.geometryUncertaintyMm) || 0),
+    );
+    const clearanceRoundoffMm = materialRoundingBound([
+      minimumDistanceMm,
+      selected.bounds?.minZ, selected.bounds?.maxZ, selected.bounds?.minX, selected.bounds?.maxX,
+      other.bounds?.minZ, other.bounds?.maxZ, other.bounds?.minX, other.bounds?.maxX,
+    ], 256);
+    if (!Number.isFinite(minimumDistanceMm)
+      || minimumDistanceMm <= combinedUncertaintyMm + clearanceRoundoffMm) {
+      return {
+        code: "material-region-other-contour-clearance",
+        message: "Another closed DXF contour is inside the combined geometry-uncertainty clearance of the selection, so material topology is ambiguous.",
+      };
+    }
+    const otherAgainstSelected = classifyPointAgainstMaterialBoundary(
+      materialRepresentativePoint(other.simpleBoundary),
+      selected.simpleBoundary,
+    );
+    const selectedAgainstOther = classifyPointAgainstMaterialBoundary(
+      materialRepresentativePoint(selected.simpleBoundary),
+      other.simpleBoundary,
+    );
+    if (otherAgainstSelected === "ambiguous" || selectedAgainstOther === "ambiguous") {
+      return {
+        code: "material-region-contour-relationship-ambiguous",
+        message: "The selected DXF contour's relationship to another closed contour cannot be bounded without guessing hole/material topology.",
+      };
+    }
+    if (otherAgainstSelected === "inside" || selectedAgainstOther === "inside") {
+      return {
+        code: "material-region-nested-contour-ambiguous",
+        message: "The selected DXF contour is nested with another closed contour; this bounded workflow cannot infer which loop is a hole or nominal material.",
+      };
+    }
+  }
+  return null;
+}
+
+function unqualifiedDxfMaterialRegion(code, message, {selection = null, provenance = null} = {}) {
+  return {
+    schemaVersion: 1,
+    qualification: DXF_MATERIAL_REGION_QUALIFICATION,
+    qualified: false,
+    coordinateSystem: "lathe-xz",
+    sourceContourId: selection?.contourId ?? null,
+    profileSide: selection?.materialSide === "inside" ? "explicit-inside" : null,
+    materialSide: selection?.materialSide ?? null,
+    boundary: null,
+    boundaryClosed: false,
+    axisEndpoints: [],
+    geometryUncertaintyMm: null,
+    provenance,
+    unqualifiedReason: {code, message},
+  };
+}
+
+function buildDxfMaterialRegion(
+  model,
+  primitives,
+  transform,
+  mappedAuthorized,
+  canonicalMillimeters,
+  materialSelection,
+) {
+  const discovery = discoverDxfMaterialContours(model, primitives);
+  const publicContours = discovery.candidates.map((candidate) => ({
+    contourId: candidate.contourId,
+    primitiveIds: [...candidate.primitiveIds],
+    sourceEntityIds: [...candidate.sourceEntityIds],
+    sourceEntityTypes: [...candidate.sourceEntityTypes],
+    layers: [...candidate.layers],
+    layerState: candidate.layerState ? {...candidate.layerState} : null,
+    primitiveCount: candidate.primitiveCount,
+    bounds: candidate.bounds ? {...candidate.bounds} : null,
+    closed: true,
+    eligible: candidate.eligible,
+    unqualifiedReason: candidate.unqualifiedReason ? {...candidate.unqualifiedReason} : null,
+    layerVisibilityAuthority: "explicit-visible-layer-record-required-for-material-only",
+  }));
+  const sourceHash = typeof model.source?.hash === "string" && model.source.hash
+    ? model.source.hash
+    : null;
+  const selected = discovery.candidates.find((candidate) => (
+    candidate.contourId === materialSelection?.contourId
+  ));
+  const provenance = selected ? {
+    format: "ascii-dxf",
+    sourceName: model.source?.name ?? null,
+    sourceHash,
+    contourId: selected.contourId,
+    primitiveIds: [...selected.primitiveIds],
+    sourceEntityIds: [...selected.sourceEntityIds],
+    sourceEntityTypes: [...selected.sourceEntityTypes],
+    layers: [...selected.layers],
+    layerState: selected.layerState ? {...selected.layerState} : null,
+    transform: transform ? {
+      mapping: transform.mapping,
+      origin: {...transform.origin},
+      offset: {...transform.offset},
+      zDirection: transform.zDirection,
+      radialDirection: transform.radialDirection,
+    } : null,
+    selectionAuthority: "explicit-closed-contour-and-inside-material-confirmation",
+    layerVisibilityAuthority: "resolved-visible-modelspace-layer-record",
+  } : null;
+  let materialRegion;
+  if (!mappedAuthorized) {
+    materialRegion = unqualifiedDxfMaterialRegion(
+      "material-region-mapping-unauthorized",
+      "The mapped DXF is not authorized, so it cannot define a nominal-material region.",
+      {selection: materialSelection, provenance},
+    );
+  } else if (!canonicalMillimeters) {
+    materialRegion = unqualifiedDxfMaterialRegion(
+      "material-region-canonical-millimeters-required",
+      "Signed DXF material entry requires mapped boundary coordinates in canonical millimeters.",
+      {selection: materialSelection, provenance},
+    );
+  } else if (discovery.summary.contourLimitExceeded) {
+    materialRegion = unqualifiedDxfMaterialRegion(
+      "material-region-contour-limit-exceeded",
+      `DXF contains ${discovery.summary.closedContours.toLocaleString()} closed contours; signed material selection supports at most ${MAX_DXF_MATERIAL_CONTOURS.toLocaleString()}. Export a profile-only DXF. The ordinary overlay remains available.`,
+      {selection: materialSelection},
+    );
+  } else if (!materialSelection) {
+    materialRegion = unqualifiedDxfMaterialRegion(
+      "material-region-explicit-selection-required",
+      "Select one closed DXF contour and explicitly confirm that its inside is nominal material.",
+    );
+  } else if (typeof materialSelection.contourId !== "string"
+    || materialSelection.materialSide !== "inside") {
+    materialRegion = unqualifiedDxfMaterialRegion(
+      "material-region-inside-confirmation-required",
+      "DXF material entry requires one current contour ID and an explicit 'inside is nominal material' confirmation.",
+      {selection: materialSelection},
+    );
+  } else if (!selected) {
+    materialRegion = unqualifiedDxfMaterialRegion(
+      "material-region-selection-invalid",
+      "The selected DXF contour does not exist in the current source and mapping; select it again.",
+      {selection: materialSelection},
+    );
+  } else if (!sourceHash) {
+    materialRegion = unqualifiedDxfMaterialRegion(
+      "material-region-source-hash-required",
+      "Signed DXF material entry requires the retained exact source SHA-256 before a contour selection can be authoritative.",
+      {selection: materialSelection, provenance},
+    );
+  } else if (!selected.eligible) {
+    materialRegion = unqualifiedDxfMaterialRegion(
+      selected.unqualifiedReason.code,
+      selected.unqualifiedReason.message,
+      {selection: materialSelection, provenance},
+    );
+  } else {
+    const ambiguity = selectedContourAmbiguity(selected, discovery.candidates);
+    if (ambiguity) {
+      materialRegion = unqualifiedDxfMaterialRegion(
+        ambiguity.code,
+        ambiguity.message,
+        {selection: materialSelection, provenance},
+      );
+    } else {
+      const boundary = selected.simpleBoundary;
+      const geometryUncertaintyMm = Math.max(
+        0,
+        ...boundary.map((primitive) => Number(primitive.geometryUncertaintyMm) || 0),
+      );
+      materialRegion = {
+        schemaVersion: 1,
+        qualification: DXF_MATERIAL_REGION_QUALIFICATION,
+        qualified: true,
+        coordinateSystem: "lathe-xz",
+        sourceContourId: selected.contourId,
+        profileSide: "explicit-inside",
+        materialSide: "inside",
+        boundary,
+        boundaryClosed: true,
+        axisEndpoints: [],
+        geometryUncertaintyMm,
+        provenance,
+        unqualifiedReason: null,
+      };
+    }
+  }
+  return {materialContours: publicContours, materialTopology: discovery.summary, materialRegion};
+}
+
 function failedTransform(model, diagnostics, sourceUnit = null, targetUnit = null, transform = null) {
   return {
     schemaVersion: 1,
+    format: "dxf-profile",
     coordinateSystem: "lathe-xz",
     source: model.source,
     sourceModel: model,
@@ -1328,6 +2712,12 @@ function failedTransform(model, diagnostics, sourceUnit = null, targetUnit = nul
     transform,
     primitives: [],
     geometry: [],
+    materialContours: [],
+    materialTopology: null,
+    materialRegion: unqualifiedDxfMaterialRegion(
+      "material-region-mapping-unauthorized",
+      "The mapped DXF is not authorized, so it cannot define a nominal-material region.",
+    ),
     bounds: null,
     diagnostics,
     authorized: false,
@@ -1377,6 +2767,7 @@ export function toLatheGeometry(model, {
   offset = {z: 0, x: 0},
   zDirection = 1,
   radialDirection = 1,
+  materialSelection = null,
 } = {}) {
   if (!model || model.format !== "ascii-dxf" || !Array.isArray(model.primitives)) {
     throw new TypeError("toLatheGeometry requires a parsed DXF model.");
@@ -1536,8 +2927,17 @@ export function toLatheGeometry(model, {
     diagnostics.push(makeDiagnostic("warning", "units-explicitly-overridden", `Declared ${declaredSource.name} units were explicitly overridden with ${sourceUnit.name}.`));
   }
   const authorized = !diagnostics.some((diagnostic) => diagnostic.severity === "error" && !diagnostic.resolved);
+  const material = buildDxfMaterialRegion(
+    model,
+    primitives,
+    transform,
+    authorized,
+    targetUnit.millimetersPerUnit === 1,
+    materialSelection,
+  );
   return {
     schemaVersion: 1,
+    format: "dxf-profile",
     coordinateSystem: "lathe-xz",
     source: model.source,
     sourceModel: model,
@@ -1550,6 +2950,7 @@ export function toLatheGeometry(model, {
     primitives,
     geometry: primitives,
     bounds,
+    ...material,
     diagnostics,
     authorized,
   };

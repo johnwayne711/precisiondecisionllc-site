@@ -1,4 +1,5 @@
 import {isLiveToolSegment, stockContourPoints} from "./simulation.mjs";
+import {hasStockCavities, stockSectionPolygons} from "./stock-section-view.mjs";
 
 const PATH_COLORS = {
   rapid: "#f59e0b",
@@ -685,6 +686,10 @@ function drawCardinalStockSilhouette(context, rings, project, radialAxis) {
 
 function drawStockSurface(context, stock, orientationSign, project, camera, quality) {
   if (!stock?.radius || !stock?.length) return;
+  if (hasStockCavities(stock)) {
+    drawSectionStock(context, stock, orientationSign, project, quality);
+    return;
+  }
   const cardinalView = cardinalStockView(camera);
   const rings = stockRings(stock, orientationSign, cardinalView === "front-back" || cardinalView === "top-bottom" ? quality.contourRings : quality.axialRings);
   if (!rings.length) return;
@@ -721,6 +726,45 @@ function drawStockSurface(context, stock, orientationSign, project, camera, qual
     ], project, {
       color: "#38bdf8", width: 0.9, dash: [4, 4], alpha: 0.26,
     });
+  }
+}
+
+function drawSectionStock(context, stock, orientationSign, project, quality) {
+  let sections;
+  const preview = quality.id === "interactive-preview";
+  const tolerance = Number(quality.arcChordTolerance) || 0.00254;
+  const chordSlices = Math.ceil(Math.PI / Math.acos(clamp(1 - tolerance / stock.radius, -1, 1)));
+  const slices = preview ? 16 : Math.max(quality.radialSlices || 32, chordSlices);
+  try {
+    if (!Number.isFinite(slices) || slices > 2048) throw new RangeError("Selected radial chord tolerance exceeds the surface display budget.");
+    sections = stockSectionPolygons(stock, {tolerance, maximumPoints: Math.floor(180000 / slices)});
+  } catch (error) {
+    context.fillStyle = "#fb7185";
+    context.font = '12px "Cascadia Code", Consolas, monospace';
+    context.fillText(`STOCK DISPLAY BLOCKED: ${error.message}`, 16, 48);
+    return;
+  }
+  const facets = [];
+  for (const points of sections) {
+    for (let index = 0; index < points.length; index += 1) {
+      const before = points[index], after = points[(index + 1) % points.length];
+      if (before.radius === 0 && after.radius === 0) continue;
+      for (let slice = 0; slice < slices; slice += 1) {
+        const a = slice / slices * Math.PI * 2, b = (slice + 1) / slices * Math.PI * 2;
+        const point = (p, angle) => project({x: p.z * orientationSign, y: p.radius * Math.cos(angle), z: p.radius * Math.sin(angle)});
+        const screen = [point(before, a), point(after, a), point(after, b), point(before, b)];
+        const light = clamp(0.5 + Math.cos((a + b) / 2 - 0.7) * 0.28, 0.2, 0.8);
+        facets.push({screen, depth: screen.reduce((sum, p) => sum + p.depth, 0) / 4, light});
+      }
+    }
+  }
+  facets.sort((a, b) => a.depth - b.depth);
+  for (const {screen, light} of facets) {
+    context.beginPath();
+    screen.forEach((point, index) => { if (index) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y); });
+    context.closePath();
+    context.fillStyle = `rgba(38, ${Math.round(105 + light * 55)}, ${Math.round(120 + light * 72)}, .58)`;
+    context.fill();
   }
 }
 

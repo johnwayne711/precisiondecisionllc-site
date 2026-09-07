@@ -1,5 +1,13 @@
+import {MCLNL164D_CAD_PROJECTION} from "./tool-cad-left-projection.mjs";
+import {MDJNR164D_CAD_PROJECTION} from "./tool-cad-d-projection.mjs";
+import {MVJNR164D_CAD_PROJECTION} from "./tool-cad-v-projection.mjs";
+import {A16TMCLNR4_CAD_PROJECTION} from "./tool-cad-boring-projection.mjs";
+import {PROFILED_TOOLS} from "./tool-profile-sources.mjs";
+import {profileCatalogRecords} from "./tool-profile-catalog.mjs";
+import {nominalLatheCuttingClaim} from "./tool-lathe-cutting.mjs";
+
 export const TOOL_LIBRARY_SCHEMA_VERSION = "1.0.0";
-export const TOOL_LIBRARY_CATALOG_REVISION = "kennametal-seed-2026-08-30.1";
+export const TOOL_LIBRARY_CATALOG_REVISION = "kennametal-seed-2026-09-07.8";
 export const TOOL_LIBRARY_RETRIEVED_ON = "2026-08-30";
 
 function deepFreeze(value) {
@@ -59,6 +67,13 @@ const SOURCE_RECORDS = [
     "source:kennametal:holder:1096068:cad-step",
     "manufacturer-cad-step",
     "https://dpk3n3gg92jwt.cloudfront.net/domains/kennametal/zip-g/MCLNR163C_GTM.stp",
+    {sha256: "db9a866e3044c23e2869604ee24e394fbacc5f826efa673ed189bdccb44004c4", verifiedOn: "2026-09-06"},
+  ),
+  sourceRecord(
+    "source:kennametal:holder:1096068:cad-manifest",
+    "manufacturer-cad-manifest",
+    "https://dpk3n3gg92jwt.cloudfront.net/domains/kennametal/json/MCLNR163C_GTM/MCLNR163C_GTM.json",
+    {sha256: "acf5fbd709477a75c504d661ac6603729a9309e34e226689e0ce6998f06ca499", retrievedOn: "2026-09-06"},
   ),
   sourceRecord(
     "source:kennametal:insert:1158184:product-page",
@@ -74,16 +89,25 @@ const SOURCE_RECORDS = [
     "source:kennametal:holder:1096245:product-page",
     "manufacturer-product-page",
     "https://www.kennametal.com/us/en/products/p.mdjn-3.1096245.html",
+    {verifiedOn: "2026-09-06"},
   ),
   sourceRecord(
     "source:kennametal:holder:1096245:cad-step",
     "manufacturer-cad-step",
-    "https://dpk3n3gg92jwt.cloudfront.net/domains/kennametal/zip-g/MDJNR164D_GTM.stp",
+    MDJNR164D_CAD_PROJECTION.source.stepUrl,
+    {sha256: MDJNR164D_CAD_PROJECTION.source.stepSha256, verifiedOn: "2026-09-06"},
+  ),
+  sourceRecord(
+    "source:kennametal:holder:1096245:cad-manifest",
+    "manufacturer-cad-manifest",
+    MDJNR164D_CAD_PROJECTION.source.manifestUrl,
+    {sha256: MDJNR164D_CAD_PROJECTION.source.manifestSha256, retrievedOn: "2026-09-06"},
   ),
   sourceRecord(
     "source:kennametal:insert:1159612:product-page",
     "manufacturer-product-page",
     "https://www.kennametal.com/us/en/products/p.dnmg.1159612.html",
+    {verifiedOn: "2026-09-06"},
   ),
   sourceRecord(
     "source:kennametal:insert:1159612:cad-step",
@@ -94,16 +118,25 @@ const SOURCE_RECORDS = [
     "source:kennametal:holder:1096291:product-page",
     "manufacturer-product-page",
     "https://www.kennametal.com/us/en/products/p.mvjn-3.1096291.html",
+    {verifiedOn: "2026-09-06"},
   ),
   sourceRecord(
     "source:kennametal:holder:1096291:cad-step",
     "manufacturer-cad-step",
-    "https://dpk3n3gg92jwt.cloudfront.net/domains/kennametal/zip-g/MVJNR164D_GTM.stp",
+    MVJNR164D_CAD_PROJECTION.source.stepUrl,
+    {sha256: MVJNR164D_CAD_PROJECTION.source.stepSha256, verifiedOn: "2026-09-06"},
+  ),
+  sourceRecord(
+    "source:kennametal:holder:1096291:cad-manifest",
+    "manufacturer-cad-manifest",
+    MVJNR164D_CAD_PROJECTION.source.manifestUrl,
+    {sha256: MVJNR164D_CAD_PROJECTION.source.manifestSha256, retrievedOn: "2026-09-06"},
   ),
   sourceRecord(
     "source:kennametal:insert:1160070:product-page",
     "manufacturer-product-page",
     "https://www.kennametal.com/us/en/products/p.vnmg.1160070.html",
+    {verifiedOn: "2026-09-06"},
   ),
   sourceRecord(
     "source:kennametal:insert:1160070:cad-step",
@@ -129,6 +162,42 @@ const SOURCE_RECORDS = [
     "source:kennametal:insert:4109881:cad-step",
     "manufacturer-cad-step",
     "https://dpk3n3gg92jwt.cloudfront.net/domains/kennametal/zip-g/NP3002RK_GTM.stp",
+  ),
+  sourceRecord(
+    "source:kennametal:holder:1096092:product-page",
+    "manufacturer-product-page",
+    "https://www.kennametal.com/us/en/products/p.mcln-5.1096092.html",
+    {retrievedOn: "2026-09-06"},
+  ),
+  sourceRecord(
+    "source:kennametal:holder:1096092:cad-step",
+    "manufacturer-cad-step",
+    MCLNL164D_CAD_PROJECTION.source.stepUrl,
+    {sha256: MCLNL164D_CAD_PROJECTION.source.stepSha256, retrievedOn: "2026-09-06"},
+  ),
+  sourceRecord(
+    "source:kennametal:holder:1096092:cad-manifest",
+    "manufacturer-cad-manifest",
+    MCLNL164D_CAD_PROJECTION.source.manifestUrl,
+    {sha256: MCLNL164D_CAD_PROJECTION.source.manifestSha256, retrievedOn: "2026-09-06"},
+  ),
+  sourceRecord(
+    "source:kennametal:holder:1016456:product-page",
+    "manufacturer-product-page",
+    "https://www.kennametal.com/us/en/products/p.a-mcln-5.1016456.html",
+    {retrievedOn: "2026-09-07", verifiedOn: "2026-09-07"},
+  ),
+  sourceRecord(
+    "source:kennametal:holder:1016456:cad-step",
+    "manufacturer-cad-step",
+    A16TMCLNR4_CAD_PROJECTION.source.stepUrl,
+    {sha256: A16TMCLNR4_CAD_PROJECTION.source.stepSha256, retrievedOn: "2026-09-07"},
+  ),
+  sourceRecord(
+    "source:kennametal:holder:1016456:cad-manifest",
+    "manufacturer-cad-manifest",
+    A16TMCLNR4_CAD_PROJECTION.source.manifestUrl,
+    {sha256: A16TMCLNR4_CAD_PROJECTION.source.manifestSha256, retrievedOn: "2026-09-07"},
   ),
 ];
 
@@ -282,6 +351,65 @@ const HOLDERS = [
     sourceRefs: [
       "source:kennametal:holder:1016462:product-page",
       "source:kennametal:holder:1016462:cad-step",
+    ],
+  },
+  {
+    id: "holder:kennametal:1096092",
+    revision: 1,
+    revisionRef: "holder:kennametal:1096092@1",
+    manufacturer: "Kennametal",
+    materialNumber: "1096092",
+    catalogId: {iso: "MCLNL164D", ansi: "MCLNL164D"},
+    hand: "left",
+    gageInsert: "CN..432",
+    dimensions: {
+      units: "mm",
+      shankHeight: 25.4,
+      shankWidth: 25.4,
+      fDimension: 31.75,
+      overallLength: 152.4,
+      headLength: 30.48,
+    },
+    cuttingGeometry: {
+      application: "external-turning",
+      approachAngleDegrees: 95,
+      leadAngleDegrees: -5,
+      insertShape: "C",
+      insertIncludedAngleDegrees: 80,
+    },
+    officialCadAvailable: true,
+    sourceRefs: [
+      "source:kennametal:holder:1096092:product-page",
+      "source:kennametal:holder:1096092:cad-step",
+      "source:kennametal:holder:1096092:cad-manifest",
+    ],
+  },
+  {
+    id: "holder:kennametal:1016456",
+    revision: 1,
+    revisionRef: "holder:kennametal:1016456@1",
+    manufacturer: "Kennametal",
+    materialNumber: "1016456",
+    catalogId: {iso: "A16TMCLNR4", ansi: "A16TMCLNR4"},
+    hand: "right",
+    gageInsert: "CN..432",
+    dimensions: {
+      units: "mm",
+      shankDiameter: 25.4,
+      minimumBoreDiameter: 30.48,
+      fDimension: 16.26,
+      overallLength: 304.8,
+    },
+    cuttingGeometry: {
+      application: "internal-boring",
+      insertShape: "C",
+      insertIncludedAngleDegrees: 80,
+    },
+    officialCadAvailable: true,
+    sourceRefs: [
+      "source:kennametal:holder:1016456:product-page",
+      "source:kennametal:holder:1016456:cad-step",
+      "source:kennametal:holder:1016456:cad-manifest",
     ],
   },
 ];
@@ -446,7 +574,7 @@ const COMPATIBILITY_EDGES = [
     insertRevisionRef: "insert:kennametal:1159612@1",
     state: "manufacturer-listed-compatible",
     compatible: true,
-    evidence: "The holder specifies gage insert DN..432 and lists material 1159612 as a compatible workpiece-side part.",
+    evidence: "The MDJNR164D holder specifies gage insert DN..432 and explicitly lists DNMG432 material 1159612 as a compatible workpiece-side part. The mounted CAD retains a compatible-size gage outline, not chipbreaker-specific insert geometry.",
     sourceRefs: [
       "source:kennametal:holder:1096245:product-page",
       "source:kennametal:insert:1159612:product-page",
@@ -460,7 +588,7 @@ const COMPATIBILITY_EDGES = [
     insertRevisionRef: "insert:kennametal:1160070@1",
     state: "manufacturer-listed-compatible",
     compatible: true,
-    evidence: "The holder specifies gage insert VN..432 and lists material 1160070; the insert page lists holder material 1096291.",
+    evidence: "The MVJNR164D holder specifies gage insert VN..432 and explicitly lists VNMG432 material 1160070 as a compatible workpiece-side part; the insert page reciprocally lists holder material 1096291. The mounted CAD retains a compatible-size gage outline, not chipbreaker-specific insert geometry.",
     sourceRefs: [
       "source:kennametal:holder:1096291:product-page",
       "source:kennametal:insert:1160070:product-page",
@@ -478,6 +606,35 @@ const COMPATIBILITY_EDGES = [
     sourceRefs: [
       "source:kennametal:holder:1016462:product-page",
       "source:kennametal:insert:4109881:product-page",
+    ],
+  },
+  {
+    id: "compatibility:kennametal:1096092+1159602",
+    revision: 1,
+    revisionRef: "compatibility:kennametal:1096092+1159602@1",
+    holderRevisionRef: "holder:kennametal:1096092@1",
+    insertRevisionRef: "insert:kennametal:1159602@1",
+    state: "manufacturer-listed-compatible",
+    compatible: true,
+    evidence: "The MCLNL164D holder specifies gage insert CN..432 and explicitly lists CNMG432 material 1159602 as a compatible workpiece-side part. The mounted CAD retains a compatible-size gage outline, not chipbreaker-specific insert geometry.",
+    sourceRefs: [
+      "source:kennametal:holder:1096092:product-page",
+      "source:kennametal:insert:1159602:product-page",
+    ],
+  },
+  {
+    id: "compatibility:kennametal:1016456+1159602",
+    revision: 1,
+    revisionRef: "compatibility:kennametal:1016456+1159602@1",
+    holderRevisionRef: "holder:kennametal:1016456@1",
+    insertRevisionRef: "insert:kennametal:1159602@1",
+    state: "manufacturer-listed-compatible",
+    compatible: true,
+    evidence: "The A16TMCLNR4 holder specifies gage insert CN..432 and explicitly lists CNMG432 material 1159602; the insert page reciprocally lists holder material 1016456. The retained mounted CAD is a compatible-size gage outline, not chipbreaker-specific insert geometry.",
+    verifiedOn: "2026-09-07",
+    sourceRefs: [
+      "source:kennametal:holder:1016456:product-page",
+      "source:kennametal:insert:1159602:product-page",
     ],
   },
 ];
@@ -617,8 +774,8 @@ const ASSEMBLIES = [
   },
   {
     id: "kennametal-mclnr163c-cnmg322p",
-    revision: 1,
-    revisionRef: "assembly:kennametal:mclnr163c+cnmg322p@1",
+    revision: 2,
+    revisionRef: "assembly:kennametal:mclnr163c+cnmg322p@2",
     name: "Kennametal MCLNR163C + CNMG322P · RH",
     manufacturer: "Kennametal",
     holderRevisionRef: "holder:kennametal:1096068@1",
@@ -631,18 +788,71 @@ const ASSEMBLIES = [
       insertIcInches: 0.375,
       applications: ["external", "turning", "profiling", "facing"],
     },
-    catalogRecordOnly: true,
-    assignment: CATALOG_ONLY_ASSIGNMENT,
-    claims: catalogOnlyClaims(
-      "source:kennametal:holder:1096068:product-page",
-      "source:kennametal:insert:1158184:product-page",
-      ["source:kennametal:holder:1096068:product-page", "source:kennametal:insert:1158184:product-page"],
-    ),
+    catalogRecordOnly: false,
+    assignment: {
+      state: "mounted-display-only",
+      assignable: true,
+      scope: ["displayGeometry", "mountedReference"],
+      blockedOutsideScope: "Cutting and collision claims remain unavailable and are not authorized by this mounted display assignment.",
+    },
+    claims: {
+      identity: manufacturerClaim([
+        "source:kennametal:holder:1096068:product-page",
+        "source:kennametal:insert:1158184:product-page",
+      ]),
+      dimensions: manufacturerClaim([
+        "source:kennametal:holder:1096068:product-page",
+        "source:kennametal:insert:1158184:product-page",
+      ]),
+      compatibility: manufacturerClaim([
+        "source:kennametal:holder:1096068:product-page",
+        "source:kennametal:insert:1158184:product-page",
+      ]),
+      displayGeometry: {
+        state: "manufacturer-cad-projection",
+        available: true,
+        assignable: true,
+        revisionRef: "kennametal-mclnr163c-gtm-top-plan-v1",
+        projection: "Official GTM top-plan holder-body and mounted-insert display projection; stroke-only and display-only.",
+        sourceRefs: [
+          "source:kennametal:holder:1096068:cad-step",
+          "source:kennametal:holder:1096068:cad-manifest",
+        ],
+      },
+      mountedReference: {
+        state: "manufacturer-cad-reference",
+        available: true,
+        assignable: true,
+        revisionRef: "kennametal-mclnr163c-gtm-crp-v1",
+        reference: {
+          type: "manufacturer-cutting-reference-point",
+          coordinateSystem: "Kennametal MCLNR163C GTM model XYZ",
+          coordinateOrder: ["x", "y", "z"],
+          units: "mm",
+          point: [-31.75, 25.4, -127],
+          displayTransformRef: "kennametal-mclnr163c-gtm-top-plan-v1",
+        },
+        sourceRefs: [
+          "source:kennametal:holder:1096068:cad-step",
+          "source:kennametal:holder:1096068:cad-manifest",
+        ],
+      },
+      cuttingModel: unavailableClaim(
+        "separate-unvalidated-model",
+        "The retained CAD display/reference does not validate configured program-tip semantics, permitted cutting direction, or stock-removal authority.",
+        ["source:kennametal:holder:1096068:product-page", "source:kennametal:insert:1158184:product-page"],
+      ),
+      collisionModel: unavailableClaim(
+        "unavailable",
+        "The retained stroke-only display omits hardware and has no collision tolerance or complete mounted solid authority.",
+        ["source:kennametal:holder:1096068:cad-step"],
+      ),
+    },
   },
   {
     id: "kennametal-mdjnr164d-dnmg432",
-    revision: 1,
-    revisionRef: "assembly:kennametal:mdjnr164d+dnmg432@1",
+    revision: 2,
+    revisionRef: "assembly:kennametal:mdjnr164d+dnmg432@2",
     name: "Kennametal MDJNR164D + DNMG432 · RH",
     manufacturer: "Kennametal",
     holderRevisionRef: "holder:kennametal:1096245@1",
@@ -655,18 +865,72 @@ const ASSEMBLIES = [
       insertIcInches: 0.5,
       applications: ["external", "turning", "profiling"],
     },
-    catalogRecordOnly: true,
-    assignment: CATALOG_ONLY_ASSIGNMENT,
-    claims: catalogOnlyClaims(
-      "source:kennametal:holder:1096245:product-page",
-      "source:kennametal:insert:1159612:product-page",
-      ["source:kennametal:holder:1096245:product-page", "source:kennametal:insert:1159612:product-page"],
-    ),
+    catalogRecordOnly: false,
+    assignment: {
+      state: "mounted-display-only",
+      assignable: true,
+      scope: ["displayGeometry", "mountedReference"],
+      blockedOutsideScope: "Cutting and collision claims remain unavailable and are not authorized by this mounted display assignment.",
+    },
+    claims: {
+      identity: manufacturerClaim([
+        "source:kennametal:holder:1096245:product-page",
+        "source:kennametal:insert:1159612:product-page",
+      ]),
+      dimensions: manufacturerClaim([
+        "source:kennametal:holder:1096245:product-page",
+        "source:kennametal:insert:1159612:product-page",
+      ]),
+      compatibility: manufacturerClaim([
+        "source:kennametal:holder:1096245:product-page",
+        "source:kennametal:insert:1159612:product-page",
+      ]),
+      displayGeometry: {
+        state: "manufacturer-cad-projection",
+        available: true,
+        assignable: true,
+        revisionRef: MDJNR164D_CAD_PROJECTION.id,
+        projection: "Independent official MDJNR164D GTM top-plan holder-body and manufacturer-mounted compatible-size CUT/gage outline; stroke-only display, not exact chipbreaker-specific DNMG432 CAD.",
+        insertRepresentation: "manufacturer-mounted-compatible-size-gage",
+        sourceRefs: [
+          "source:kennametal:holder:1096245:cad-step",
+          "source:kennametal:holder:1096245:cad-manifest",
+        ],
+      },
+      mountedReference: {
+        state: "manufacturer-cad-reference",
+        available: true,
+        assignable: true,
+        revisionRef: "kennametal-mdjnr164d-gtm-crp-v1",
+        reference: {
+          type: "manufacturer-cutting-reference-point",
+          coordinateSystem: "Kennametal MDJNR164D GTM model XYZ",
+          coordinateOrder: ["x", "y", "z"],
+          units: "mm",
+          point: [...MDJNR164D_CAD_PROJECTION.modelCrp],
+          displayTransformRef: MDJNR164D_CAD_PROJECTION.id,
+        },
+        sourceRefs: [
+          "source:kennametal:holder:1096245:cad-step",
+          "source:kennametal:holder:1096245:cad-manifest",
+        ],
+      },
+      cuttingModel: unavailableClaim(
+        "separate-unvalidated-model",
+        "The retained compatible-size CAD display/reference does not validate exact chipbreaker geometry, configured program-tip semantics, permitted cutting direction, or stock-removal authority.",
+        ["source:kennametal:holder:1096245:product-page", "source:kennametal:insert:1159612:product-page"],
+      ),
+      collisionModel: unavailableClaim(
+        "unavailable",
+        "The retained stroke-only display omits hardware and has no collision tolerance or complete mounted solid authority.",
+        ["source:kennametal:holder:1096245:cad-step"],
+      ),
+    },
   },
   {
     id: "kennametal-mvjnr164d-vnmg432",
-    revision: 1,
-    revisionRef: "assembly:kennametal:mvjnr164d+vnmg432@1",
+    revision: 2,
+    revisionRef: "assembly:kennametal:mvjnr164d+vnmg432@2",
     name: "Kennametal MVJNR164D + VNMG432 · RH",
     manufacturer: "Kennametal",
     holderRevisionRef: "holder:kennametal:1096291@1",
@@ -679,13 +943,67 @@ const ASSEMBLIES = [
       insertIcInches: 0.5,
       applications: ["external", "turning", "profiling"],
     },
-    catalogRecordOnly: true,
-    assignment: CATALOG_ONLY_ASSIGNMENT,
-    claims: catalogOnlyClaims(
-      "source:kennametal:holder:1096291:product-page",
-      "source:kennametal:insert:1160070:product-page",
-      ["source:kennametal:holder:1096291:product-page", "source:kennametal:insert:1160070:product-page"],
-    ),
+    catalogRecordOnly: false,
+    assignment: {
+      state: "mounted-display-only",
+      assignable: true,
+      scope: ["displayGeometry", "mountedReference"],
+      blockedOutsideScope: "Cutting and collision claims remain unavailable and are not authorized by this mounted display assignment.",
+    },
+    claims: {
+      identity: manufacturerClaim([
+        "source:kennametal:holder:1096291:product-page",
+        "source:kennametal:insert:1160070:product-page",
+      ]),
+      dimensions: manufacturerClaim([
+        "source:kennametal:holder:1096291:product-page",
+        "source:kennametal:insert:1160070:product-page",
+      ]),
+      compatibility: manufacturerClaim([
+        "source:kennametal:holder:1096291:product-page",
+        "source:kennametal:insert:1160070:product-page",
+      ]),
+      displayGeometry: {
+        state: "manufacturer-cad-projection",
+        available: true,
+        assignable: true,
+        revisionRef: MVJNR164D_CAD_PROJECTION.id,
+        projection: "Independent official MVJNR164D GTM top-plan holder-body and manufacturer-mounted compatible-size CUT/gage outline; stroke-only display, not exact chipbreaker-specific VNMG432 CAD.",
+        insertRepresentation: "manufacturer-mounted-compatible-size-gage",
+        sourceRefs: [
+          "source:kennametal:holder:1096291:cad-step",
+          "source:kennametal:holder:1096291:cad-manifest",
+        ],
+      },
+      mountedReference: {
+        state: "manufacturer-cad-reference",
+        available: true,
+        assignable: true,
+        revisionRef: "kennametal-mvjnr164d-gtm-crp-v1",
+        reference: {
+          type: "manufacturer-cutting-reference-point",
+          coordinateSystem: "Kennametal MVJNR164D GTM model XYZ",
+          coordinateOrder: ["x", "y", "z"],
+          units: "mm",
+          point: [...MVJNR164D_CAD_PROJECTION.modelCrp],
+          displayTransformRef: MVJNR164D_CAD_PROJECTION.id,
+        },
+        sourceRefs: [
+          "source:kennametal:holder:1096291:cad-step",
+          "source:kennametal:holder:1096291:cad-manifest",
+        ],
+      },
+      cuttingModel: unavailableClaim(
+        "separate-unvalidated-model",
+        "The retained compatible-size CAD display/reference does not validate exact chipbreaker geometry, configured program-tip semantics, permitted cutting direction, or stock-removal authority.",
+        ["source:kennametal:holder:1096291:product-page", "source:kennametal:insert:1160070:product-page"],
+      ),
+      collisionModel: unavailableClaim(
+        "unavailable",
+        "The retained stroke-only display omits hardware and has no collision tolerance or complete mounted solid authority.",
+        ["source:kennametal:holder:1096291:cad-step"],
+      ),
+    },
   },
   {
     id: "kennametal-nsr163d-np3002rk-back-turn",
@@ -711,7 +1029,172 @@ const ASSEMBLIES = [
       ["source:kennametal:holder:1016462:product-page", "source:kennametal:insert:4109881:product-page"],
     ),
   },
+  {
+    id: "kennametal-mclnl164d-cnmg432",
+    revision: 2,
+    revisionRef: "assembly:kennametal:mclnl164d+cnmg432@2",
+    name: "Kennametal MCLNL164D + CNMG432 · LH",
+    manufacturer: "Kennametal",
+    holderRevisionRef: "holder:kennametal:1096092@1",
+    insertRevisionRef: "insert:kennametal:1159602@1",
+    compatibilityRevisionRef: "compatibility:kennametal:1096092+1159602@1",
+    facets: {
+      shape: "C",
+      family: "turning",
+      hand: "left",
+      insertIcInches: 0.5,
+      applications: ["external", "turning", "profiling", "facing"],
+    },
+    catalogRecordOnly: false,
+    assignment: {
+      state: "mounted-display-only",
+      assignable: true,
+      scope: ["displayGeometry", "mountedReference"],
+      blockedOutsideScope: "Cutting and collision claims remain unavailable and are not authorized by this mounted display assignment.",
+    },
+    claims: {
+      identity: manufacturerClaim([
+        "source:kennametal:holder:1096092:product-page",
+        "source:kennametal:insert:1159602:product-page",
+      ]),
+      dimensions: manufacturerClaim([
+        "source:kennametal:holder:1096092:product-page",
+        "source:kennametal:insert:1159602:product-page",
+      ]),
+      compatibility: manufacturerClaim([
+        "source:kennametal:holder:1096092:product-page",
+        "source:kennametal:insert:1159602:product-page",
+      ]),
+      displayGeometry: {
+        state: "manufacturer-cad-projection",
+        available: true,
+        assignable: true,
+        revisionRef: MCLNL164D_CAD_PROJECTION.id,
+        projection: "Independent official MCLNL164D GTM top-plan holder-body and manufacturer-mounted compatible-size CUT/gage outline; stroke-only display, not exact chipbreaker-specific CNMG432 CAD.",
+        insertRepresentation: "manufacturer-mounted-compatible-size-gage",
+        sourceRefs: [
+          "source:kennametal:holder:1096092:cad-step",
+          "source:kennametal:holder:1096092:cad-manifest",
+        ],
+      },
+      mountedReference: {
+        state: "manufacturer-cad-reference",
+        available: true,
+        assignable: true,
+        revisionRef: "kennametal-mclnl164d-gtm-crp-v1",
+        reference: {
+          type: "manufacturer-cutting-reference-point",
+          coordinateSystem: "Kennametal MCLNL164D GTM model XYZ",
+          coordinateOrder: ["x", "y", "z"],
+          units: "mm",
+          point: [...MCLNL164D_CAD_PROJECTION.modelCrp],
+          displayTransformRef: MCLNL164D_CAD_PROJECTION.id,
+        },
+        sourceRefs: [
+          "source:kennametal:holder:1096092:cad-step",
+          "source:kennametal:holder:1096092:cad-manifest",
+        ],
+      },
+      cuttingModel: unavailableClaim(
+        "separate-unvalidated-model",
+        "The retained compatible-size CAD display/reference does not validate exact chipbreaker geometry, configured program-tip semantics, permitted cutting direction, or stock-removal authority.",
+        ["source:kennametal:holder:1096092:product-page", "source:kennametal:insert:1159602:product-page"],
+      ),
+      collisionModel: unavailableClaim(
+        "unavailable",
+        "The retained stroke-only display omits hardware and has no collision tolerance or complete mounted solid authority.",
+        ["source:kennametal:holder:1096092:cad-step"],
+      ),
+    },
+  },
+  {
+    id: "kennametal-a16tmclnr4-cnmg432",
+    revision: 2,
+    revisionRef: "assembly:kennametal:a16tmclnr4+cnmg432@2",
+    name: "Kennametal A16TMCLNR4 + CNMG432 · Boring RH",
+    manufacturer: "Kennametal",
+    holderRevisionRef: "holder:kennametal:1016456@1",
+    insertRevisionRef: "insert:kennametal:1159602@1",
+    compatibilityRevisionRef: "compatibility:kennametal:1016456+1159602@1",
+    facets: {
+      shape: "C",
+      family: "boring",
+      hand: "right",
+      insertIcInches: 0.5,
+      applications: ["internal", "boring", "profiling", "chamfering"],
+    },
+    catalogRecordOnly: false,
+    assignment: {
+      state: "nominal-cutting-conditional",
+      assignable: true,
+      scope: ["displayGeometry", "mountedReference", "cuttingModel"],
+      blockedOutsideScope: "ID stock removal requires separate explicit nominal contact-point/datum/wall acceptance and a pilot bore; this CAD display does not authorize physical bore accuracy or collision checking.",
+    },
+    claims: {
+      identity: manufacturerClaim([
+        "source:kennametal:holder:1016456:product-page",
+        "source:kennametal:insert:1159602:product-page",
+      ]),
+      dimensions: manufacturerClaim([
+        "source:kennametal:holder:1016456:product-page",
+        "source:kennametal:insert:1159602:product-page",
+      ]),
+      compatibility: manufacturerClaim([
+        "source:kennametal:holder:1016456:product-page",
+        "source:kennametal:insert:1159602:product-page",
+      ]),
+      displayGeometry: {
+        state: "manufacturer-cad-projection",
+        available: true,
+        assignable: true,
+        revisionRef: A16TMCLNR4_CAD_PROJECTION.id,
+        projection: "Independent official A16TMCLNR4 GTM holder-body and manufacturer-mounted compatible-size CUT/gage outline in its axial boring frame; source-scaled stroke-only display, not exact chipbreaker-specific CNMG432 CAD. The source mesh is coarse and its tessellation error is unqualified; bounded simplification does not certify dimensional accuracy.",
+        insertRepresentation: "manufacturer-mounted-compatible-size-gage",
+        sourceTessellationErrorBoundMm: A16TMCLNR4_CAD_PROJECTION.sourceTessellationErrorBoundMm,
+        sourceRefs: [
+          "source:kennametal:holder:1016456:cad-step",
+          "source:kennametal:holder:1016456:cad-manifest",
+        ],
+      },
+      mountedReference: {
+        state: "manufacturer-cad-reference",
+        available: true,
+        assignable: true,
+        revisionRef: "kennametal-a16tmclnr4-gtm-crp-v1",
+        reference: {
+          type: "manufacturer-cutting-reference-point",
+          coordinateSystem: "Kennametal A16TMCLNR4 GTM model XYZ",
+          sourceEntity: "STEP #2819 CRP",
+          coordinateOrder: ["x", "y", "z"],
+          units: "mm",
+          point: [...A16TMCLNR4_CAD_PROJECTION.modelCrp],
+          displayTransformRef: A16TMCLNR4_CAD_PROJECTION.id,
+          nominalDisplayFrame: A16TMCLNR4_CAD_PROJECTION.nominalDisplayFrame,
+        },
+        sourceRefs: [
+          "source:kennametal:holder:1016456:cad-step",
+          "source:kennametal:holder:1016456:cad-manifest",
+        ],
+      },
+      cuttingModel: nominalLatheCuttingClaim(
+        "kennametal-a16tmclnr4-cnmg432",
+        ["source:kennametal:holder:1016456:product-page", "source:kennametal:insert:1159602:product-page"],
+      ),
+      collisionModel: unavailableClaim(
+        "unavailable",
+        "The retained stroke-only display omits hardware and has no qualified source-mesh error, collision tolerance, or complete mounted solid authority.",
+        ["source:kennametal:holder:1016456:cad-step"],
+      ),
+    },
+  },
 ];
+
+const profiledRecords = profileCatalogRecords(PROFILED_TOOLS);
+SOURCE_RECORDS.push(...profiledRecords.sources);
+HOLDERS.push(...profiledRecords.holders);
+INSERTS.push(...profiledRecords.inserts);
+COMPATIBILITY_EDGES.push(...profiledRecords.compatibilityEdges);
+ASSEMBLIES.push(...profiledRecords.assemblies);
 
 const FACET_LABELS = {
   shape: new Map([
@@ -719,12 +1202,19 @@ const FACET_LABELS = {
     ["D", "D · 55° diamond"],
     ["V", "V · 35° diamond"],
     ["groove", "Groove / back-turn"],
+    ["thread", "Threading"],
   ]),
   family: new Map([
     ["turning", "External turning"],
     ["grooving", "External grooving"],
+    ["boring", "Internal boring"],
+    ["parting", "Parting / cutoff"],
+    ["face-grooving", "Face grooving"],
+    ["od-threading", "OD threading"],
+    ["id-threading", "ID threading"],
+    ["id-grooving", "ID grooving"],
   ]),
-  hand: new Map([["right", "Right hand"]]),
+  hand: new Map([["right", "Right hand"], ["left", "Left hand"], ["neutral", "Neutral"]]),
 };
 
 function buildFacet(field, values) {
@@ -736,9 +1226,9 @@ function buildFacet(field, values) {
 }
 
 const FACETS = {
-  shape: buildFacet("shape", ["C", "D", "V", "groove"]),
-  family: buildFacet("family", ["turning", "grooving"]),
-  hand: buildFacet("hand", ["right"]),
+  shape: buildFacet("shape", [...FACET_LABELS.shape.keys()]),
+  family: buildFacet("family", [...FACET_LABELS.family.keys()]),
+  hand: buildFacet("hand", [...FACET_LABELS.hand.keys()]),
 };
 
 export const TOOL_LIBRARY_CATALOG = deepFreeze({

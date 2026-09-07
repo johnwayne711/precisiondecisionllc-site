@@ -77,6 +77,7 @@
           </div>
         </section>
         <div id="gcodeEditor" class="gcode-editor">
+          <div id="gcodeRiskHighlights" class="gcode-risk-highlights" aria-hidden="true"></div>
           <div id="gcodeActiveLine" class="gcode-active-line" aria-hidden="true" hidden></div>
           <div id="gcodeSearchHighlights" class="gcode-search-highlights" aria-hidden="true"></div>
           <div class="gcode-line-gutter" aria-hidden="true">
@@ -90,7 +91,7 @@
           <span class="editor-sample-actions">
             <button id="loadMillSampleButton" class="text-button">Mill sample</button>
             <button id="loadLiveBoreSampleButton" class="text-button">Live bore sample</button>
-            <button id="loadStepSampleButton" class="text-button">G71 + solid sample</button>
+            <button id="loadStepSampleButton" class="text-button">G71 + STEP demo</button>
             <button id="loadSampleButton" class="text-button">Reset turning sample</button>
           </span>
         </div>
@@ -129,8 +130,20 @@
             <span data-lathe-legend><i class="reference"></i>Reference geometry</span>
           </div>
         </div>
+        <section id="toolRotationAlert" class="tool-rotation-alert" role="alert" hidden>
+          <div><strong id="toolRotationAlertTitle">TOOL ROTATION MISMATCH</strong><span id="toolRotationAlertMessage"></span></div>
+          <button id="toolRotationSetup" type="button">Review tool setup</button>
+          <button id="toolRotationJump" type="button">Show source line</button>
+        </section>
         <div id="canvasWrap" class="canvas-wrap">
           <canvas id="plotCanvas" role="img" aria-label="Interactive lathe backplot. In 2D, click component geometry to inspect it, or use Dimension to pin exact line and radius measurements." title="In 2D, click component geometry to measure it. Turn on Dimension to pin exact line and radius measurements."></canvas>
+          <section id="profilePenetrationAlert" class="profile-penetration-alert" role="alert" aria-live="assertive" hidden>
+            <div>
+              <strong id="profilePenetrationAlertTitle">PATH ENTERS NOMINAL MATERIAL</strong>
+              <span id="profilePenetrationAlertMessage"></span>
+            </div>
+            <button id="profilePenetrationJump" type="button">Show source line</button>
+          </section>
           <section id="solidSetupWorkspace" class="solid-setup-workspace" aria-labelledby="solidSetupTitle" hidden>
             <header class="solid-setup-header">
               <div><span class="solid-eyebrow">STEP PLACEMENT · LOCAL</span><h2 id="solidSetupTitle">Place the solid</h2><p id="solidSetupFile"></p></div>
@@ -254,11 +267,19 @@
             <small id="graphicsQualityHint" class="quality-hint">Maximum surface resolution and 0.0001 in arc display chord.</small>
           </label>
           <div id="latheSetupControls" class="lathe-setup-controls">
+          <details id="latheControllerSetup" class="reference-geometry-setup">
+            <summary><span>CONTROLLER CUTTING SETTINGS</span><strong>EXPLICIT</strong></summary>
+            <div id="latheControllerSettingsBody" class="reference-geometry-body"></div>
+          </details>
           <details id="referenceGeometrySetup" class="reference-geometry-setup">
             <summary><span>REFERENCE GEOMETRY</span><strong id="referenceGeometrySummary">NONE</strong></summary>
             <div class="reference-geometry-body">
               <p id="referenceGeometryFile">Import an ASCII DXF or a STEP solid to create an analytic 2D reference.</p>
-              <label class="reference-shared-tolerance"><span>Path tolerance (<span data-unit-label>in</span>)</span><input id="referenceGeometryTolerance" type="number" min="0.000001" step="0.0001" value="0.0005"></label>
+              <div class="reference-demo-actions">
+                <button id="loadDxfReferenceDemoButton" type="button" class="build-step-section">Load ready-made G71 + DXF demo</button>
+                <button id="loadStepReferenceDemoButton" type="button" class="build-step-section">Load ready-made G71 + STEP demo</button>
+              </div>
+              <label class="reference-shared-tolerance"><span>Comparison threshold (<span data-unit-label>in</span>)</span><input id="referenceGeometryTolerance" type="number" min="0.000001" step="0.0001" value="0.0005"></label>
               <div id="referenceDxfControls">
                 <div class="field-pair">
                   <label>DXF units
@@ -287,6 +308,15 @@
                     </select>
                   </label>
                 </div>
+                <section id="referenceDxfMaterialControls" class="dxf-material-controls" aria-labelledby="referenceDxfMaterialTitle">
+                  <div class="dxf-material-heading"><span id="referenceDxfMaterialTitle">OPTIONAL SIGNED MATERIAL CHECK</span><strong id="referenceDxfMaterialState">OFF</strong></div>
+                  <p>Only the selected analytic contour defines material; it must lie entirely on one explicitly visible, unfrozen, plotted DXF layer. Other layers and curves remain overlay-only. The selected contour is highlighted cyan in the plot and turns violet when enabled.</p>
+                  <label><span class="dxf-material-step"><b>1</b> Closed contour</span>
+                    <select id="referenceDxfMaterialContour" aria-describedby="referenceDxfMaterialStatus"><option value="">Map DXF to find closed contours</option></select>
+                  </label>
+                  <label class="dxf-material-confirmation"><input id="referenceDxfMaterialInside" type="checkbox" aria-describedby="referenceDxfMaterialStatus" disabled><span class="dxf-material-step"><b>2</b><span><strong>Inside this contour is nominal material</strong><small>This explicit confirmation enables the signed programmed-reference-point entry check.</small></span></span></label>
+                  <p id="referenceDxfMaterialStatus" class="dxf-material-status" role="status" aria-live="polite">Import and map a DXF to find eligible closed contours.</p>
+                </section>
               </div>
               <div id="referenceStepControls" class="reference-step-controls" hidden>
                 <button id="openSolidSetupButton" type="button" class="build-step-section">Place solid in 3D</button>
@@ -365,10 +395,13 @@
                 <div><span>Import</span><strong id="referenceGeometryImportStatus">NO FILE</strong></div>
                 <div><span>Path alignment</span><strong id="referenceGeometryAlignmentStatus">—</strong></div>
                 <div><span>Maximum deviation</span><strong id="referenceGeometryDeviation">—</strong></div>
+                <div><span>Nominal-material entry</span><strong id="referenceGeometryPenetrationStatus">—</strong></div>
+                <div><span>Maximum proven penetration</span><strong id="referenceGeometryPenetrationDepth">—</strong></div>
               </div>
+              <button id="inspectReferenceDeviationButton" type="button" class="inspect-reference-deviation" aria-pressed="false" title="Show the largest measured gap between the program path and reference geometry" hidden>Inspect deviation</button>
               <ul id="referenceGeometryDiagnostics" class="reference-geometry-diagnostics"><li>Import an analytic DXF profile or section an exact STEP solid locally.</li></ul>
               <button id="removeGeometryButton" type="button" class="remove-reference-geometry" disabled>Remove reference geometry</button>
-              <p class="reference-geometry-boundary">This is a directed programmed-path comparison against the selected analytic reference contour. It does not prove finished-part size, machine accuracy, tool compensation, assembly correctness, or collision clearance.</p>
+              <p class="reference-geometry-boundary">For a topology-qualified STEP section, or an eligible DXF contour whose inside is explicitly confirmed as material, red fragments prove that the programmed reference-point path enters that nominal 2D material region beyond the reporting threshold. The threshold is not permission to remove material. This does not prove finished-part size, cutter compensation or sweep, machine accuracy, assembly correctness, or collision clearance.</p>
             </div>
           </details>
           <details id="programToolsSetup" class="tool-assembly-setup">
@@ -382,21 +415,30 @@
               <p class="tool-safety-note">Unassigned tools and unresolved cutting datums do not remove stock. Unconfirmed or display-only tools are blocked as well. Catalog-scaled 2D envelopes omit unsourced seating/head CAD; the programmed-contact-point model does not silently add tool-nose compensation. Confirmed assignments persist only in local browser storage for the unchanged program and are not uploaded.</p>
             </div>
           </details>
-          <div class="field-pair">
-            <label><span>Stock Ø (<span data-unit-label>in</span>)</span><input id="stockDiameter" type="number" min="0" step="0.01" value="2.05"></label>
-            <label><span>Overall length (<span data-unit-label>in</span>)</span><input id="stockLength" type="number" min="0" step="0.01" value="3.15"></label>
-          </div>
-          <div class="field-pair">
-            <label><span>Held by jaws (<span data-unit-label>in</span>)</span><input id="stockGripLength" type="number" min="0" step="0.01" value="0.50"></label>
-            <label><span>Stick-out (<span data-unit-label>in</span>)</span><input id="stockStickout" class="calculated-input" type="number" value="2.65" readonly aria-label="Calculated stock stick-out"></label>
-          </div>
-          <small class="stock-placement-hint">Overall length = held by jaws + stick-out. Stick-out is calculated from Face Z.</small>
+          <section id="stockSetup" class="stock-setup" aria-labelledby="stockSetupTitle">
+            <div class="control-divider"><span id="stockSetupTitle">ROUND BAR STOCK</span></div>
+            <div class="field-pair">
+              <label><span>Bar diameter (<span data-unit-label>in</span>)</span><input id="stockDiameter" type="number" min="0" step="any" value="2.05" required></label>
+              <label><span>Stick-out from jaws (<span data-unit-label>in</span>)</span><input id="stockStickout" type="number" min="0" step="any" value="2.65" required></label>
+            </div>
+            <div class="field-pair">
+              <label><span>Grip length (<span data-unit-label>in</span>)</span><input id="stockGripLength" type="number" min="0" step="any" value="0.50" required></label>
+              <label><span>Stock front Z (<span data-unit-label>in</span>)</span><input id="stockFrontZ" type="number" step="any" value="-0.5" aria-describedby="stockFrontHint" required></label>
+            </div>
+            <small id="stockFrontHint" class="stock-placement-hint">Front Z is relative to program Z0. Use 0 for a flush front, or +0.125 for ⅛ in facing allowance when working in inches.</small>
+            <div class="field-pair">
+              <label><span>Overall length · calculated</span><input id="stockLength" class="calculated-input" type="number" value="3.15" readonly aria-label="Calculated overall stock length"></label>
+              <label><span>Jaw face Z · calculated</span><input id="chuckFaceZ" class="calculated-input" type="number" value="-3.15" readonly aria-label="Calculated jaw face Z"></label>
+            </div>
+            <small class="stock-placement-hint">Overall = stick-out + grip. Changing either keeps the stock front at the same Z.</small>
+            <label><span>Starting through-bore Ø (<span data-unit-label>in</span>)</span><input id="stockPilotBore" type="number" min="0" step="any" value="0" aria-describedby="stockPilotBoreHint" required></label>
+            <small id="stockPilotBoreHint" class="stock-placement-hint">0 = solid bar. For ID tools, enter the existing through-bore. A boring bar does not drill its own starting hole.</small>
+            <p id="stockSetupStatus" class="stock-setup-status" aria-live="polite">Press Enter or leave a field to apply.</p>
+            <label class="toggle-row"><input id="stockDimensionsToggle" type="checkbox"><span>Show stock dimensions in 2D</span></label>
+          </section>
           <label class="toggle-row"><input id="stockToggle" type="checkbox" checked><span>Simulate stock removal</span></label>
           <div class="control-divider"><span>CHUCK KEEP-OUT</span></div>
-          <div class="field-pair">
-            <label><span>Face Z (<span data-unit-label>in</span>)</span><input id="chuckFaceZ" type="number" step="0.01" value="-3.15"></label>
-            <label><span>Jaw Ø (<span data-unit-label>in</span>)</span><input id="jawDiameter" type="number" min="0" step="0.01" value="2.75"></label>
-          </div>
+          <label><span>Jaw diameter (<span data-unit-label>in</span>)</span><input id="jawDiameter" type="number" min="0" step="0.01" value="2.75"></label>
           <label><span>Safety clearance (<span data-unit-label>in</span>)</span><input id="clearanceInput" type="number" min="0" step="0.005" value="0.12"></label>
           <label class="toggle-row"><input id="collisionToggle" type="checkbox" checked><span>Show collision envelope</span></label>
           <p class="quality-note">Image quality controls display tessellation only. Stock proof uses a separate fixed physical sampling tolerance; neither setting changes G-code or certifies machining accuracy.</p>
@@ -414,7 +456,7 @@
           <div class="runtime-stat"><span>PROGRAM CYCLE TIME</span><strong id="cycleTimeStat" aria-live="polite">—</strong></div>
           <div><span>CUT DIST.</span><strong id="cutDistance">0 mm</strong></div>
           <div><span>RAPID DIST.</span><strong id="rapidDistance">0 mm</strong></div>
-          <div><span id="stockStatusLabel">STOCK REMOVED</span><strong id="stockRemoved">0%</strong></div>
+          <div><span id="stockStatusLabel">STOCK SIMULATION</span><strong id="stockRemoved">0%</strong></div>
           <div><span id="clearanceStatusLabel">CLEARANCE</span><strong id="collisionStatus" class="safe-value">CLEAR</strong></div>
           <div><span>BOUNDS</span><strong id="boundsReadout">—</strong></div>
         </div>
@@ -548,8 +590,8 @@
           </div>
           <fieldset class="tool-library-filters">
             <legend>Filter tool library</legend>
-            <label id="toolLibraryFamilyFilterLabel" for="toolLibraryFamilyFilter"><span>Family</span><select id="toolLibraryFamilyFilter"><option value="">All families</option><option value="turn">Turning</option><option value="groove-profile">Groove / profile</option><option value="parting">Parting / cutoff</option></select></label>
-            <label id="toolLibraryShapeFilterLabel" for="toolLibraryShapeFilter"><span>Shape</span><select id="toolLibraryShapeFilter"><option value="">All shapes</option><option value="C">C · 80°</option><option value="D">D · 55°</option><option value="V">V · 35°</option><option value="groove">Groove / profile</option><option value="parting">Parting / cutoff</option></select></label>
+            <label id="toolLibraryFamilyFilterLabel" for="toolLibraryFamilyFilter"><span>Family</span><select id="toolLibraryFamilyFilter"><option value="">All families</option><option value="turn">Turning</option><option value="id-bore">Internal boring</option><option value="groove-profile">Groove / profile</option><option value="parting">Parting / cutoff</option><option value="face-grooving">Face grooving</option><option value="od-threading">OD threading</option><option value="id-threading">ID threading</option><option value="id-grooving">ID grooving</option></select></label>
+            <label id="toolLibraryShapeFilterLabel" for="toolLibraryShapeFilter"><span>Shape</span><select id="toolLibraryShapeFilter"><option value="">All shapes</option><option value="C">C · 80°</option><option value="D">D · 55°</option><option value="V">V · 35°</option><option value="groove">Groove / profile</option><option value="parting">Parting / cutoff</option><option value="thread">Threading</option></select></label>
             <label for="toolLibraryAuthorityFilter"><span>Display authority</span><select id="toolLibraryAuthorityFilter"><option value="">All display tiers</option><option value="manufacturer-cad-projection">Manufacturer CAD projection</option><option value="catalog-construction">Catalog construction</option><option value="catalog-only">Catalog record only</option></select></label>
           </fieldset>
         </div>

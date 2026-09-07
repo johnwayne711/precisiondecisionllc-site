@@ -14,7 +14,9 @@ import {geometrySamplePointCount} from "./geometry-inspector.mjs";
 export const MAX_REFERENCE_DISPLAY_STROKES = 512;
 export const MAX_REFERENCE_DISPLAY_SAMPLED_POINTS = 12288;
 export const REFERENCE_DISPLAY_ARC_MAXIMUM_SEGMENTS = 192;
-export const MAX_REFERENCE_UI_COMPARISON_OPERATIONS = 100000;
+// Shared one-shot plot budget for nearest-deviation plus signed STEP material
+// entry. Neither analytic pass runs during pan/zoom redraws.
+export const MAX_REFERENCE_UI_COMPARISON_OPERATIONS = 250000;
 export const REFERENCE_DISPLAY_WORKLOAD_DIAGNOSTIC = "reference-display-workload-exceeded";
 
 function sampledPointsForArcSweep(sweep) {

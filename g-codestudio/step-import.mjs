@@ -3,6 +3,8 @@ const AXES = Object.freeze(["x", "y", "z"]);
 const BLOCKING_DIAGNOSTIC_SEVERITIES = new Set(["error", "warning"]);
 const ROUNDING_ULPS = 512;
 const TRIG_ROUNDING_ULPS = 128;
+const MATERIAL_REGION_QUALIFICATION = "step-single-solid-single-contour-positive-radius-v1";
+const MAX_MATERIAL_REGION_INTERSECTION_TESTS = 250000;
 
 /** One tenth of the default 0.0005 in profile-comparison threshold. */
 export const STEP_NUMERICAL_BUDGET_MM = 0.00127;
@@ -966,6 +968,614 @@ function angleOnSweep(angle, startAngle, sweep) {
   return normalizeAngle(startAngle - angle) <= -sweep;
 }
 
+function cross2(left, right) {
+  return left.z * right.x - left.x * right.z;
+}
+
+function subtract2(left, right) {
+  return {z: left.z - right.z, x: left.x - right.x};
+}
+
+function dot2(left, right) {
+  return left.z * right.z + left.x * right.x;
+}
+
+function arcContainsAngle(primitive, angle) {
+  if (primitive.type === "circle") return true;
+  const sweepMagnitude = Math.abs(primitive.sweep);
+  const delta = primitive.sweep >= 0
+    ? normalizeAngle(angle - primitive.startAngle)
+    : normalizeAngle(primitive.startAngle - angle);
+  const angularRoundoff = roundingBound([angle, primitive.startAngle, primitive.sweep], TRIG_ROUNDING_ULPS);
+  return delta <= sweepMagnitude + angularRoundoff;
+}
+
+function arcContainsPoint(primitive, point) {
+  if (primitive.type !== "circle") {
+    const endpointRoundoff = roundingBound([
+      point.z,
+      point.x,
+      primitive.start?.z,
+      primitive.start?.x,
+      primitive.end?.z,
+      primitive.end?.x,
+    ], ROUNDING_ULPS);
+    if (distance2(point, primitive.start) <= endpointRoundoff
+      || distance2(point, primitive.end) <= endpointRoundoff) return true;
+  }
+  const angle = Math.atan2(point.x - primitive.center.x, point.z - primitive.center.z);
+  return finite(angle) && arcContainsAngle(primitive, angle);
+}
+
+function uniqueIntersectionPoints(points) {
+  const unique = [];
+  for (const point of points) {
+    const allowance = roundingBound([point.z, point.x], 128);
+    if (!unique.some((candidate) => distance2(candidate, point) <= allowance)) unique.push(point);
+  }
+  return unique;
+}
+
+function lineLineIntersections(first, second) {
+  const directionA = subtract2(first.end, first.start);
+  const directionB = subtract2(second.end, second.start);
+  const offset = subtract2(second.start, first.start);
+  const denominatorTerms = [directionA.z * directionB.x, directionA.x * directionB.z];
+  const denominator = denominatorTerms[0] - denominatorTerms[1];
+  const denominatorRoundoff = roundingBound(denominatorTerms, 64);
+  if (Math.abs(denominator) <= denominatorRoundoff) {
+    const collinearTerms = [offset.z * directionA.x, offset.x * directionA.z];
+    if (Math.abs(collinearTerms[0] - collinearTerms[1]) > roundingBound(collinearTerms, 64)) {
+      return {points: [], overlap: false};
+    }
+    const useZ = Math.abs(directionA.z) >= Math.abs(directionA.x);
+    const component = useZ ? "z" : "x";
+    const divisor = directionA[component];
+    if (!finite(divisor) || divisor === 0) return {points: [], overlap: true};
+    const firstParameter = (second.start[component] - first.start[component]) / divisor;
+    const secondParameter = (second.end[component] - first.start[component]) / divisor;
+    const overlapStart = Math.max(0, Math.min(firstParameter, secondParameter));
+    const overlapEnd = Math.min(1, Math.max(firstParameter, secondParameter));
+    const parameterRoundoff = roundingBound([firstParameter, secondParameter], 64);
+    if (overlapStart > overlapEnd + parameterRoundoff) return {points: [], overlap: false};
+    const point = {
+      z: first.start.z + directionA.z * overlapStart,
+      x: first.start.x + directionA.x * overlapStart,
+    };
+    return {points: [point], overlap: overlapEnd - overlapStart > parameterRoundoff};
+  }
+  const parameterA = cross2(offset, directionB) / denominator;
+  const parameterB = cross2(offset, directionA) / denominator;
+  const parameterRoundoff = roundingBound([parameterA, parameterB], 64);
+  if (parameterA < -parameterRoundoff || parameterA > 1 + parameterRoundoff
+    || parameterB < -parameterRoundoff || parameterB > 1 + parameterRoundoff) {
+    return {points: [], overlap: false};
+  }
+  const boundedParameter = Math.max(0, Math.min(1, parameterA));
+  return {
+    points: [{
+      z: first.start.z + directionA.z * boundedParameter,
+      x: first.start.x + directionA.x * boundedParameter,
+    }],
+    overlap: false,
+  };
+}
+
+function lineArcIntersections(linePrimitive, arcPrimitive) {
+  const direction = subtract2(linePrimitive.end, linePrimitive.start);
+  const offset = subtract2(linePrimitive.start, arcPrimitive.center);
+  const quadratic = dot2(direction, direction);
+  const linear = 2 * dot2(offset, direction);
+  const constant = dot2(offset, offset) - arcPrimitive.radius ** 2;
+  const discriminantTerms = [linear ** 2, 4 * quadratic * constant];
+  const discriminant = discriminantTerms[0] - discriminantTerms[1];
+  const discriminantRoundoff = roundingBound(discriminantTerms, 128);
+  if (discriminant < -discriminantRoundoff) return {points: [], overlap: false};
+  const root = Math.sqrt(Math.max(0, discriminant));
+  const parameters = root <= roundingBound([root], 32)
+    ? [-linear / (2 * quadratic)]
+    : [(-linear - root) / (2 * quadratic), (-linear + root) / (2 * quadratic)];
+  const points = [];
+  for (const parameter of parameters) {
+    const parameterRoundoff = roundingBound([parameter], 64);
+    if (parameter < -parameterRoundoff || parameter > 1 + parameterRoundoff) continue;
+    const boundedParameter = Math.max(0, Math.min(1, parameter));
+    const point = {
+      z: linePrimitive.start.z + direction.z * boundedParameter,
+      x: linePrimitive.start.x + direction.x * boundedParameter,
+    };
+    if (arcContainsPoint(arcPrimitive, point)) points.push(point);
+  }
+  return {points: uniqueIntersectionPoints(points), overlap: false};
+}
+
+function arcStrictlyContainsAngle(primitive, angle) {
+  if (primitive.type === "circle") return true;
+  const sweepMagnitude = Math.abs(primitive.sweep);
+  const delta = primitive.sweep >= 0
+    ? normalizeAngle(angle - primitive.startAngle)
+    : normalizeAngle(primitive.startAngle - angle);
+  const angularRoundoff = roundingBound([angle, primitive.startAngle, primitive.sweep], TRIG_ROUNDING_ULPS);
+  return delta > angularRoundoff && delta < sweepMagnitude - angularRoundoff;
+}
+
+function arcMidpoint(primitive) {
+  const angle = primitive.startAngle + primitive.sweep / 2;
+  return {
+    point: {
+      z: primitive.center.z + Math.cos(angle) * primitive.radius,
+      x: primitive.center.x + Math.sin(angle) * primitive.radius,
+    },
+    angle,
+  };
+}
+
+function circularPrimitivesIntersections(first, second) {
+  const centerOffset = subtract2(second.center, first.center);
+  const centerDistance = Math.hypot(centerOffset.z, centerOffset.x);
+  const linearRoundoff = roundingBound([
+    first.center.z, first.center.x, second.center.z, second.center.x, first.radius, second.radius, centerDistance,
+  ], 128);
+  if (centerDistance <= linearRoundoff) {
+    if (Math.abs(first.radius - second.radius) > linearRoundoff) return {points: [], overlap: false};
+    if (centerDistance !== 0 || first.radius !== second.radius) return {points: [], overlap: true};
+    if (first.type === "circle" || second.type === "circle") return {points: [], overlap: true};
+    const sharedEndpoints = [
+      ...[first.start, first.end].filter((point) => arcContainsPoint(second, point)),
+      ...[second.start, second.end].filter((point) => arcContainsPoint(first, point)),
+    ];
+    const firstMiddle = arcMidpoint(first);
+    const secondMiddle = arcMidpoint(second);
+    const overlap = [first.start, first.end].some((point) => (
+      arcStrictlyContainsAngle(second, Math.atan2(point.x - second.center.x, point.z - second.center.z))
+    )) || [second.start, second.end].some((point) => (
+      arcStrictlyContainsAngle(first, Math.atan2(point.x - first.center.x, point.z - first.center.z))
+    )) || arcStrictlyContainsAngle(second, firstMiddle.angle)
+      || arcStrictlyContainsAngle(first, secondMiddle.angle);
+    return {points: uniqueIntersectionPoints(sharedEndpoints), overlap};
+  }
+  const radiusSum = first.radius + second.radius;
+  const radiusDifference = Math.abs(first.radius - second.radius);
+  if (centerDistance > radiusSum + linearRoundoff || centerDistance < radiusDifference - linearRoundoff) {
+    return {points: [], overlap: false};
+  }
+  const along = (first.radius ** 2 - second.radius ** 2 + centerDistance ** 2) / (2 * centerDistance);
+  const heightSquared = first.radius ** 2 - along ** 2;
+  const squaredRoundoff = roundingBound([first.radius ** 2, along ** 2], 128);
+  if (heightSquared < -squaredRoundoff) return {points: [], overlap: false};
+  if (heightSquared < 0) return {points: [], overlap: true};
+  const height = Math.sqrt(Math.max(0, heightSquared));
+  const base = {
+    z: first.center.z + centerOffset.z * along / centerDistance,
+    x: first.center.x + centerOffset.x * along / centerDistance,
+  };
+  const perpendicular = {z: -centerOffset.x / centerDistance, x: centerOffset.z / centerDistance};
+  const points = height <= linearRoundoff
+    ? [base]
+    : [
+      {z: base.z + perpendicular.z * height, x: base.x + perpendicular.x * height},
+      {z: base.z - perpendicular.z * height, x: base.x - perpendicular.x * height},
+    ];
+  return {
+    points: points.filter((point) => arcContainsPoint(first, point) && arcContainsPoint(second, point)),
+    overlap: false,
+  };
+}
+
+function analyticPrimitiveIntersections(first, second) {
+  if (first.type === "line" && second.type === "line") return lineLineIntersections(first, second);
+  if (first.type === "line") return lineArcIntersections(first, second);
+  if (second.type === "line") return lineArcIntersections(second, first);
+  return circularPrimitivesIntersections(first, second);
+}
+
+function pointToLineDistance(point, primitive) {
+  const direction = subtract2(primitive.end, primitive.start);
+  const denominator = dot2(direction, direction);
+  const parameter = Math.max(0, Math.min(1, dot2(subtract2(point, primitive.start), direction) / denominator));
+  return distance2(point, {
+    z: primitive.start.z + direction.z * parameter,
+    x: primitive.start.x + direction.x * parameter,
+  });
+}
+
+function pointToArcDistance(point, primitive) {
+  const centerOffset = subtract2(point, primitive.center);
+  const radiusToPoint = Math.hypot(centerOffset.z, centerOffset.x);
+  if (radiusToPoint > 0) {
+    const angle = Math.atan2(centerOffset.x, centerOffset.z);
+    if (arcContainsAngle(primitive, angle)) return Math.abs(radiusToPoint - primitive.radius);
+  }
+  if (primitive.type === "circle") return primitive.radius;
+  return Math.min(distance2(point, primitive.start), distance2(point, primitive.end));
+}
+
+function minimumLineArcDistance(linePrimitive, arcPrimitive) {
+  let minimum = Math.min(
+    pointToArcDistance(linePrimitive.start, arcPrimitive),
+    pointToArcDistance(linePrimitive.end, arcPrimitive),
+    ...(arcPrimitive.type === "circle" ? [] : [
+      pointToLineDistance(arcPrimitive.start, linePrimitive),
+      pointToLineDistance(arcPrimitive.end, linePrimitive),
+    ]),
+  );
+  const direction = subtract2(linePrimitive.end, linePrimitive.start);
+  const denominator = dot2(direction, direction);
+  const centerParameter = dot2(subtract2(arcPrimitive.center, linePrimitive.start), direction) / denominator;
+  if (centerParameter >= 0 && centerParameter <= 1) {
+    const projection = {
+      z: linePrimitive.start.z + direction.z * centerParameter,
+      x: linePrimitive.start.x + direction.x * centerParameter,
+    };
+    const radial = subtract2(projection, arcPrimitive.center);
+    const radialLength = Math.hypot(radial.z, radial.x);
+    if (radialLength > 0) {
+      for (const sign of [-1, 1]) {
+        const point = {
+          z: arcPrimitive.center.z + sign * radial.z * arcPrimitive.radius / radialLength,
+          x: arcPrimitive.center.x + sign * radial.x * arcPrimitive.radius / radialLength,
+        };
+        if (arcContainsPoint(arcPrimitive, point)) minimum = Math.min(minimum, pointToLineDistance(point, linePrimitive));
+      }
+    }
+  }
+  return minimum;
+}
+
+function circularEndpoints(primitive) {
+  return primitive.type === "circle" ? [] : [primitive.start, primitive.end];
+}
+
+function minimumCircularDistance(first, second) {
+  let minimum = Number.POSITIVE_INFINITY;
+  for (const point of circularEndpoints(first)) minimum = Math.min(minimum, pointToArcDistance(point, second));
+  for (const point of circularEndpoints(second)) minimum = Math.min(minimum, pointToArcDistance(point, first));
+  const centerOffset = subtract2(second.center, first.center);
+  const centerDistance = Math.hypot(centerOffset.z, centerOffset.x);
+  if (centerDistance === 0) {
+    const firstCandidates = first.type === "circle" ? [] : [first.start, first.end];
+    const overlappingAngle = first.type === "circle" || second.type === "circle"
+      || firstCandidates.some((point) => arcContainsPoint(second, point))
+      || circularEndpoints(second).some((point) => arcContainsPoint(first, point));
+    if (overlappingAngle) minimum = Math.min(minimum, Math.abs(first.radius - second.radius));
+    return minimum;
+  }
+  const unit = {z: centerOffset.z / centerDistance, x: centerOffset.x / centerDistance};
+  for (const firstSign of [-1, 1]) {
+    const firstPoint = {
+      z: first.center.z + firstSign * unit.z * first.radius,
+      x: first.center.x + firstSign * unit.x * first.radius,
+    };
+    if (!arcContainsPoint(first, firstPoint)) continue;
+    for (const secondSign of [-1, 1]) {
+      const secondPoint = {
+        z: second.center.z + secondSign * unit.z * second.radius,
+        x: second.center.x + secondSign * unit.x * second.radius,
+      };
+      if (arcContainsPoint(second, secondPoint)) minimum = Math.min(minimum, distance2(firstPoint, secondPoint));
+    }
+  }
+  return minimum;
+}
+
+function minimumPrimitiveDistance(first, second) {
+  if (first.type === "line" && second.type === "line") {
+    return Math.min(
+      pointToLineDistance(first.start, second),
+      pointToLineDistance(first.end, second),
+      pointToLineDistance(second.start, first),
+      pointToLineDistance(second.end, first),
+    );
+  }
+  if (first.type === "line") return minimumLineArcDistance(first, second);
+  if (second.type === "line") return minimumLineArcDistance(second, first);
+  return minimumCircularDistance(first, second);
+}
+
+function analyticPrimitiveEndpoint(primitive, atStart) {
+  if (primitive.type === "line") return atStart ? primitive.start : primitive.end;
+  if (primitive.type !== "arc") return null;
+  const angle = atStart ? primitive.startAngle : primitive.startAngle + primitive.sweep;
+  return {
+    z: primitive.center.z + Math.cos(angle) * primitive.radius,
+    x: primitive.center.x + Math.sin(angle) * primitive.radius,
+  };
+}
+
+function adjacentBoundaryJoints(primitives, firstIndex, secondIndex) {
+  const joints = [];
+  if (secondIndex === firstIndex + 1) {
+    joints.push([
+      analyticPrimitiveEndpoint(primitives[firstIndex], false),
+      analyticPrimitiveEndpoint(primitives[secondIndex], true),
+    ]);
+  }
+  if (firstIndex === 0 && secondIndex === primitives.length - 1) {
+    joints.push([
+      analyticPrimitiveEndpoint(primitives[firstIndex], true),
+      analyticPrimitiveEndpoint(primitives[secondIndex], false),
+    ]);
+  }
+  return joints;
+}
+
+function expectedJointIntersection(point, joints) {
+  return joints.some(([firstPoint, secondPoint]) => {
+    const roundoff = roundingBound([
+      point.z, point.x, firstPoint?.z, firstPoint?.x, secondPoint?.z, secondPoint?.x,
+    ], ROUNDING_ULPS);
+    return finitePoint2(firstPoint) && finitePoint2(secondPoint)
+      && distance2(point, firstPoint) <= roundoff
+      && distance2(point, secondPoint) <= roundoff;
+  });
+}
+
+function expectedJointCoincides([firstPoint, secondPoint]) {
+  if (!finitePoint2(firstPoint) || !finitePoint2(secondPoint)) return false;
+  const roundoff = roundingBound([
+    firstPoint.z, firstPoint.x, secondPoint.z, secondPoint.x,
+  ], ROUNDING_ULPS);
+  return distance2(firstPoint, secondPoint) <= roundoff;
+}
+
+function calculationClosedMaterialBoundary(primitives) {
+  if (primitives.length === 1 && primitives[0].type === "circle") return [...primitives];
+  const boundary = primitives.map((primitive) => ({
+    ...primitive,
+    ...(primitive.start ? {start: {...primitive.start}} : {}),
+    ...(primitive.end ? {end: {...primitive.end}} : {}),
+    ...(primitive.center ? {center: {...primitive.center}} : {}),
+    ...(primitive.source ? {source: {...primitive.source}} : {}),
+  }));
+  const connectors = new Map();
+  const closeLineEndpoint = (primitive, key, point, closureLengthMm) => {
+    primitive[key] = {...point};
+    primitive.geometryUncertaintyMm = (Number(primitive.geometryUncertaintyMm) || 0) + closureLengthMm;
+    primitive.source = {...primitive.source, numericalClosure: true};
+  };
+  for (let index = 0; index < boundary.length; index += 1) {
+    const primitive = boundary[index];
+    const next = boundary[(index + 1) % boundary.length];
+    const end = analyticPrimitiveEndpoint(primitive, false);
+    const nextStart = analyticPrimitiveEndpoint(next, true);
+    if (!finitePoint2(end) || !finitePoint2(nextStart)) continue;
+    const closureLengthMm = distance2(end, nextStart);
+    if (closureLengthMm === 0) continue;
+    if (primitive.type === "line") {
+      closeLineEndpoint(primitive, "end", nextStart, closureLengthMm);
+      continue;
+    }
+    if (next.type === "line") {
+      closeLineEndpoint(next, "start", end, closureLengthMm);
+      continue;
+    }
+    connectors.set(index, {
+      id: `calculation-closure-${index}`,
+      type: "line",
+      start: {...end},
+      end: {...nextStart},
+      geometryUncertaintyMm: Math.max(
+        Number(primitive.geometryUncertaintyMm) || 0,
+        Number(next.geometryUncertaintyMm) || 0,
+      ) + closureLengthMm,
+      source: {
+        format: "step",
+        numericalClosure: true,
+        precedingEdgeId: primitive.id ?? index,
+        followingEdgeId: next.id ?? ((index + 1) % primitives.length),
+      },
+    });
+  }
+  return boundary.flatMap((primitive, index) => (
+    connectors.has(index) ? [primitive, connectors.get(index)] : [primitive]
+  ));
+}
+
+function qualifySimpleMaterialBoundary(primitives) {
+  let intersectionTests = 0;
+  for (let firstIndex = 0; firstIndex < primitives.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < primitives.length; secondIndex += 1) {
+      const adjacent = secondIndex === firstIndex + 1
+        || (firstIndex === 0 && secondIndex === primitives.length - 1);
+      intersectionTests += 1;
+      if (intersectionTests > MAX_MATERIAL_REGION_INTERSECTION_TESTS) {
+        return {qualified: false, reason: "workload"};
+      }
+      const first = primitives[firstIndex];
+      const second = primitives[secondIndex];
+      const joints = adjacent ? adjacentBoundaryJoints(primitives, firstIndex, secondIndex) : [];
+      if (joints.some((joint) => !expectedJointCoincides(joint))) {
+        return {qualified: false, reason: "gap", firstIndex, secondIndex};
+      }
+      const intersections = analyticPrimitiveIntersections(first, second);
+      if (intersections.overlap
+        || intersections.points.some((point) => !expectedJointIntersection(point, joints))) {
+        return {qualified: false, reason: "intersection", firstIndex, secondIndex};
+      }
+      if (!adjacent) {
+        const minimumDistanceMm = intersections.points.length ? 0 : minimumPrimitiveDistance(first, second);
+        const combinedUncertaintyMm = Math.max(0, Number(first.geometryUncertaintyMm) || 0)
+          + Math.max(0, Number(second.geometryUncertaintyMm) || 0);
+        const clearanceRoundoffMm = roundingBound([
+          minimumDistanceMm,
+          first.start?.z, first.start?.x, first.end?.z, first.end?.x, first.center?.z, first.center?.x, first.radius,
+          second.start?.z, second.start?.x, second.end?.z, second.end?.x, second.center?.z, second.center?.x, second.radius,
+        ], 256);
+        if (!finite(minimumDistanceMm) || minimumDistanceMm <= combinedUncertaintyMm + clearanceRoundoffMm) {
+          return {qualified: false, reason: "clearance", firstIndex, secondIndex};
+        }
+      }
+    }
+  }
+  return {qualified: true, reason: null, boundary: calculationClosedMaterialBoundary(primitives)};
+}
+
+function unqualifiedMaterialRegion(code, message, {selectedContourId = null, profileSide = null} = {}) {
+  return {
+    schemaVersion: 1,
+    qualification: MATERIAL_REGION_QUALIFICATION,
+    qualified: false,
+    coordinateSystem: "lathe-xz",
+    sourceContourId: selectedContourId,
+    profileSide,
+    boundary: null,
+    boundaryClosed: false,
+    axisEndpoints: [],
+    geometryUncertaintyMm: null,
+    unqualifiedReason: {code, message},
+  };
+}
+
+function primitiveAxisContacts(primitive) {
+  if (primitive.type === "line") {
+    const contacts = [];
+    if (primitive.start.x === 0) contacts.push({...primitive.start});
+    if (primitive.end.x === 0) contacts.push({...primitive.end});
+    if (primitive.start.x * primitive.end.x < 0) {
+      const parameter = -primitive.start.x / (primitive.end.x - primitive.start.x);
+      contacts.push({
+        z: primitive.start.z + (primitive.end.z - primitive.start.z) * parameter,
+        x: 0,
+      });
+    }
+    return contacts;
+  }
+  if (primitive.type !== "arc" && primitive.type !== "circle") return null;
+  const startAngle = primitive.type === "circle" ? 0 : primitive.startAngle;
+  const sweep = primitive.type === "circle" ? TAU : primitive.sweep;
+  const ratio = -primitive.center.x / primitive.radius;
+  if (Math.abs(ratio) > 1) return [];
+  const base = Math.asin(Math.max(-1, Math.min(1, ratio)));
+  const low = Math.min(startAngle, startAngle + sweep);
+  const high = Math.max(startAngle, startAngle + sweep);
+  const contacts = [];
+  for (const family of [base, Math.PI - base]) {
+    const first = Math.floor((low - family) / TAU) - 1;
+    const last = Math.ceil((high - family) / TAU) + 1;
+    for (let turn = first; turn <= last; turn += 1) {
+      const angle = family + turn * TAU;
+      const parameter = (angle - startAngle) / sweep;
+      if (parameter < 0 || parameter > 1) continue;
+      contacts.push({z: primitive.center.z + Math.cos(angle) * primitive.radius, x: 0});
+    }
+  }
+  return contacts;
+}
+
+function uniqueAxisContacts(primitives, uncertaintyMm) {
+  const contacts = [];
+  for (const primitive of primitives) {
+    const candidates = primitiveAxisContacts(primitive);
+    if (!candidates) return null;
+    for (const candidate of candidates) {
+      if (!finitePoint2(candidate)) return null;
+      if (!contacts.some((contact) => Math.abs(contact.z - candidate.z) <= uncertaintyMm)) contacts.push(candidate);
+    }
+  }
+  return contacts;
+}
+
+function qualifyMaterialRegion({
+  dto,
+  section,
+  contours,
+  selected,
+  selectedPrimitives,
+  selectedMaximumUncertaintyMm,
+  mapping,
+  extractedProfile,
+  maximumUncertaintyMm,
+}) {
+  const context = {
+    selectedContourId: selected?.id ?? mapping.selectedContourId ?? null,
+    profileSide: mapping.profileSide === "positive" ? "positive-radius" : null,
+  };
+  if (dto.topology?.valid !== true || dto.topology?.solidCount !== 1) {
+    return unqualifiedMaterialRegion(
+      "material-region-single-solid-required",
+      "Signed nominal-material classification requires exactly one valid STEP solid.",
+      context,
+    );
+  }
+  if (contours.length !== 1 || !selected || selected.id !== contours[0]?.id) {
+    return unqualifiedMaterialRegion(
+      "material-region-single-contour-required",
+      "Signed nominal-material classification requires the one explicitly selected closed contour to be the section's only contour.",
+      context,
+    );
+  }
+  if (section.approximationUsed !== false || section.fuzzyToleranceMm !== 0
+    || selectedPrimitives.some((primitive) => !["line", "arc", "circle"].includes(primitive.type))) {
+    return unqualifiedMaterialRegion(
+      "material-region-exact-section-required",
+      "Signed nominal-material classification requires exact analytic section primitives with approximation and fuzzy tolerance disabled.",
+      context,
+    );
+  }
+  if (mapping.profileSide !== "positive" || !extractedProfile) {
+    return unqualifiedMaterialRegion(
+      "material-region-positive-profile-required",
+      "Signed nominal-material classification requires an explicitly extracted physical positive-radius profile.",
+      context,
+    );
+  }
+  if (extractedProfile.closed !== false || extractedProfile.intersectionCount !== 2
+    || !Array.isArray(extractedProfile.endpoints) || extractedProfile.endpoints.length !== 2
+    || extractedProfile.endpoints.some((point) => !finitePoint2(point) || point.x !== 0)) {
+    return unqualifiedMaterialRegion(
+      "material-region-axis-endpoints-required",
+      "Signed nominal-material classification requires exactly two proven spindle-centerline endpoints on one open positive-radius profile.",
+      context,
+    );
+  }
+  const simpleBoundary = qualifySimpleMaterialBoundary(selectedPrimitives);
+  if (!simpleBoundary.qualified) {
+    return unqualifiedMaterialRegion(
+      simpleBoundary.reason === "workload"
+        ? "material-region-intersection-workload-exceeded"
+        : (simpleBoundary.reason === "clearance"
+          ? "material-region-self-intersection-clearance"
+          : (simpleBoundary.reason === "gap"
+            ? "material-region-boundary-gap"
+            : "material-region-self-intersection")),
+      simpleBoundary.reason === "workload"
+        ? `The selected section exceeds the ${MAX_MATERIAL_REGION_INTERSECTION_TESTS.toLocaleString()}-pair analytic intersection limit, so a simple material boundary is not proven.`
+        : (simpleBoundary.reason === "clearance"
+          ? "Non-adjacent analytic edges are closer than their combined geometry-uncertainty envelope, so a simple material boundary is not proven."
+          : (simpleBoundary.reason === "gap"
+            ? `The selected section's adjacent edges ${simpleBoundary.firstIndex + 1} and ${simpleBoundary.secondIndex + 1} do not share one endpoint within calculation roundoff, so a closed material boundary is not proven.`
+            : `The selected section has an unexpected analytic edge intersection between edges ${simpleBoundary.firstIndex + 1} and ${simpleBoundary.secondIndex + 1}, so it does not prove one simple material boundary.`)),
+      context,
+    );
+  }
+  const internalProfileContact = extractedProfile.primitives.some((primitive, index) => (
+    (index > 0 && primitive.start?.x === 0)
+    || (index < extractedProfile.primitives.length - 1 && primitive.end?.x === 0)
+  ));
+  const contactUncertaintyMm = Math.max(selectedMaximumUncertaintyMm, maximumUncertaintyMm);
+  const boundaryAxisContacts = uniqueAxisContacts(selectedPrimitives, contactUncertaintyMm);
+  if (internalProfileContact || !boundaryAxisContacts || boundaryAxisContacts.length !== 2) {
+    return unqualifiedMaterialRegion(
+      "material-region-internal-axis-contact",
+      "The selected closed section must meet the spindle centerline at only the positive profile's two endpoints, with no internal or additional contact.",
+      context,
+    );
+  }
+  return {
+    schemaVersion: 1,
+    qualification: MATERIAL_REGION_QUALIFICATION,
+    qualified: true,
+    coordinateSystem: "lathe-xz",
+    sourceContourId: selected.id,
+    profileSide: "positive-radius",
+    boundary: simpleBoundary.boundary,
+    boundaryClosed: true,
+    axisEndpoints: extractedProfile.endpoints.map((point) => ({...point})),
+    geometryUncertaintyMm: contactUncertaintyMm,
+    unqualifiedReason: null,
+  };
+}
+
 function geometryBounds(primitives) {
   let minZ = Number.POSITIVE_INFINITY;
   let maxZ = Number.NEGATIVE_INFINITY;
@@ -1178,6 +1788,17 @@ export function mapStepSectionToLatheGeometry(dto, mapping, {limits: limitOverri
     radialDirection: normalizedMapping.radialDirection,
     profileSide: normalizedMapping.profileSide,
   };
+  const materialRegion = qualifyMaterialRegion({
+    dto,
+    section,
+    contours,
+    selected,
+    selectedPrimitives,
+    selectedMaximumUncertaintyMm,
+    mapping: normalizedMapping,
+    extractedProfile,
+    maximumUncertaintyMm,
+  });
   return {
     schemaVersion: 1,
     format: "step-section",
@@ -1204,6 +1825,7 @@ export function mapStepSectionToLatheGeometry(dto, mapping, {limits: limitOverri
       endpoints: extractedProfile.endpoints,
       intersectionCount: extractedProfile.intersectionCount,
     } : null,
+    materialRegion,
     diagnostics: state.diagnostics,
     diagnosticSummary: diagnosticSummary(state.diagnostics, state.suppressed),
     complexity,

@@ -223,6 +223,11 @@ export function buildAxialFlatBoreStock(segments, {
     if (!isLiveCut(segment)) continue;
     attemptedCuts += 1;
 
+    if (Number(stock?.pilotBoreRadius) > 0 || Number(stock?.pilotBoreDiameter) > 0 || stock?.materialIntervals?.size > 0) {
+      warnings.push(warningFor(segment, segmentIndex, "live-stock-internal-material-unsupported", "Live-tool bores on internally machined or hollow stock require a combined solid model and remain PATH ONLY; no duplicate cavity volume is claimed."));
+      continue;
+    }
+
     if (!normalizedStock) {
       warnings.push(warningFor(segment, segmentIndex, "live-stock-invalid", "Axial bore removal requires a finite cylindrical stock radius and ordered axial bounds."));
       continue;

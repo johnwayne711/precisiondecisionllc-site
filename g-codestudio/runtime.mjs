@@ -69,6 +69,24 @@ function cssRpm(segment, point, xScale) {
 
 function cuttingTiming(segment, xScale) {
   if (segment.verificationBlocked || segment.liveToolBlocked) return null;
+  if (segment.threading) {
+    const thread = segment.threading;
+    const supportedContract = (thread.code === "G32" && thread.contract === "haas-lathe-ngc-g32-v1")
+      || (thread.code === "G76" && thread.contract === "haas-lathe-ngc-g76-v1");
+    if (!supportedContract || thread.synchronized !== true
+      || !(thread.leadMmPerRev > 0) || !Number.isFinite(thread.leadMmPerRev)
+      || segment.type !== "linear" || segment.feedMode !== "per-revolution" || segment.spindleMode !== "rpm"
+      || segment.spindleRunning !== true || !["m3", "m4"].includes(segment.spindleDirection)
+      || !(segment.spindleSpeed > 0) || !Number.isFinite(segment.spindleSpeed)) return null;
+    const effectiveXScale = segment.xCoordinateMode === "radius" ? 1 : xScale;
+    const axial = Math.abs(segment.end?.z - segment.start?.z);
+    const radial = Math.abs(segment.end?.x - segment.start?.x) * effectiveXScale;
+    // Haas F is the larger axis lead, not feed along the diagonal line.
+    // This is nominal constant-RPM feed time, excluding encoder acquisition,
+    // acceleration, lead-in/runout and physical phase behavior.
+    const seconds = Math.max(axial, radial) / thread.leadMmPerRev / segment.spindleSpeed * 60;
+    return Number.isFinite(seconds) && axial > 0 ? {seconds, assumed: false} : null;
+  }
   if (!(segment.feed > 0)) return null;
   const unitScale = segment.unitScale > 0 ? segment.unitScale : (segment.programUnits === "in" ? 25.4 : 1);
   if (segment.machiningMode === "mill" && segment.feedMode === "per-minute") {
@@ -225,6 +243,9 @@ export function estimateCycleTime(parsed, {
   if (blockedSegments) limitations.add(`${blockedSegments} verification-blocked motion block${blockedSegments === 1 ? " is" : "s are"} excluded from cycle-time claims.`);
   if (segments.some((segment) => segment.liveTool && segment.verificationBlocked)) {
     limitations.add("Blocked live-tool motion is excluded from cycle-time claims.");
+  }
+  if (segments.some(segment => segment.threading)) {
+    limitations.add("G32/G76 timing is nominal programmed lead/RPM feed plus modeled returns; encoder synchronization, acceleration and physical runout dynamics are not timed.");
   }
   if (segments.some((segment) => segment.type === "rapid" && segment.coordinateMode === "g112-face")) {
     limitations.add("G112 face rapid timing is unresolved because virtual X/Y motion requires controller-specific X/C kinematic limits.");

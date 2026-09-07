@@ -25,10 +25,21 @@ export const MAX_PROFILE_NOMINAL_SOURCE_POINTS = 100001;
 export const MAX_PROFILE_PROGRAM_SEGMENTS = 100000;
 export const MAX_PROFILE_PROGRAM_CURVES = 100000;
 export const MAX_PROFILE_PROGRAM_SOURCE_POINTS = 100001;
+export const MAX_PROFILE_PENETRATION_FRAGMENTS = 4096;
 export const PROFILE_COMPARISON_SCOPE = Object.freeze({
   direction: "program-to-nominal",
   coordinates: "canonical-mm-lathe-zx",
   claim: "Nominal overlay/deviation only; not finished-stock, collision, controller, setup, or machine-accuracy verification.",
+});
+export const PROFILE_MATERIAL_ENTRY_SCOPE = Object.freeze({
+  direction: "program-reference-point-to-qualified-material-region",
+  coordinates: "canonical-mm-lathe-zx",
+  claim: "Signed program-reference-point penetration risk only; not cutter-compensated gouge, finished-stock, collision, setup, or machine-accuracy verification.",
+});
+export const PROFILE_CUTTER_ENTRY_SCOPE = Object.freeze({
+  direction: 'nominal-active-cutting-edge-to-qualified-material-region',
+  coordinates: 'canonical-mm-lathe-zx',
+  claim: 'Nominal active-edge sweep with explicit setup; point-only and unresolved portions are separately retained. Not complete insert/holder collision, physical cutter accuracy or finished-part verification.',
 });
 
 function finite(value) {
@@ -209,7 +220,7 @@ function normalizedLine(entity, entityIndex, numericalBudgetMm, pieceIndex = 0) 
   }
   const length = distance(start, end);
   if (!finite(length)) throw numericRangeError(`nominal line ${entityIndex} extent`);
-  if (length <= EPSILON) throw new RangeError(`Nominal line ${entityIndex} has zero length.`);
+  if (length === 0) throw new RangeError(`Nominal line ${entityIndex} has zero length.`);
   const metadataUncertaintyMm = Math.max(
     declaredGeometryUncertaintyMm(entity, `Nominal line ${entityIndex}`),
     lineResolutionUncertaintyMm(start, end),
@@ -470,6 +481,8 @@ function programMotionKind(segment) {
   const allowedTypes = [...arcMotions, ...linearMotions, ...wrappedLinearMotions, "rapid"];
   if (!allowedTypes.includes(type)) return null;
   if (sourceMotion) {
+    if (['g32', 'g76'].includes(sourceMotion) && segment?.threading?.synchronized === true
+      && ['linear', 'finish', 'rough'].includes(type)) return {kind: 'linear'};
     if (arcMotions.includes(sourceMotion)
       && [...arcMotions, ...linearMotions, "finish", "cycle-profile"].includes(type)) {
       return {kind: "arc", direction: sourceMotion};
@@ -826,6 +839,9 @@ function comparableSegmentResult(segment, segmentIndex, curves, nominalPieces, o
   return {
     segmentIndex,
     line: segment?.executionLine || segment?.line || null,
+    sourceLine: segment?.sourceLine || segment?.line || null,
+    executionLine: segment?.executionLine || segment?.line || segment?.sourceLine || null,
+    globalBlockIndex: Number.isInteger(segment?.globalBlockIndex) ? segment.globalBlockIndex : segmentIndex,
     type: segment?.type || null,
     sourceMotion: segment?.sourceMotion || segment?.type || null,
     classification: resultClassification(deviation, options.toleranceMm, options.numericalBudgetMm),
@@ -848,6 +864,9 @@ function excludedSegmentResult(segment, segmentIndex, classification, reason) {
   return {
     segmentIndex,
     line: segment?.executionLine || segment?.line || null,
+    sourceLine: segment?.sourceLine || segment?.line || null,
+    executionLine: segment?.executionLine || segment?.line || segment?.sourceLine || null,
+    globalBlockIndex: Number.isInteger(segment?.globalBlockIndex) ? segment.globalBlockIndex : segmentIndex,
     type: segment?.type || null,
     sourceMotion: segment?.sourceMotion || segment?.type || null,
     classification,
@@ -857,6 +876,8 @@ function excludedSegmentResult(segment, segmentIndex, classification, reason) {
     deviation: null,
     worstPoint: null,
     nearestNominal: null,
+    violationFragments: [],
+    fragmentLimitExceeded: false,
   };
 }
 
@@ -1041,6 +1062,725 @@ export function compareProgramProfileToNominal(programSegments, nominalGeometry,
     comparisonOperations: operationBudget.used,
     segmentResults,
     aggregate: aggregateResults(segmentResults, toleranceMm),
+  };
+}
+
+function qualifyMaterialRegion(input, numericalBudgetMm) {
+  if (!input || Array.isArray(input) || input.authorized !== true
+    || !["step-section", "dxf-profile"].includes(input.format)) {
+    return {
+      authorized: false,
+      reason: "Signed profile-side checking requires an authorized STEP section or an explicitly selected and qualified DXF material contour.",
+    };
+  }
+  const region = input.materialRegion;
+  if (region?.qualified !== true || !Array.isArray(region.boundary) || !region.boundary.length) {
+    return {
+      authorized: false,
+      reason: region?.unqualifiedReason?.message
+        || region?.reason
+        || "The reference does not provide one topology-qualified closed nominal-material boundary.",
+    };
+  }
+  if (input.format === "dxf-profile") {
+    const sourceHash = typeof input.source?.hash === "string" && input.source.hash
+      ? input.source.hash
+      : null;
+    const provenance = region.provenance;
+    const contour = Array.isArray(input.materialContours)
+      ? input.materialContours.find((candidate) => candidate.contourId === region.sourceContourId)
+      : null;
+    const boundaryPrimitiveIds = new Set(region.boundary
+      .filter((primitive) => !primitive.source?.numericalClosure)
+      .map((primitive) => String(primitive.id)));
+    const provenancePrimitiveIds = Array.isArray(provenance?.primitiveIds)
+      ? provenance.primitiveIds.map(String)
+      : [];
+    const provenanceTransform = provenance?.transform;
+    const currentTransform = input.transform;
+    const transformMatches = provenanceTransform?.mapping === currentTransform?.mapping
+      && provenanceTransform?.origin?.x === currentTransform?.origin?.x
+      && provenanceTransform?.origin?.y === currentTransform?.origin?.y
+      && provenanceTransform?.offset?.z === currentTransform?.offset?.z
+      && provenanceTransform?.offset?.x === currentTransform?.offset?.x
+      && provenanceTransform?.zDirection === currentTransform?.zDirection
+      && provenanceTransform?.radialDirection === currentTransform?.radialDirection;
+    if (region.qualification !== "dxf-explicit-closed-contour-inside-v1"
+      || region.coordinateSystem !== "lathe-xz"
+      || region.boundaryClosed !== true
+      || region.materialSide !== "inside"
+      || region.profileSide !== "explicit-inside"
+      || !sourceHash
+      || provenance?.sourceHash !== sourceHash
+      || provenance?.contourId !== region.sourceContourId
+      || provenance?.selectionAuthority !== "explicit-closed-contour-and-inside-material-confirmation"
+      || provenance?.layerVisibilityAuthority !== "resolved-visible-modelspace-layer-record"
+      || !transformMatches
+      || !contour?.eligible
+      || contour.contourId !== provenance.contourId
+      || provenancePrimitiveIds.length !== boundaryPrimitiveIds.size
+      || provenancePrimitiveIds.some((id) => !boundaryPrimitiveIds.has(id))) {
+      return {
+        authorized: false,
+        reason: "The DXF material selection no longer matches its exact source, mapped contour, visible layer authority, and explicit inside-material confirmation.",
+      };
+    }
+  }
+  const nominal = normalizeNominalGeometry({authorized: true, primitives: region.boundary}, numericalBudgetMm);
+  return {authorized: true, reason: null, nominal};
+}
+
+function directedArcMembership(arc, angle, numericalBudgetMm) {
+  const magnitude = Math.abs(arc.sweep);
+  const delta = arc.sweep >= 0
+    ? normalizedAngle(angle - arc.startAngle)
+    : normalizedAngle(arc.startAngle - angle);
+  const arithmeticAngularAllowance = Number.EPSILON * NUMERIC_RESOLUTION_ULPS * Math.max(
+    1,
+    Math.abs(angle),
+    Math.abs(arc.startAngle),
+    magnitude,
+    Math.abs(delta),
+  );
+  const dimensionalAngularCap = numericalBudgetMm / arc.radius;
+  const endpointAllowance = Math.min(arithmeticAngularAllowance, dimensionalAngularCap);
+  const distanceFromStart = Math.min(delta, TAU - delta);
+  const distanceFromEnd = Math.abs(delta - magnitude);
+  if (distanceFromStart <= endpointAllowance || distanceFromEnd <= endpointAllowance) {
+    return {ambiguous: true};
+  }
+  if (delta < magnitude) return {ambiguous: false};
+  return null;
+}
+
+function rayCrossingCount(point, nominalPieces, operationBudget, numericalBudgetMm) {
+  consumeComparisonOperations(operationBudget, nominalPieces.length, "signed-profile ray classification");
+  let crossings = 0;
+  let ambiguous = false;
+  for (const piece of nominalPieces) {
+    if (piece.type === "line") {
+      const startAbove = piece.start.z > point.z;
+      const endAbove = piece.end.z > point.z;
+      if (startAbove === endAbove) continue;
+      const fraction = (point.z - piece.start.z) / (piece.end.z - piece.start.z);
+      const crossingX = piece.start.x + (piece.end.x - piece.start.x) * fraction;
+      if (!finite(crossingX)) throw numericRangeError("signed-profile line intersection");
+      if (crossingX > point.x) crossings += 1;
+      continue;
+    }
+    if (piece.type !== "arc" && piece.type !== "circle") {
+      throw new TypeError("Signed material entry supports only a qualified profile's analytic lines and arcs.");
+    }
+    const ratio = (point.z - piece.center.z) / piece.radius;
+    if (!finite(ratio)) throw numericRangeError("signed-profile arc intersection");
+    if (ratio <= -1 || ratio >= 1) continue;
+    const angle = Math.acos(ratio);
+    for (const candidate of [angle, -angle]) {
+      const membership = piece.type === "circle"
+        ? {ambiguous: false}
+        : directedArcMembership(piece, candidate, numericalBudgetMm);
+      if (piece.type !== "circle" && membership === null) continue;
+      if (membership.ambiguous) {
+        ambiguous = true;
+        continue;
+      }
+      const crossingX = piece.center.x + Math.sin(candidate) * piece.radius;
+      if (crossingX <= point.x) continue;
+      if (piece.type === "circle") {
+        crossings += 1;
+        continue;
+      }
+      crossings += 1;
+    }
+  }
+  return {crossings, ambiguous};
+}
+
+function materialSideAtPoint(point, nearest, nominalPieces, operationBudget, numericalBudgetMm, nominalMetadataUncertaintyMm) {
+  const boundaryAllowanceMm = nominalMetadataUncertaintyMm + numericalBudgetMm;
+  if (nearest.distance <= boundaryAllowanceMm) return "boundary";
+  const minimumShiftMm = Math.max(numericResolutionMm(point.z) * 16, numericalBudgetMm / 16);
+  if (nearest.distance / 4 < minimumShiftMm) return "unresolved";
+  const shiftMm = minimumShiftMm;
+  if (!finite(shiftMm) || shiftMm <= 0 || shiftMm >= nearest.distance / 2) return "unresolved";
+  const below = rayCrossingCount(
+    {z: point.z - shiftMm, x: point.x},
+    nominalPieces,
+    operationBudget,
+    numericalBudgetMm,
+  );
+  const above = rayCrossingCount(
+    {z: point.z + shiftMm, x: point.x},
+    nominalPieces,
+    operationBudget,
+    numericalBudgetMm,
+  );
+  if (below.ambiguous || above.ambiguous) return "unresolved";
+  const belowParity = below.crossings % 2;
+  const aboveParity = above.crossings % 2;
+  if (belowParity !== aboveParity) return "unresolved";
+  return belowParity ? "inside" : "outside";
+}
+
+function adaptiveCurveMaterialEntry(curve, nominalPieces, options) {
+  const cache = new Map();
+  const metadataUncertaintyMm = Math.max(0, Number(curve.metadataUncertaintyMm) || 0)
+    + options.nominalMetadataUncertaintyMm;
+  let evaluations = 0;
+  let worstInsideSample = null;
+  let sideUnresolved = false;
+  const evaluate = (fraction) => {
+    if (cache.has(fraction)) return cache.get(fraction);
+    if (evaluations >= options.maximumEvaluations) return null;
+    const point = curvePointAt(curve, fraction);
+    const nearest = distancePointToNominal(point, nominalPieces, options.operationBudget);
+    const side = materialSideAtPoint(
+      point,
+      nearest,
+      nominalPieces,
+      options.operationBudget,
+      options.numericalBudgetMm,
+      options.nominalMetadataUncertaintyMm,
+    );
+    const signedDistanceMm = side === "inside"
+      ? nearest.distance
+      : (side === "outside" ? -nearest.distance : (side === "boundary" ? 0 : null));
+    const sample = {fraction, point, ...nearest, side, signedDistanceMm};
+    cache.set(fraction, sample);
+    evaluations += 1;
+    if (side === "unresolved") sideUnresolved = true;
+    if (side === "inside" && (!worstInsideSample || nearest.distance > worstInsideSample.distance)) {
+      worstInsideSample = sample;
+    }
+    return sample;
+  };
+
+  const totalLengthMm = curveLength(curve);
+  const intervals = [{start: 0, end: 1}];
+  let finishedLowerBoundMm = Number.NEGATIVE_INFINITY;
+  let finishedUpperBoundMm = Number.NEGATIVE_INFINITY;
+  let exhausted = false;
+  const finishedIntervals = [];
+  const finishInterval = (lower, upper, interval, samples, spanLengthMm) => {
+    finishedLowerBoundMm = Math.max(finishedLowerBoundMm, lower);
+    finishedUpperBoundMm = Math.max(finishedUpperBoundMm, upper);
+    finishedIntervals.push({interval, samples, spanLengthMm});
+  };
+  while (intervals.length) {
+    const interval = intervals.pop();
+    const midpoint = (interval.start + interval.end) / 2;
+    const first = evaluate(interval.start);
+    const middle = evaluate(midpoint);
+    const last = evaluate(interval.end);
+    if (!first || !middle || !last) {
+      exhausted = true;
+      break;
+    }
+    if ([first, middle, last].some((sample) => sample.signedDistanceMm === null)) {
+      sideUnresolved = true;
+      break;
+    }
+    const spanLengthMm = totalLengthMm * (interval.end - interval.start);
+    const halfLengthMm = spanLengthMm / 2;
+    const sampledLowerMm = Math.max(first.signedDistanceMm, middle.signedDistanceMm, last.signedDistanceMm);
+    const firstHalfUpperMm = Math.max(
+      first.signedDistanceMm,
+      middle.signedDistanceMm,
+      (first.signedDistanceMm + middle.signedDistanceMm + halfLengthMm) / 2,
+    );
+    const secondHalfUpperMm = Math.max(
+      middle.signedDistanceMm,
+      last.signedDistanceMm,
+      (middle.signedDistanceMm + last.signedDistanceMm + halfLengthMm) / 2,
+    );
+    const analyticUpperMm = analyticUnionUpperBound(
+      curveSlice(curve, interval.start, interval.end),
+      nominalPieces,
+      options.operationBudget,
+    );
+    const upperMm = Math.max(
+      sampledLowerMm,
+      Math.min(Math.max(firstHalfUpperMm, secondHalfUpperMm), analyticUpperMm),
+    );
+    const provenMinimumMm = Math.min(first.signedDistanceMm, middle.signedDistanceMm, last.signedDistanceMm)
+      - spanLengthMm / 4
+      - (Math.max(0, Number(curve.metadataUncertaintyMm) || 0) + options.nominalMetadataUncertaintyMm);
+    const needsViolationFragmentRefinement = sampledLowerMm > options.toleranceMm
+      && provenMinimumMm <= options.toleranceMm
+      && spanLengthMm > options.numericalBudgetMm;
+    const provesNoEntryBeyondTolerance = upperMm + metadataUncertaintyMm <= options.toleranceMm;
+    if (provesNoEntryBeyondTolerance || (upperMm - sampledLowerMm <= options.numericalBudgetMm + EPSILON
+      && !needsViolationFragmentRefinement)) {
+      finishInterval(sampledLowerMm, upperMm, interval, [first, middle, last], spanLengthMm);
+      continue;
+    }
+    intervals.push({start: midpoint, end: interval.end}, {start: interval.start, end: midpoint});
+  }
+
+  const observedSignedMm = [...cache.values()].reduce(
+    (maximum, sample) => sample.signedDistanceMm === null ? maximum : Math.max(maximum, sample.signedDistanceMm),
+    Number.NEGATIVE_INFINITY,
+  );
+  let lowerBoundMm = Math.max(0, (Number.isFinite(finishedLowerBoundMm) ? finishedLowerBoundMm : observedSignedMm) - metadataUncertaintyMm);
+  let upperBoundMm = Math.max(lowerBoundMm, (Number.isFinite(finishedUpperBoundMm) ? finishedUpperBoundMm : observedSignedMm) + metadataUncertaintyMm);
+  if (exhausted || sideUnresolved || intervals.length) {
+    upperBoundMm = Math.max(
+      upperBoundMm,
+      Math.max(0, Number.isFinite(observedSignedMm) ? observedSignedMm : 0) + totalLengthMm + metadataUncertaintyMm,
+    );
+  }
+  const definiteIntervals = finishedIntervals
+    .filter(({samples, spanLengthMm}) => (
+      Math.min(...samples.map((sample) => sample.signedDistanceMm))
+      - spanLengthMm / 4
+      - metadataUncertaintyMm
+      > options.toleranceMm
+    ))
+    .map(({interval}) => interval)
+    .sort((left, right) => left.start - right.start);
+  const mergedIntervals = [];
+  for (const interval of definiteIntervals) {
+    const previous = mergedIntervals.at(-1);
+    if (previous && interval.start <= previous.end + EPSILON) previous.end = Math.max(previous.end, interval.end);
+    else mergedIntervals.push({...interval});
+  }
+  const fragmentLimitExceeded = mergedIntervals.length > MAX_PROFILE_PENETRATION_FRAGMENTS;
+  const violationFragments = fragmentLimitExceeded
+    ? []
+    : mergedIntervals.map((interval) => curveSlice(curve, interval.start, interval.end));
+  return {
+    lowerBoundMm,
+    upperBoundMm,
+    estimateMm: (lowerBoundMm + upperBoundMm) / 2,
+    errorBoundMm: (upperBoundMm - lowerBoundMm) / 2,
+    boundWidthMm: upperBoundMm - lowerBoundMm,
+    evaluations,
+    exhausted,
+    sideUnresolved,
+    metadataUncertaintyMm,
+    worstInsideSample,
+    violationFragments,
+    fragmentLimitExceeded,
+  };
+}
+
+function translatedCurve(curve, offset) {
+  const point = p => ({z: p.z + offset.z, x: p.x + offset.x});
+  return {...curve, start: point(curve.start), end: point(curve.end),
+    ...(curve.center ? {center: point(curve.center)} : {})};
+}
+
+function patchReach(curve, span) {
+  return curve.type === 'arc'
+    ? 2 * curve.radius * Math.sin(Math.min(Math.PI, Math.abs(curve.sweep) * span / 2) / 2)
+    : curveLength(curve) * span / 2;
+}
+
+// A native path translated by a native cutting edge has two parameters. Bound
+// the continuous sweep with the signed-distance 1-Lipschitz property, including
+// both parameter spans. No screen points or chord sampling authorize a result.
+function adaptiveCutterMaterialEntry(path, edges, nominalPieces, options) {
+  const metadataUncertaintyMm = path.metadataUncertaintyMm + options.nominalMetadataUncertaintyMm
+    + Math.max(...edges.map(edge => edge.metadataUncertaintyMm || 0));
+  // Best-bound first prevents a long harmless edge from consuming the entire
+  // budget before the edge most likely to enter material is even evaluated.
+  const patches = [];
+  const push = patch => {
+    patches.push(patch);
+    let i = patches.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (patches[parent].priority >= patch.priority) break;
+      patches[i] = patches[parent]; i = parent;
+    }
+    patches[i] = patch;
+  };
+  const pop = () => {
+    const first = patches[0], last = patches.pop();
+    if (!patches.length) return first;
+    let i = 0;
+    while (i * 2 + 1 < patches.length) {
+      let child = i * 2 + 1;
+      if (child + 1 < patches.length && patches[child + 1].priority > patches[child].priority) child += 1;
+      if (patches[child].priority <= last.priority) break;
+      patches[i] = patches[child]; i = child;
+    }
+    patches[i] = last; return first;
+  };
+  edges.forEach(edge => push({edge, t0: 0, t1: 1, u0: 0, u1: 1, priority: Infinity}));
+  let lower = -Infinity, upper = -Infinity, evaluations = 0;
+  let exhausted = false, sideUnresolved = false, worstInsideSample = null;
+  const fragments = [];
+  while (patches.length) {
+    const patch = pop();
+    const t = (patch.t0 + patch.t1) / 2, u = (patch.u0 + patch.u1) / 2;
+    const offset = curvePointAt(patch.edge, u);
+    const reference = curvePointAt(path, t);
+    const point = {z: reference.z + offset.z, x: reference.x + offset.x};
+    if (!numericallyPrecisePoint(point, options.numericalBudgetMm)) throw numericResolutionError('Cutter sweep', options.numericalBudgetMm);
+    const reachT = patchReach(path, patch.t1 - patch.t0);
+    const reachU = patchReach(patch.edge, patch.u1 - patch.u0);
+    // Preserve already proven entry if the remaining sweep cannot be resolved
+    // within the budget. Never discard a red result because a later patch ran out.
+    if (evaluations >= options.maximumEvaluations
+      || options.operationBudget.limit - options.operationBudget.used < nominalPieces.length * 4) {
+      push(patch); exhausted = true; break;
+    }
+    const nearest = distancePointToNominal(point, nominalPieces, options.operationBudget);
+    const side = materialSideAtPoint(point, nearest, nominalPieces, options.operationBudget,
+      options.numericalBudgetMm, options.nominalMetadataUncertaintyMm);
+    evaluations += 1;
+    const signed = side === 'inside' ? nearest.distance : side === 'outside' ? -nearest.distance : 0;
+    if (side === 'unresolved') {
+      sideUnresolved = true;
+      upper = Math.max(upper, nearest.distance + reachT + reachU);
+      continue;
+    }
+    lower = Math.max(lower, signed);
+    const newWitness = side === 'inside' && (!worstInsideSample || nearest.distance > worstInsideSample.distance);
+    if (newWitness) {
+      worstInsideSample = {fraction: t, point, ...nearest, side, signedDistanceMm: signed, cutterOffset: offset};
+    }
+    const sliced = curveSlice(path, patch.t0, patch.t1);
+    const unsignedPathBound = analyticUnionUpperBound(translatedCurve(sliced, offset), nominalPieces, options.operationBudget);
+    const sideError = side === 'boundary' ? nearest.distance : 0;
+    const patchUpper = Math.min(signed + sideError + reachT + reachU, unsignedPathBound + reachU);
+    if (newWitness && signed - metadataUncertaintyMm > options.toleranceMm && fragments.length < MAX_PROFILE_PENETRATION_FRAGMENTS) {
+      const halfSpan = Math.min((patch.t1 - patch.t0) / 2,
+        (signed - metadataUncertaintyMm - options.toleranceMm) / (2 * curveLength(path)));
+      if (halfSpan > 0) fragments.push(translatedCurve(curveSlice(path, t - halfSpan, t + halfSpan), offset));
+    }
+    if (patchUpper + metadataUncertaintyMm <= options.toleranceMm
+      || patchUpper <= lower + options.numericalBudgetMm / 2) {
+      upper = Math.max(upper, patchUpper); continue;
+    }
+    if (reachT >= reachU) {
+      push({...patch, t0: t, priority: patchUpper}); push({...patch, t1: t, priority: patchUpper});
+    } else {
+      push({...patch, u0: u, priority: patchUpper}); push({...patch, u1: u, priority: patchUpper});
+    }
+  }
+  if (patches.length) {
+    // The exact unsigned distance to any one boundary point is a global upper
+    // bound, so unresolved work cannot accidentally narrow the reported range.
+    const anchor = nominalPieces[0].start || nominalPieces[0].center;
+    for (const patch of patches) {
+      const p = curvePointAt(path, (patch.t0 + patch.t1) / 2);
+      const e = curvePointAt(patch.edge, (patch.u0 + patch.u1) / 2);
+      upper = Math.max(upper, distance({z: p.z + e.z, x: p.x + e.x}, anchor)
+        + (nominalPieces[0].type === 'circle' ? nominalPieces[0].radius : 0)
+        + patchReach(path, patch.t1 - patch.t0) + patchReach(patch.edge, patch.u1 - patch.u0));
+    }
+  }
+  const lowerBoundMm = Math.max(0, (finite(lower) ? lower : 0) - metadataUncertaintyMm);
+  const upperBoundMm = Math.max(lowerBoundMm, (finite(upper) ? upper : 0) + metadataUncertaintyMm);
+  return {lowerBoundMm, upperBoundMm, estimateMm: (lowerBoundMm + upperBoundMm) / 2,
+    errorBoundMm: (upperBoundMm - lowerBoundMm) / 2, boundWidthMm: upperBoundMm - lowerBoundMm,
+    evaluations, exhausted, sideUnresolved, metadataUncertaintyMm, worstInsideSample,
+    violationFragments: fragments, fragmentLimitExceeded: fragments.length >= MAX_PROFILE_PENETRATION_FRAGMENTS};
+}
+
+function materialEntryClassification(penetration, toleranceMm, numericalBudgetMm) {
+  if (penetration.lowerBoundMm > toleranceMm) return "penetration";
+  if (!penetration.exhausted && !penetration.sideUnresolved && penetration.upperBoundMm <= toleranceMm) {
+    return penetration.lowerBoundMm > numericalBudgetMm ? "within-tolerance-entry" : "clear";
+  }
+  if (penetration.exhausted || penetration.sideUnresolved
+    || penetration.boundWidthMm > numericalBudgetMm + EPSILON) return "unresolved";
+  if (penetration.upperBoundMm > toleranceMm) return "tolerance-boundary";
+  if (penetration.lowerBoundMm > numericalBudgetMm) return "within-tolerance-entry";
+  if (penetration.upperBoundMm <= numericalBudgetMm) return "clear";
+  return "tolerance-boundary";
+}
+
+function comparableMaterialEntrySegmentResult(segment, segmentIndex, curves, nominalPieces, options) {
+  let lowerBoundMm = 0;
+  let upperBoundMm = 0;
+  let evaluations = 0;
+  let exhausted = false;
+  let sideUnresolved = false;
+  let metadataUncertaintyMm = 0;
+  let worst = null;
+  let totalCurveLengthMm = 0;
+  const violationFragments = [];
+  let fragmentLimitExceeded = false;
+  for (const curve of curves) {
+    const result = options.cutterEdges
+      ? adaptiveCutterMaterialEntry(curve, options.cutterEdges, nominalPieces, options)
+      : adaptiveCurveMaterialEntry(curve, nominalPieces, options);
+    lowerBoundMm = Math.max(lowerBoundMm, result.lowerBoundMm);
+    upperBoundMm = Math.max(upperBoundMm, result.upperBoundMm);
+    evaluations += result.evaluations;
+    exhausted = exhausted || result.exhausted;
+    sideUnresolved = sideUnresolved || result.sideUnresolved;
+    metadataUncertaintyMm = Math.max(metadataUncertaintyMm, result.metadataUncertaintyMm);
+    totalCurveLengthMm += curveLength(curve);
+    fragmentLimitExceeded = fragmentLimitExceeded || result.fragmentLimitExceeded;
+    if (violationFragments.length + result.violationFragments.length > MAX_PROFILE_PENETRATION_FRAGMENTS) {
+      fragmentLimitExceeded = true;
+    } else {
+      violationFragments.push(...result.violationFragments);
+    }
+    if (result.worstInsideSample
+      && (!worst || result.worstInsideSample.distance > worst.worstInsideSample.distance)) worst = result;
+  }
+  const penetration = {
+    lowerBoundMm,
+    upperBoundMm,
+    estimateMm: (lowerBoundMm + upperBoundMm) / 2,
+    errorBoundMm: (upperBoundMm - lowerBoundMm) / 2,
+    boundWidthMm: upperBoundMm - lowerBoundMm,
+    evaluations,
+    exhausted,
+    sideUnresolved,
+    metadataUncertaintyMm,
+  };
+  return {
+    segmentIndex,
+    line: segment?.executionLine || segment?.line || null,
+    sourceLine: segment?.sourceLine || segment?.line || null,
+    executionLine: segment?.executionLine || segment?.line || segment?.sourceLine || null,
+    globalBlockIndex: Number.isInteger(segment?.globalBlockIndex) ? segment.globalBlockIndex : segmentIndex,
+    type: segment?.type || null,
+    sourceMotion: segment?.sourceMotion || segment?.type || null,
+    classification: materialEntryClassification(penetration, options.toleranceMm, options.numericalBudgetMm),
+    comparable: true,
+    cuttingBasis: options.cutterEdges ? 'nominal-cutting-edge' : 'program-reference-point',
+    curveLengthMm: totalCurveLengthMm,
+    penetration,
+    worstPoint: worst?.worstInsideSample ? {...worst.worstInsideSample.point} : null,
+    nearestNominal: worst?.worstInsideSample ? {
+      entityIndex: worst.worstInsideSample.piece.entityIndex,
+      pieceIndex: worst.worstInsideSample.piece.pieceIndex,
+      id: worst.worstInsideSample.piece.id,
+      type: worst.worstInsideSample.piece.type,
+      point: {...worst.worstInsideSample.nearestPoint},
+      sampledDistanceMm: worst.worstInsideSample.distance,
+    } : null,
+    violationFragments: fragmentLimitExceeded ? [] : violationFragments,
+    fragmentLimitExceeded,
+  };
+}
+
+function aggregateMaterialEntryResults(segmentResults, toleranceMm) {
+  const comparable = segmentResults.filter((result) => result.comparable && result.penetration);
+  const classifications = ["clear", "within-tolerance-entry", "penetration", "tolerance-boundary", "unresolved", "excluded", "unsupported"];
+  const counts = Object.fromEntries(classifications.map((classification) => [
+    classification,
+    segmentResults.filter((result) => result.classification === classification).length,
+  ]));
+  let lowerBoundMm = null;
+  let upperBoundMm = null;
+  let worstSegmentIndex = null;
+  let analyticRemainderUnresolved = false;
+  let fragmentLimitExceeded = false;
+  for (const result of comparable) {
+    analyticRemainderUnresolved = analyticRemainderUnresolved
+      || result.penetration.exhausted
+      || result.penetration.sideUnresolved;
+    fragmentLimitExceeded = fragmentLimitExceeded || result.fragmentLimitExceeded;
+    if (lowerBoundMm === null || result.penetration.lowerBoundMm > lowerBoundMm) {
+      lowerBoundMm = result.penetration.lowerBoundMm;
+      worstSegmentIndex = result.segmentIndex;
+    }
+    upperBoundMm = upperBoundMm === null
+      ? result.penetration.upperBoundMm
+      : Math.max(upperBoundMm, result.penetration.upperBoundMm);
+  }
+  let classification = "no-comparable-segments";
+  if (counts.penetration) classification = "penetration";
+  else if (counts.unsupported || counts.unresolved) classification = "unresolved";
+  else if (counts["tolerance-boundary"]) classification = "tolerance-boundary";
+  else if (counts["within-tolerance-entry"]) classification = "within-tolerance-entry";
+  else if (comparable.length && upperBoundMm <= toleranceMm) classification = "clear";
+  return {
+    classification,
+    complete: comparable.length > 0
+      && !counts.unsupported
+      && !counts.unresolved
+      && !counts["tolerance-boundary"]
+      && !analyticRemainderUnresolved,
+    violationOverlayComplete: !fragmentLimitExceeded,
+    comparableSegments: comparable.length,
+    totalSegments: segmentResults.length,
+    counts,
+    worstSegmentIndex,
+    maximumPenetration: comparable.length ? {
+      lowerBoundMm,
+      upperBoundMm,
+      estimateMm: (lowerBoundMm + upperBoundMm) / 2,
+      errorBoundMm: (upperBoundMm - lowerBoundMm) / 2,
+      boundWidthMm: upperBoundMm - lowerBoundMm,
+    } : null,
+  };
+}
+
+/**
+ * Bound signed program-reference-point entry into one explicitly qualified
+ * material region. This deliberately does not apply a cutter envelope or tool
+ * compensation and therefore reports overcut risk, not a certified gouge.
+ */
+export function compareProgramProfileMaterialEntry(programSegments, nominalGeometry, {
+  programXScale,
+  toleranceMm = DEFAULT_PROFILE_TOLERANCE_MM,
+  numericalBudgetMm = DEFAULT_PROFILE_NUMERICAL_BUDGET_MM,
+  includeRapid = false,
+  programVerificationBlocked = false,
+  maximumEvaluations = MAX_PROFILE_EVALUATIONS_PER_CURVE,
+  maximumComparisonOperations = MAX_PROFILE_COMPARISON_OPERATIONS,
+  cutterResolver = null,
+} = {}) {
+  if (!Array.isArray(programSegments)) throw new TypeError("Program segments must be an array.");
+  if (programSegments.length > MAX_PROFILE_PROGRAM_SEGMENTS) {
+    throw new RangeError(`Signed profile check blocked: program exceeds the ${MAX_PROFILE_PROGRAM_SEGMENTS}-segment limit.`);
+  }
+  if (programXScale !== 0.5 && programXScale !== 1) {
+    throw new TypeError("programXScale is required and must be exactly 0.5 for diameter mode or 1 for radius mode.");
+  }
+  if (typeof includeRapid !== "boolean" || typeof programVerificationBlocked !== "boolean") {
+    throw new TypeError("includeRapid and programVerificationBlocked must be booleans.");
+  }
+  if (!finite(toleranceMm) || toleranceMm < 0) throw new RangeError("toleranceMm must be a finite nonnegative canonical-millimetre value.");
+  if (!finite(numericalBudgetMm) || numericalBudgetMm <= 0 || numericalBudgetMm > MAX_PROFILE_NUMERICAL_BUDGET_MM) {
+    throw new RangeError(`numericalBudgetMm must be positive and no greater than ${MAX_PROFILE_NUMERICAL_BUDGET_MM} mm.`);
+  }
+  if (!Number.isInteger(maximumEvaluations) || maximumEvaluations < 3 || maximumEvaluations > MAX_PROFILE_EVALUATIONS_PER_CURVE) {
+    throw new RangeError(`maximumEvaluations must be an integer from 3 through ${MAX_PROFILE_EVALUATIONS_PER_CURVE}.`);
+  }
+  if (!Number.isInteger(maximumComparisonOperations)
+    || maximumComparisonOperations < 1
+    || maximumComparisonOperations > MAX_PROFILE_COMPARISON_OPERATIONS) {
+    throw new RangeError(`maximumComparisonOperations must be an integer from 1 through ${MAX_PROFILE_COMPARISON_OPERATIONS}.`);
+  }
+  const qualification = qualifyMaterialRegion(nominalGeometry, numericalBudgetMm);
+  if (!qualification.authorized) {
+    return {
+      scope: PROFILE_MATERIAL_ENTRY_SCOPE,
+      available: false,
+      reason: qualification.reason,
+      toleranceMm,
+      numericalBudgetMm,
+      programXScale,
+      maximumComparisonOperations,
+      comparisonOperations: 0,
+      segmentResults: [],
+      aggregate: {
+        classification: "not-qualified",
+        complete: false,
+        comparableSegments: 0,
+        totalSegments: programSegments.length,
+        counts: {},
+        worstSegmentIndex: null,
+        maximumPenetration: null,
+      },
+    };
+  }
+  const nominal = qualification.nominal;
+
+  const operationBudget = {limit: maximumComparisonOperations, used: 0};
+  const options = {
+    toleranceMm,
+    numericalBudgetMm,
+    maximumEvaluations,
+    operationBudget,
+    nominalMetadataUncertaintyMm: nominal.metadataUncertaintyMm,
+  };
+  const preparedSegments = [];
+  let comparableCurveCount = 0;
+  let programSourcePointCount = 0;
+  for (let segmentIndex = 0; segmentIndex < programSegments.length; segmentIndex += 1) {
+    const segment = programSegments[segmentIndex];
+    const sourcePointCount = Array.isArray(segment?.points) ? segment.points.length : 0;
+    if (sourcePointCount > MAX_PROFILE_PROGRAM_SOURCE_POINTS - programSourcePointCount) {
+      throw new RangeError(`Signed profile check blocked: program motion exceeds the ${MAX_PROFILE_PROGRAM_SOURCE_POINTS}-source-point limit.`);
+    }
+    programSourcePointCount += sourcePointCount;
+    if (segment?.verificationBlocked || segment?.liveToolBlocked) {
+      preparedSegments.push({result: excludedSegmentResult(segment, segmentIndex, "unsupported", "Verification-blocked motion cannot support signed material-entry classification.")});
+      continue;
+    }
+    const rapid = segment?.type === "rapid" || segment?.type === "live-rapid";
+    if (rapid && !includeRapid) {
+      preparedSegments.push({result: excludedSegmentResult(segment, segmentIndex, "excluded", "Rapid motion is excluded from signed material-entry classification.")});
+      continue;
+    }
+    if (!segmentIsPlanarTurning(segment)) {
+      preparedSegments.push({result: excludedSegmentResult(segment, segmentIndex, "unsupported", "Only planar turning X/Z motion can use this signed material-region check.")});
+      continue;
+    }
+    const motion = programMotionKind(segment);
+    const curves = motion ? normalizedProgramCurves(segment, programXScale, motion, numericalBudgetMm) : [];
+    if (!motion || !curves.length) {
+      preparedSegments.push({result: excludedSegmentResult(segment, segmentIndex, "unsupported", "The motion lacks supported exact line/arc geometry for signed material-entry classification.")});
+      continue;
+    }
+    comparableCurveCount += curves.length;
+    if (comparableCurveCount > MAX_PROFILE_PROGRAM_CURVES) {
+      throw new RangeError(`Signed profile check blocked: normalized motion exceeds the ${MAX_PROFILE_PROGRAM_CURVES}-curve limit.`);
+    }
+    // The irreducible first interval needs three new samples. Each sample
+    // performs one nearest-boundary pass plus two shifted parity rays (9N),
+    // followed by one analytic upper-bound pass (N).
+    const minimumOperations = comparableCurveCount * nominal.pieces.length * 10;
+    if (minimumOperations > maximumComparisonOperations) {
+      throw new RangeError(
+        `Signed profile check blocked: the minimum workload is ${minimumOperations.toLocaleString()} analytic operations, `
+        + `which exceeds the remaining ${maximumComparisonOperations.toLocaleString()}-operation budget.`,
+      );
+    }
+    const cutter = cutterResolver ? cutterResolver(segment) : null;
+    if (cutter?.blocked) {
+      preparedSegments.push({result: excludedSegmentResult(segment, segmentIndex, 'unsupported', cutter.reason)});
+      continue;
+    }
+    let cutterEdges = null;
+    if (cutter?.edges) {
+      if (!Array.isArray(cutter.edges) || !cutter.edges.length || cutter.edges.length > 16) {
+        throw new TypeError('A nominal cutting edge requires 1–16 native line/arc curves.');
+      }
+      cutterEdges = normalizeNominalGeometry({authorized: true, primitives: cutter.edges}, numericalBudgetMm).pieces;
+      if (cutterEdges.some(edge => !['line', 'arc'].includes(edge.type))) throw new TypeError('Unsupported nominal cutting-edge geometry.');
+    }
+    preparedSegments.push({segment, segmentIndex, curves, cutterEdges});
+  }
+  if (programVerificationBlocked) {
+    preparedSegments.push({
+      result: excludedSegmentResult(
+        {type: "parser-diagnostic"},
+        programSegments.length,
+        "unsupported",
+        "Verification-blocking parser diagnostics prevent signed material-entry classification.",
+      ),
+    });
+  }
+  const segmentResults = preparedSegments.map((prepared) => {
+    if (prepared.result) return prepared.result;
+    try {
+      return comparableMaterialEntrySegmentResult(prepared.segment, prepared.segmentIndex,
+        prepared.curves, nominal.pieces, {...options, cutterEdges: prepared.cutterEdges});
+    } catch (error) {
+      if (!cutterResolver || !String(error.message).includes('operation')) throw error;
+      return excludedSegmentResult(prepared.segment, prepared.segmentIndex, 'unsupported', error.message);
+    }
+  });
+  return {
+    scope: segmentResults.some(result => result.cuttingBasis === 'nominal-cutting-edge')
+      ? PROFILE_CUTTER_ENTRY_SCOPE : PROFILE_MATERIAL_ENTRY_SCOPE,
+    available: true,
+    reason: null,
+    toleranceMm,
+    numericalBudgetMm,
+    programXScale,
+    nominalEntityCount: nominal.entities.length,
+    nominalPieceCount: nominal.pieces.length,
+    nominalMetadataUncertaintyMm: nominal.metadataUncertaintyMm,
+    maximumComparisonOperations,
+    comparisonOperations: operationBudget.used,
+    cutterAware: segmentResults.some(result => result.cuttingBasis === 'nominal-cutting-edge'),
+    cutterCoverageComplete: segmentResults.filter(result => result.classification !== 'excluded')
+      .every(result => result.cuttingBasis === 'nominal-cutting-edge'),
+    segmentResults,
+    aggregate: aggregateMaterialEntryResults(segmentResults, toleranceMm),
   };
 }
 

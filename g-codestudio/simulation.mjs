@@ -1,3 +1,7 @@
+import {turningSpindleIssue} from "./tool-mounting.mjs";
+import {applyNominalLatheSegment, applyCompensatedLatheSegment, stockIntervalVolumes, stockMaterialIntervals} from "./lathe-stock.mjs";
+export {stockMaterialIntervals} from "./lathe-stock.mjs";
+
 const CUT_TYPES = new Set(["linear", "arc-cw", "arc-ccw", "rough", "cycle-profile", "finish"]);
 const EPSILON = 1e-9;
 const POINT_CUTTING_MODEL = Object.freeze({mode: "point", axialMin: 0, axialMax: 0, axialDirection: "both"});
@@ -295,7 +299,32 @@ function warningFor(segment, code, message) {
   return {line: segment.executionLine || segment.line || null, toolKey: segment.toolKey || null, code, message};
 }
 
-function applySegmentEnvelope(profile, zPositions, segment, xScale, stockRadius, toolResolver) {
+function permittedArcAxialDirection(model, segment, xScale) {
+  const {center, radius, sweep, start} = segment;
+  if (!center || !start || ![center.z, center.x, start.z, start.x, radius, sweep, xScale].every(Number.isFinite)
+    || radius <= EPSILON || sweep === 0 || Math.abs(sweep) > Math.PI * 2 + Number.EPSILON * 8) return false;
+  const startAngle = Math.atan2(start.x * xScale - center.x, start.z - center.z);
+  const endAngle = startAngle + sweep;
+  const low = Math.min(startAngle, endAngle);
+  const high = Math.max(startAngle, endAngle);
+  const angles = [startAngle, endAngle];
+  // Z reverses only at sin(angle)=0. Check each exact monotonic interval,
+  // not display chords or merely the endpoints of a major/full-circle arc.
+  for (let turn = Math.ceil(low / Math.PI); turn * Math.PI < high; turn += 1) {
+    const angle = turn * Math.PI;
+    if (angle > low) angles.push(angle);
+  }
+  angles.sort((a, b) => sweep > 0 ? a - b : b - a);
+  for (let index = 1; index < angles.length; index += 1) {
+    // Subtract local offsets to avoid cancellation at translated stock origins.
+    if (!permittedAxialDirection(model,
+      {z: radius * Math.cos(angles[index - 1])},
+      {z: radius * Math.cos(angles[index])})) return false;
+  }
+  return true;
+}
+
+function applySegmentEnvelope(profile, zPositions, segment, xScale, stockRadius, toolResolver, stock) {
   const model = toolModelForSegment(segment, toolResolver);
   if (model.mode === "unassigned") {
     return {materialEndZ: null, warning: warningFor(segment, "tool-unassigned", `${segment.toolKey || "This motion"} has no confirmed tool assignment; stock removal was not applied.`)};
@@ -303,8 +332,29 @@ function applySegmentEnvelope(profile, zPositions, segment, xScale, stockRadius,
   if (model.mode === "unsupported") {
     return {materialEndZ: null, warning: warningFor(segment, "tool-removal-unsupported", `${segment.toolKey || "The active tool"} does not yet have a supported stock-removal model.`)};
   }
+  const spindleIssue = turningSpindleIssue(model, {
+    direction: segment.spindleDirection,
+    running: segment.spindleRunning,
+  });
+  if (spindleIssue) {
+    return {materialEndZ: null, warning: warningFor(segment, spindleIssue.code, `${segment.toolKey || "The active tool"}: ${spindleIssue.message}`)};
+  }
   if (model.simulationReady === false) {
     return {materialEndZ: null, warning: warningFor(segment, "tool-removal-unconfirmed", `${segment.toolKey || "The active tool"} is not confirmed for dimensional stock removal.`)};
+  }
+  if (segment.cutterEnvelope || segment.compensationResolved || segment.compensationPending
+    || (segment.compensation && (segment.compensation.mode !== "off" || segment.compensation.event === "cancel"))) {
+    const result = applyCompensatedLatheSegment(stock, segment, model, xScale);
+    return {materialEndZ: null, warning: result.warning
+      ? warningFor(segment, result.warning.code, result.warning.message) : null};
+  }
+  if (model.mode === "nominal-lathe") {
+    const result = applyNominalLatheSegment(stock, segment, model, xScale);
+    return {materialEndZ: null, warning: result.warning
+      ? warningFor(segment, result.warning.code, result.warning.message) : null};
+  }
+  if (segment.threading || ["G32", "G76"].includes(segment.sourceMotion)) {
+    return {materialEndZ: null, warning: warningFor(segment, "nominal-thread-tool-required", "G32/G76 requires an explicitly accepted nominal thread-section model; a turning point or generic groove cutter cannot substitute.")};
   }
 
   const offsets = model.mode === "axial-band" ? cuttingOffsets(model) : null;
@@ -315,8 +365,15 @@ function applySegmentEnvelope(profile, zPositions, segment, xScale, stockRadius,
   if (offsets && (sourceMotion === "arc-cw" || sourceMotion === "arc-ccw")) {
     return {materialEndZ: null, warning: warningFor(segment, "tool-arc-sweep-unsupported", `${segment.toolKey || "The active groove tool"} uses a finite-width cutter on an arc; exact swept-arc stock removal is not yet supported, so this cut was not applied.`)};
   }
-  if (!offsets && (sourceMotion === "arc-cw" || sourceMotion === "arc-ccw") && applyArcEnvelope(profile, zPositions, segment, xScale, stockRadius)) {
-    return {materialEndZ: null, warning: null};
+  if (offsets && Number(model.cornerRadius) > EPSILON
+    && [segment.start, segment.end].some(point => point?.x * xScale < -EPSILON)) {
+    return {materialEndZ: null, warning: warningFor(segment, "tool-center-crossing-unsupported", "The legacy rounded-band model does not support spindle-center crossing. Use the explicitly confirmed nominal part-off model; no residual-ring approximation was applied.")};
+  }
+  if (!offsets && (sourceMotion === "arc-cw" || sourceMotion === "arc-ccw")) {
+    if (!permittedArcAxialDirection(model, segment, xScale)) {
+      return {materialEndZ: null, warning: warningFor(segment, "tool-direction-blocked", `${segment.toolKey || "The active tool"} is not confirmed for every Z direction on this analytic arc, or its arc geometry is unresolved; stock removal was not applied.`)};
+    }
+    if (applyArcEnvelope(profile, zPositions, segment, xScale, stockRadius)) return {materialEndZ: null, warning: null};
   }
   const points = segment.points?.length >= 2 ? segment.points : [segment.start, segment.end];
   for (let index = 1; index < points.length; index += 1) {
@@ -459,6 +516,7 @@ export function stockContourPoints(stock, {maximumPoints = Infinity} = {}) {
 
 export function buildStockProfile(segments, {
   stockDiameter, stockLength, stockStartZ, xScale = 0.5, visibleCount = segments.length, columns = 800, toolResolver = null,
+  pilotBoreDiameter,
 } = {}) {
   const radius = Math.max(0, Number(stockDiameter) || 0) / 2;
   const {startZ, endZ, length} = stockAxialBounds(stockLength, stockStartZ);
@@ -466,6 +524,10 @@ export function buildStockProfile(segments, {
   const step = sampleCount > 1 ? length / (sampleCount - 1) : 0;
   const zPositions = new Float64Array(sampleCount);
   const profile = new Float64Array(sampleCount);
+  const suppliedPilot = pilotBoreDiameter === undefined || pilotBoreDiameter === null ? 0 : pilotBoreDiameter;
+  const pilotBoreValid = typeof suppliedPilot === "number" && Number.isFinite(suppliedPilot)
+    && suppliedPilot >= 0 && (suppliedPilot === 0 || suppliedPilot < radius * 2);
+  const pilotBoreRadius = pilotBoreValid ? suppliedPilot / 2 : 0;
   for (let index = 0; index < sampleCount; index += 1) {
     zPositions[index] = startZ + index * step;
     profile[index] = radius;
@@ -473,6 +535,10 @@ export function buildStockProfile(segments, {
   const stock = {
     profile, zPositions, columns: sampleCount, radius, length, startZ, endZ,
     materialEndZ: endZ, removedPercent: 0, analytic: true, visibleCount: 0,
+    turningAttemptedCuts: 0, turningModeledCuts: 0, turningBlockedCuts: 0,
+    pilotBoreDiameter: pilotBoreRadius * 2, pilotBoreRadius, pilotBoreValid,
+    materialIntervals: new Map(), nominalModeledCuts: 0, threadEnvelopeCuts: 0, nominalWorkCount: 0,
+    nominalEngagementBaselines: new Map(),
   };
   return extendStockProfile(stock, segments, {startIndex: 0, endIndex: visibleCount, xScale, toolResolver});
 }
@@ -484,13 +550,26 @@ export function extendStockProfile(stock, segments, {
   const start = Math.max(0, Math.min(segments.length, Math.round(Number(startIndex) || 0)));
   const end = Math.max(start, Math.min(segments.length, Math.round(Number(endIndex) || 0)));
   const profile = new Float64Array(stock.profile);
-  const next = {...stock, profile, visibleCount: end};
+  const next = {...stock, profile, materialIntervals: new Map(stock.materialIntervals || []),
+    nominalEngagementBaselines: new Map(stock.nominalEngagementBaselines || []), visibleCount: end};
   if (!next.radius || !next.length) return next;
 
   let materialEndZ = Number.isFinite(Number(stock.materialEndZ)) ? Number(stock.materialEndZ) : stock.endZ;
+  let turningAttemptedCuts = Math.max(0, Number(stock.turningAttemptedCuts) || 0);
+  let turningModeledCuts = Math.max(0, Number(stock.turningModeledCuts) || 0);
+  let turningBlockedCuts = Math.max(0, Number(stock.turningBlockedCuts) || 0);
   const toolWarnings = [...(stock.toolWarnings || [])];
   const warningKeys = new Set(toolWarnings.map((warning) => `${warning.code}|${warning.line}|${warning.toolKey}`));
   for (const segment of segments.slice(start, end)) {
+    const turningCut = !isLiveToolSegment(segment) && CUT_TYPES.has(segment?.type);
+    if (turningCut) turningAttemptedCuts += 1;
+    if (next.pilotBoreValid === false && turningCut) {
+      const warning = warningFor(segment, "stock-pilot-bore-invalid", "The pilot-bore diameter must be an explicit nonnegative value smaller than stock diameter. Correct stock setup before removal.");
+      const key = `${warning.code}|${warning.line}|${warning.toolKey}`;
+      if (!warningKeys.has(key)) { warningKeys.add(key); toolWarnings.push(warning); }
+      turningBlockedCuts += 1;
+      continue;
+    }
     if (segment?.verificationBlocked || segment?.liveToolBlocked) {
       const warning = {
         line: segment.executionLine || segment.line || null,
@@ -503,6 +582,7 @@ export function extendStockProfile(stock, segments, {
         warningKeys.add(key);
         toolWarnings.push(warning);
       }
+      if (turningCut) turningBlockedCuts += 1;
       continue;
     }
     if (isLiveToolSegment(segment)) {
@@ -517,23 +597,43 @@ export function extendStockProfile(stock, segments, {
       continue;
     }
     if (!CUT_TYPES.has(segment.type)) continue;
-    const result = applySegmentEnvelope(profile, next.zPositions, segment, xScale, next.radius, toolResolver);
-    if (Number.isFinite(result.materialEndZ)) materialEndZ = Math.min(materialEndZ, result.materialEndZ);
+    const result = applySegmentEnvelope(profile, next.zPositions, segment, xScale, next.radius, toolResolver, next);
+    if (Number.isFinite(result.materialEndZ)) {
+      materialEndZ = Math.min(materialEndZ, result.materialEndZ);
+      next.materialEndZ = materialEndZ;
+    }
     if (result.warning) {
+      turningBlockedCuts += 1;
       const key = `${result.warning.code}|${result.warning.line}|${result.warning.toolKey}`;
       if (!warningKeys.has(key)) {
         warningKeys.add(key);
         toolWarnings.push(result.warning);
       }
-    }
+    } else turningModeledCuts += 1;
   }
 
   let remainingArea = 0;
-  for (const profileRadius of profile) remainingArea += profileRadius * profileRadius;
-  const removedPercent = profile.length && next.radius
+  for (let index = 0; index < profile.length; index += 1) {
+    if (next.pilotBoreRadius > 0 || next.materialIntervals.size) profile[index] = stockMaterialIntervals(next, index).at(-1)?.[1] || 0;
+    remainingArea += profile[index] * profile[index];
+  }
+  const volumes = stockIntervalVolumes(next);
+  const intervalStock = next.nominalStock || next.pilotBoreRadius > 0 || next.materialIntervals.size > 0;
+  const removedPercent = intervalStock
+    ? (volumes.initialVolume ? volumes.removedVolume / volumes.initialVolume * 100 : 0)
+    : profile.length && next.radius
     ? Math.max(0, Math.min(100, (1 - remainingArea / (profile.length * next.radius * next.radius)) * 100))
     : 0;
-  return {...next, materialEndZ, removedPercent, toolWarnings};
+  return {
+    ...next,
+    ...volumes,
+    materialEndZ,
+    removedPercent,
+    toolWarnings,
+    turningAttemptedCuts,
+    turningModeledCuts,
+    turningBlockedCuts,
+  };
 }
 
 // Compatibility alias for callers migrating from the former raster stock model.

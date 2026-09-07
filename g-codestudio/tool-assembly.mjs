@@ -1,4 +1,17 @@
-import {toolLibraryAssemblyById} from "./tool-library.mjs";
+import {toolLibraryAssemblyById, toolLibraryAssemblyDetail} from "./tool-library.mjs";
+import {MCLNR163C_CAD_PROJECTION} from "./tool-cad-projections.mjs";
+import {MCLNL164D_CAD_PROJECTION} from "./tool-cad-left-projection.mjs";
+import {MDJNR164D_CAD_PROJECTION} from "./tool-cad-d-projection.mjs";
+import {MVJNR164D_CAD_PROJECTION} from "./tool-cad-v-projection.mjs";
+import {A16TMCLNR4_CAD_PROJECTION} from "./tool-cad-boring-projection.mjs";
+import {PROFILED_TOOLS} from "./tool-profile-sources.mjs";
+import {buildProfileDisplay, validateProfileDisplaySource} from "./tool-profile-display.mjs";
+import {nominalLatheCuttingDefinition, resolveNominalLatheCuttingModel} from "./tool-lathe-cutting.mjs";
+export {MCLNR163C_CAD_PROJECTION} from "./tool-cad-projections.mjs";
+export {MCLNL164D_CAD_PROJECTION} from "./tool-cad-left-projection.mjs";
+export {MDJNR164D_CAD_PROJECTION} from "./tool-cad-d-projection.mjs";
+export {MVJNR164D_CAD_PROJECTION} from "./tool-cad-v-projection.mjs";
+export {A16TMCLNR4_CAD_PROJECTION} from "./tool-cad-boring-projection.mjs";
 import {
   listMillingToolLibraryRecords, millingToolLibraryRecordById,
 } from "./milling-tool-library.mjs";
@@ -28,17 +41,19 @@ function frozenDefinition(definition) {
   return deepFreeze(deepClone({...definition, sources: definition.sources || []}));
 }
 
-const SUPPORTED_GEOMETRY_KINDS = new Set(["diamond-turning", "groove", "axial-milling-cutter"]);
+const SUPPORTED_GEOMETRY_KINDS = new Set(["diamond-turning", "diamond-boring", "profiled-display", "groove", "axial-milling-cutter"]);
 const SUPPORTED_CUTTING_MODES = new Set(["point", "axial-band", "axial-flat-endmill"]);
 const CONFIRMED_AXIAL_DIRECTIONS = new Set(["positive-z", "negative-z", "radial-only", "both"]);
-const CATALOG_ENVELOPE_NOTICE = "Constructed connected catalog-scaled holder envelope with analytic cutter geometry. Exact seat, pocket, clamp, and mounting-hardware geometry is not represented; this is a display aid, not manufacturer CAD.";
+const MOUNTING_ORIENTATIONS = new Set(["standard", "flipped"]);
+const SPINDLE_DIRECTIONS = new Set(["m3", "m4"]);
 const MCLNR164D_CAD_NOTICE = "Stroke-only top-plan projection of the official Kennametal MCLNR164D GTM holder body and its mounted CNMG432 insert, referenced to the GTM cutting-reference point. Clamp, screw, lock-pin, and shim detail is intentionally omitted. The tessellated projection is display geometry, not configured program-tip validation, stock-removal approval, collision authority, or trusted external dimensional validation.";
 
 // Retained display projection from Kennametal's official MCLNR164D GTM data.
 // The source arrays are [model X, -model Z] in mm. They map into the approved
 // vertical OD-holder display as app {z: model X - CRP.x, x: model Z - CRP.z}.
 // Only the holder body and already-mounted CUT insert are retained so the result
-// stays a simple outline; M3/M4 visibility never changes its mounted position.
+// stays a simple outline. Only explicit mounting changes its pose/visibility;
+// spindle commands cannot move, flip, or change the visible edges of a tool.
 export const MCLNR164D_CAD_PROJECTION = deepFreeze({
   id: "kennametal-mclnr164d-gtm-top-plan-v1",
   units: "mm",
@@ -110,6 +125,7 @@ export const DEFAULT_TOOL_ASSEMBLY_2D = frozenDefinition({
   renderingClaim: "manufacturer-cad-projection",
   geometryNotice: MCLNR164D_CAD_NOTICE,
   cadProjectionId: MCLNR164D_CAD_PROJECTION.id,
+  mountingRequired: true,
   hand: "right",
   sources: [
     "https://www.kennametal.com/us/en/products/p.mcln-5.1096070.html",
@@ -119,23 +135,129 @@ export const DEFAULT_TOOL_ASSEMBLY_2D = frozenDefinition({
   ],
 });
 
-const LEFT_CNMG = frozenDefinition({
+export const MCLNR163C_TOOL_ASSEMBLY_2D = frozenDefinition({
+  ...CNMG_COMMON,
+  id: "kennametal-mclnr163c-cnmg322p",
+  revision: 2,
+  name: "Kennametal MCLNR163C + CNMG322P · RH",
+  holderCatalogId: "MCLNR163C",
+  holderMaterialNumber: "1096068",
+  insertCatalogId: "CNMG322P / CNMG090308P",
+  insertMaterialNumber: "1158184",
+  insertIc: 9.525,
+  insertCuttingEdgeLength: 9.672,
+  insertThickness: 3.18,
+  insertHoleDiameter: 3.81,
+  holderLength: 127,
+  holderHeadLength: 25.4,
+  verification: "catalogScaled",
+  displayVerification: "manufacturerCadProjection",
+  renderingClaim: "manufacturer-cad-projection",
+  geometryNotice: "Stroke-only top-plan projection of the official Kennametal MCLNR163C GTM holder body and its mounted CNMG322P insert, referenced to its own GTM cutting-reference point. Clamp, screw, lock-pin, and shim detail is intentionally omitted. The tessellated projection is display geometry, not configured program-tip validation, stock-removal approval, collision authority, or trusted external dimensional validation.",
+  cadProjectionId: MCLNR163C_CAD_PROJECTION.id,
+  mountingRequired: true,
+  hand: "right",
+  sources: [
+    "https://www.kennametal.com/us/en/products/p.mcln-5.1096068.html",
+    "https://www.kennametal.com/us/en/products/p.cnmg-p.1158184.html",
+    MCLNR163C_CAD_PROJECTION.source.stepUrl,
+    MCLNR163C_CAD_PROJECTION.source.manifestUrl,
+  ],
+});
+
+const CAD_PROJECTIONS_BY_ASSEMBLY = Object.freeze({
+  [DEFAULT_TOOL_ASSEMBLY_2D.id]: MCLNR164D_CAD_PROJECTION,
+  [MCLNR163C_TOOL_ASSEMBLY_2D.id]: MCLNR163C_CAD_PROJECTION,
+  "kennametal-mclnl164d-cnmg432": MCLNL164D_CAD_PROJECTION,
+  "kennametal-mdjnr164d-dnmg432": MDJNR164D_CAD_PROJECTION,
+  "kennametal-mvjnr164d-vnmg432": MVJNR164D_CAD_PROJECTION,
+  "kennametal-a16tmclnr4-cnmg432": A16TMCLNR4_CAD_PROJECTION,
+  ...Object.fromEntries(PROFILED_TOOLS.map(tool => [tool.id, tool.projection])),
+});
+
+function cadProjectionForAssembly(assembly) {
+  if (!Object.hasOwn(CAD_PROJECTIONS_BY_ASSEMBLY, assembly?.id)) return null;
+  const projection = CAD_PROJECTIONS_BY_ASSEMBLY[assembly?.id];
+  return projection && assembly.cadProjectionId === projection.id ? projection : null;
+}
+
+export const MCLNL164D_TOOL_ASSEMBLY_2D = frozenDefinition({
   ...CNMG_COMMON,
   id: "kennametal-mclnl164d-cnmg432",
-  revision: 1,
+  revision: 2,
   name: "Kennametal MCLNL164D + CNMG432 · LH",
   holderCatalogId: "MCLNL164D",
   holderMaterialNumber: "1096092",
   verification: "catalogScaled",
-  renderingClaim: "catalog-connected-envelope",
-  geometryNotice: CATALOG_ENVELOPE_NOTICE,
+  displayVerification: "manufacturerCadProjection",
+  renderingClaim: "manufacturer-cad-projection",
+  cadProjectionId: MCLNL164D_CAD_PROJECTION.id,
+  mountingRequired: true,
+  geometryNotice: "Source-scale stroke-only projection of the independent Kennametal MCLNL164D holder and its manufacturer-mounted compatible-size CUT/gage insert. CNMG432 compatibility is manufacturer-listed; the generic mounted CUT does not identify this insert's chipbreaker-specific surfaces. The named STEP CRP is retained without mirroring or scaling the RH source. Clamp, screw, pin and shim hardware is omitted. Display/reference evidence does not qualify physical cutting or collision.",
   hand: "left",
   holderHeadLength: 30.48,
   sources: [
     "https://www.kennametal.com/us/en/products/p.mcln-5.1096092.html",
+    MCLNL164D_CAD_PROJECTION.source.stepUrl,
+    MCLNL164D_CAD_PROJECTION.source.manifestUrl,
     ...CNMG_COMMON.sources,
   ],
 });
+
+// Published dimensions remain in the canonical catalog. Only the programmed-
+// contact-point cutting contract is shared; each drawable has its own CAD.
+function sourcedDiamondDefinition(id, projection) {
+  const {assembly, holder, insert, sources} = toolLibraryAssemblyDetail(id);
+  const dimensions = holder.dimensions;
+  const cutter = insert.dimensions;
+  return frozenDefinition({
+    id, revision: assembly.revision, name: assembly.name,
+    manufacturer: assembly.manufacturer, hand: holder.hand,
+    holderCatalogId: holder.catalogId.ansi, holderMaterialNumber: holder.materialNumber,
+    insertCatalogId: `${insert.catalogId.ansi} / ${insert.catalogId.iso}`, insertMaterialNumber: insert.materialNumber,
+    geometryKind: "diamond-turning", family: "turn", mountingRequired: true,
+    holderLength: dimensions.overallLength, holderShankWidth: dimensions.shankWidth,
+    holderFDimension: dimensions.fDimension, holderHeadLength: dimensions.headLength,
+    holderApproachAngle: holder.cuttingGeometry.approachAngleDegrees,
+    insertIc: cutter.inscribedCircle, insertCuttingEdgeLength: cutter.cuttingEdgeLength,
+    insertIncludedAngle: holder.cuttingGeometry.insertIncludedAngleDegrees,
+    insertNoseRadius: cutter.noseRadius, insertThickness: cutter.thickness, insertHoleDiameter: cutter.holeDiameter,
+    verification: "catalogScaled", displayVerification: "manufacturerCadProjection",
+    renderingClaim: "manufacturer-cad-projection", cadProjectionId: projection.id,
+    geometryNotice: `Source-scale stroke-only projection of the independent Kennametal ${holder.catalogId.ansi} GTM holder and manufacturer-mounted compatible-size CUT/gage insert at its named STEP cutting-reference point. ${insert.catalogId.ansi} compatibility is manufacturer-listed; exact chipbreaker-specific surfaces are not asserted. Hardware is omitted. Display/reference evidence does not qualify physical cutting, nose compensation, or collision.`,
+    sources: [...new Set([...sources.map(source => source.url), projection.source.stepUrl, projection.source.manifestUrl])],
+    cuttingModel: {...CNMG_COMMON.cuttingModel},
+  });
+}
+
+export const MDJNR164D_TOOL_ASSEMBLY_2D = sourcedDiamondDefinition("kennametal-mdjnr164d-dnmg432", MDJNR164D_CAD_PROJECTION);
+export const MVJNR164D_TOOL_ASSEMBLY_2D = sourcedDiamondDefinition("kennametal-mvjnr164d-vnmg432", MVJNR164D_CAD_PROJECTION);
+
+// The bar has an axial round shank and an ID cutting point. It must never
+// inherit the exterior-radius point-removal contract or OD mounting axis.
+export const A16TMCLNR4_TOOL_ASSEMBLY_2D = (() => {
+  const {assembly, holder, insert, sources} = toolLibraryAssemblyDetail("kennametal-a16tmclnr4-cnmg432");
+  return frozenDefinition({
+    id: assembly.id, revision: assembly.revision, name: assembly.name,
+    manufacturer: assembly.manufacturer, hand: holder.hand,
+    holderCatalogId: holder.catalogId.ansi, holderMaterialNumber: holder.materialNumber,
+    insertCatalogId: `${insert.catalogId.ansi} / ${insert.catalogId.iso}`, insertMaterialNumber: insert.materialNumber,
+    geometryKind: "diamond-boring", family: "id-bore", mountingRequired: true,
+    mountingAxis: "program-z", displayOnly: false, nominalCutting: true,
+    holderLength: holder.dimensions.overallLength,
+    holderShankDiameter: holder.dimensions.shankDiameter,
+    holderFDimension: holder.dimensions.fDimension,
+    minimumBoreDiameter: holder.dimensions.minimumBoreDiameter,
+    insertIc: insert.dimensions.inscribedCircle,
+    insertNoseRadius: insert.dimensions.noseRadius,
+    insertThickness: insert.dimensions.thickness,
+    verification: "catalogScaled", displayVerification: "manufacturerCadProjection",
+    renderingClaim: "manufacturer-cad-projection", cadProjectionId: A16TMCLNR4_CAD_PROJECTION.id,
+    geometryNotice: "Source-scale stroke-only A16TMCLNR4 axial boring-bar display at its named STEP CRP. Round shank dimensions are manufacturer-published; source mesh accuracy is unqualified. The mounted CUT is a compatible-size gage, not exact CNMG432 chipbreaker detail. A separate explicitly accepted nominal ID contact-point model may remove stock; this CAD outline does not prove cutter position, bore clearance, physical dimensions or collision.",
+    sources: [...new Set([...sources.map(source => source.url), A16TMCLNR4_CAD_PROJECTION.source.stepUrl, A16TMCLNR4_CAD_PROJECTION.source.manifestUrl])],
+    cuttingModel: {...nominalLatheCuttingDefinition(assembly.id), family: "id-bore"},
+  });
+})();
 
 const BACK_TURN = frozenDefinition({
   id: "kennametal-nsr163d-np3002rk-back-turn",
@@ -196,10 +318,32 @@ function unverifiedTemplate(id, name, family, geometryKind) {
   });
 }
 
+export const PROFILED_TOOL_ASSEMBLIES_2D = Object.freeze(PROFILED_TOOLS.map(tool => frozenDefinition({
+  id: tool.id, revision: tool.revision || 1, name: tool.name, manufacturer: "Kennametal",
+  holderCatalogId: tool.holder.name, holderMaterialNumber: tool.holder.materialNumber,
+  insertCatalogId: tool.insert.name, insertMaterialNumber: tool.insert.materialNumber,
+  hand: tool.holder.hand, family: tool.family, geometryKind: "profiled-display",
+  mountingAxis: tool.mountingAxis, mountingRequired: true, displayOnly: false, nominalCutting: true,
+  holderLength: tool.holder.dimensions.overallLength,
+  holderShankWidth: tool.holder.dimensions.shankWidth,
+  holderShankDiameter: tool.holder.dimensions.shankDiameter,
+  holderFDimension: tool.holder.dimensions.fDimension,
+  verification: "catalogScaled", displayVerification: "manufacturerCadProjection",
+  renderingClaim: "manufacturer-cad-projection", cadProjectionId: tool.projection.id,
+  geometryNotice: tool.notice,
+  sources: [tool.holder.productUrl, tool.insert.productUrl, tool.projection.source.stepUrl, tool.projection.source.insertStepUrl],
+  cuttingModel: {...nominalLatheCuttingDefinition(tool.id), family: tool.family},
+})));
+
 export const TOOL_ASSEMBLY_2D_LIBRARY = Object.freeze([
   DEFAULT_TOOL_ASSEMBLY_2D,
-  LEFT_CNMG,
+  MCLNR163C_TOOL_ASSEMBLY_2D,
+  MCLNL164D_TOOL_ASSEMBLY_2D,
+  MDJNR164D_TOOL_ASSEMBLY_2D,
+  MVJNR164D_TOOL_ASSEMBLY_2D,
+  A16TMCLNR4_TOOL_ASSEMBLY_2D,
   BACK_TURN,
+  ...PROFILED_TOOL_ASSEMBLIES_2D,
   unverifiedTemplate("custom-od-groove-part", "Custom OD groove / parting tool", "groove-part", "groove"),
   unverifiedTemplate("custom-od-thread", "Custom OD threading tool", "thread", "thread"),
   unverifiedTemplate("custom-id-boring", "Custom ID boring tool", "id-bore", "boring"),
@@ -282,6 +426,9 @@ function cuttingOffsets(model) {
 function validateToolAssembly2dGeometry(assembly, {requirePlacement = true} = {}) {
   const errors = [];
   if (!assembly || !assembly.id) return ["A tool assembly is required."];
+  if (assembly.renderingClaim === "manufacturer-cad-projection" && !cadProjectionForAssembly(assembly)) {
+    errors.push("The exact manufacturer CAD projection is unavailable for this assembly.");
+  }
   if (!SUPPORTED_GEOMETRY_KINDS.has(assembly.geometryKind)) {
     errors.push(`Geometry kind ${assembly.geometryKind || "unknown"} does not have a supported 2D builder.`);
   }
@@ -297,6 +444,23 @@ function validateToolAssembly2dGeometry(assembly, {requirePlacement = true} = {}
     if (finite(assembly.lengthOfCut) && finite(assembly.overallLength) && assembly.lengthOfCut > assembly.overallLength) {
       errors.push("Length of cut cannot exceed cutter overall length.");
     }
+  } else if (assembly.geometryKind === "profiled-display") {
+    errors.push(...validateProfileDisplaySource(cadProjectionForAssembly(assembly), assembly.mountingAxis));
+  } else if (assembly.geometryKind === "diamond-boring") {
+    for (const [label, value] of [
+      ["Bar overall length", assembly.holderLength],
+      ["Round shank diameter", assembly.holderShankDiameter],
+      ["Holder F dimension", assembly.holderFDimension],
+      ["Minimum bore diameter", assembly.minimumBoreDiameter],
+      ["Insert inscribed circle", assembly.insertIc],
+      ["Insert thickness", assembly.insertThickness],
+    ]) {
+      if (!finite(value) || value <= 0) errors.push(`${label} must be published and greater than zero.`);
+    }
+    if (!finite(assembly.insertNoseRadius) || assembly.insertNoseRadius < 0) errors.push("Insert nose radius cannot be negative.");
+    if (assembly.minimumBoreDiameter < assembly.holderShankDiameter) errors.push("Minimum bore diameter cannot be smaller than the bar shank.");
+    if (assembly.mountingAxis !== "program-z") errors.push("The boring-bar mounting axis must be program Z.");
+    if (!cadProjectionForAssembly(assembly)) errors.push("An exact boring-bar CAD display source is required.");
   } else {
     for (const [label, value] of [
       ["Holder overall length", assembly.holderLength],
@@ -363,6 +527,25 @@ export function toolAssembly2dDisplayCapability(assembly) {
 export function validateToolAssembly2d(assembly) {
   const errors = validateToolAssembly2dGeometry(assembly);
   if (!assembly || !assembly.id) return errors;
+  if (nominalLatheCuttingDefinition(assembly.id)) {
+    errors.push(...resolveNominalLatheCuttingModel(assembly).errors);
+    return errors;
+  }
+  if (assembly.geometryKind === "profiled-display") {
+    errors.push("This source-registered tool is display only. Its finite cutting profile, programmed datum and stock removal are not qualified.");
+  }
+  if (assembly.geometryKind === "diamond-boring") {
+    errors.push("Internal boring stock removal is not implemented. The boring bar is display only.");
+    return errors;
+  }
+  if (assembly.mountingRequired === true) {
+    if (!MOUNTING_ORIENTATIONS.has(assembly.mountingOrientation)) {
+      errors.push("The installed tool mounting must be selected: standard or flipped 180°.");
+    }
+    if (!SPINDLE_DIRECTIONS.has(assembly.requiredSpindleDirection)) {
+      errors.push("The required spindle direction must be selected explicitly: M3 or M4 for this mounted setup.");
+    }
+  }
   const cuttingMode = assembly.cuttingModel?.mode;
   if (!SUPPORTED_CUTTING_MODES.has(cuttingMode)) {
     errors.push(`Cutting model ${cuttingMode || "unknown"} is not supported for stock removal.`);
@@ -409,7 +592,12 @@ function shankEnvelope(assembly, referencePoint, handSign = 1) {
 }
 
 function turningModel(assembly, referencePoint, displayState = null) {
-  const handSign = assembly.hand === "left" ? -1 : 1;
+  // A 180-degree roll about the radial shank axis reverses the Z offsets, not
+  // the radial X offsets. Re-reference the installed cutting point at the same
+  // programmed datum; this does not rename an RH holder as an LH catalog tool.
+  const mountingKnown = MOUNTING_ORIENTATIONS.has(assembly.mountingOrientation);
+  const flipped = assembly.mountingOrientation === "flipped";
+  const handSign = (assembly.hand === "left" ? -1 : 1) * (flipped ? -1 : 1);
   const spindleDirection = displayState?.spindleDirection === "m3" || displayState?.spindleDirection === "m4"
     ? displayState.spindleDirection
     : "unknown";
@@ -450,13 +638,13 @@ function turningModel(assembly, referencePoint, displayState = null) {
   const holderComponent = {role: "holder", outline: holderOutline};
   const insertComponent = {role: "insert", outline: insertOutline};
   if (displayState) {
-    const unknownPose = spindleDirection === "unknown";
+    const unknownPose = !mountingKnown;
     holderComponent.renderOrder = 1;
     insertComponent.renderOrder = 2;
     holderComponent.paths = [{points: holderOutline, closed: true}];
     insertComponent.paths = [{
-      points: spindleDirection === "m3" ? exposedInsertPath : insertOutline,
-      closed: spindleDirection !== "m3",
+      points: flipped ? insertOutline : exposedInsertPath,
+      closed: flipped,
     }];
     holderComponent.dashed = unknownPose;
     insertComponent.dashed = unknownPose;
@@ -474,31 +662,32 @@ function turningModel(assembly, referencePoint, displayState = null) {
     spindleDisplay: displayState ? {
       direction: spindleDirection,
       running: typeof displayState.spindleRunning === "boolean" ? displayState.spindleRunning : null,
-      facing: spindleDirection === "m3" ? "down" : spindleDirection === "m4" ? "up" : "unknown",
+      facing: mountingKnown ? (flipped ? "up" : "down") : "unknown",
     } : null,
     components: [holderComponent, insertComponent],
   };
 }
 
-function cadProjectionPoint(referencePoint, point) {
+function cadProjectionPoint(referencePoint, point, projection, mountingSign) {
   const [modelX, negativeModelZ] = point;
-  const [crpX, , crpZ] = MCLNR164D_CAD_PROJECTION.modelCrp;
+  const [crpX, , crpZ] = projection.modelCrp;
   return {
-    z: referencePoint.z + modelX - crpX,
+    z: mountingSign < 0 ? referencePoint.z - modelX + crpX : referencePoint.z + modelX - crpX,
     x: referencePoint.x - negativeModelZ - crpZ,
   };
 }
 
-function mclnr164dCadDisplayModel(assembly, referencePoint, displayState) {
+function turningCadDisplayModel(assembly, referencePoint, displayState, projection) {
   const analytic = turningModel(assembly, referencePoint, displayState);
-  const spindleDirection = analytic.spindleDisplay.direction;
-  const mapPath = (path) => path.map((point) => cadProjectionPoint(referencePoint, point));
-  const holderOutline = mapPath(MCLNR164D_CAD_PROJECTION.holderOutline);
-  const insertOutline = mapPath(MCLNR164D_CAD_PROJECTION.insertOutline);
-  const exposedInsertPath = mapPath(MCLNR164D_CAD_PROJECTION.faceDownVisiblePath);
-  const shankOutline = shankEnvelope(assembly, referencePoint, 1);
-  const unknownPose = spindleDirection === "unknown";
-  const faceDown = spindleDirection === "m3";
+  const flipped = assembly.mountingOrientation === "flipped";
+  const mountingSign = flipped ? -1 : 1;
+  const mapPath = (path) => path.map((point) => cadProjectionPoint(referencePoint, point, projection, mountingSign));
+  const holderOutline = mapPath(projection.holderOutline);
+  const insertOutline = mapPath(projection.insertOutline);
+  const exposedInsertPath = mapPath(projection.faceDownVisiblePath);
+  const shankOutline = shankEnvelope(assembly, referencePoint, mountingSign * (assembly.hand === "left" ? -1 : 1));
+  const unknownPose = !MOUNTING_ORIENTATIONS.has(assembly.mountingOrientation);
+  const faceDown = !flipped;
   const holderComponent = {
     role: "holder",
     outline: holderOutline,
@@ -516,21 +705,21 @@ function mclnr164dCadDisplayModel(assembly, referencePoint, displayState) {
   return {
     ...analytic,
     cadProjection: {
-      id: MCLNR164D_CAD_PROJECTION.id,
-      units: MCLNR164D_CAD_PROJECTION.units,
-      view: MCLNR164D_CAD_PROJECTION.view,
-      projectionGrid: MCLNR164D_CAD_PROJECTION.projectionGrid,
-      holderSimplificationTolerance: MCLNR164D_CAD_PROJECTION.holderSimplificationTolerance,
-      insertSimplificationTolerance: MCLNR164D_CAD_PROJECTION.insertSimplificationTolerance,
-      modelCrp: [...MCLNR164D_CAD_PROJECTION.modelCrp],
-      source: {...MCLNR164D_CAD_PROJECTION.source},
+      id: projection.id,
+      units: projection.units,
+      view: projection.view,
+      projectionGrid: projection.projectionGrid,
+      holderSimplificationTolerance: projection.holderSimplificationTolerance,
+      insertSimplificationTolerance: projection.insertSimplificationTolerance,
+      modelCrp: [...projection.modelCrp],
+      source: {...projection.source},
     },
     insert: {
       ...analytic.insert,
       outline: insertOutline,
       body: insertOutline,
       exposedPath: exposedInsertPath,
-      cadNoseRadius: MCLNR164D_CAD_PROJECTION.cadInsertNoseRadius,
+      cadNoseRadius: projection.cadInsertNoseRadius,
     },
     cutter: analytic.cutter,
     holder: {
@@ -588,6 +777,53 @@ function grooveModel(assembly, referencePoint) {
   };
 }
 
+function boringCadDisplayModel(assembly, referencePoint, displayState, projection) {
+  // A boring bar is parallel to program Z. Rolling this physical bar 180°
+  // reverses its radial offsets, NOT the axial offsets or catalog hand.
+  const flipped = assembly.mountingOrientation === "flipped";
+  const mountingKnown = MOUNTING_ORIENTATIONS.has(assembly.mountingOrientation);
+  const radialSign = flipped ? -1 : 1;
+  const [crpX, , crpZ] = projection.modelCrp;
+  const mapPath = path => path.map(([modelX, negativeModelZ]) => ({
+    z: referencePoint.z - negativeModelZ - crpZ,
+    x: referencePoint.x + radialSign * (crpX - modelX),
+  }));
+  const holderOutline = mapPath(projection.holderOutline);
+  const insertOutline = mapPath(projection.insertOutline);
+  const exposedPath = mapPath(projection.faceDownVisiblePath);
+  return {
+    cadProjection: {
+      id: projection.id, units: projection.units, view: projection.view,
+      modelCrp: [...projection.modelCrp], source: {...projection.source},
+      sourceTessellationErrorBoundMm: projection.sourceTessellationErrorBoundMm,
+      projectionGrid: projection.projectionGrid,
+      holderSimplificationTolerance: projection.holderSimplificationTolerance,
+      insertSimplificationTolerance: projection.insertSimplificationTolerance,
+      mountingAxis: "program-z", radialSign,
+    },
+    holder: {
+      outline: holderOutline, bodyOutline: holderOutline,
+      shankDiameter: assembly.holderShankDiameter,
+      overallLength: assembly.holderLength,
+      minimumBoreDiameter: assembly.minimumBoreDiameter,
+      envelopeKind: "manufacturer-cad-boring-bar-display",
+    },
+    insert: {outline: insertOutline, body: insertOutline, exposedPath},
+    cutter: {outline: insertOutline},
+    spindleDisplay: {
+      direction: SPINDLE_DIRECTIONS.has(displayState?.spindleDirection) ? displayState.spindleDirection : "unknown",
+      running: typeof displayState?.spindleRunning === "boolean" ? displayState.spindleRunning : null,
+      facing: mountingKnown ? (flipped ? "lower-id" : "upper-id") : "unknown",
+    },
+    components: [
+      {role: "holder", outline: holderOutline, renderOrder: 1, dashed: !mountingKnown,
+        paths: [{points: holderOutline, closed: true}]},
+      {role: "insert", outline: insertOutline, renderOrder: 2, dashed: !mountingKnown,
+        paths: [{points: flipped ? insertOutline : exposedPath, closed: flipped}]},
+    ],
+  };
+}
+
 function axialMillingCutterModel(assembly, referencePoint) {
   const cutterRadius = assembly.cutterDiameter / 2;
   const shankRadius = assembly.shankDiameter / 2;
@@ -622,7 +858,28 @@ function axialMillingCutterModel(assembly, referencePoint) {
 }
 
 function resolvedCuttingModel(assembly) {
+  if (nominalLatheCuttingDefinition(assembly.id)) return resolveNominalLatheCuttingModel(assembly);
+  if (assembly.geometryKind === "profiled-display") {
+    const definition = PROFILED_TOOL_ASSEMBLIES_2D.find(tool => tool.id === assembly.id);
+    return {...definition?.cuttingModel, mode: "unsupported", simulationReady: false, stockRemovalVerified: false};
+  }
+  if (assembly.geometryKind === "diamond-boring") {
+    return {
+      family: "id-bore", mode: "unsupported", simulationReady: false, stockRemovalVerified: false,
+      blockedReason: "Internal boring stock removal is not implemented. The boring bar is display only; confirming its setup does not enable removal or bore-clearance checks.",
+    };
+  }
   const model = {...assembly.cuttingModel};
+  const mountingRequired = assembly.mountingRequired === true;
+  const mountingReady = !mountingRequired || (
+    MOUNTING_ORIENTATIONS.has(assembly.mountingOrientation)
+    && SPINDLE_DIRECTIONS.has(assembly.requiredSpindleDirection)
+  );
+  if (mountingRequired) {
+    model.mountingRequired = true;
+    model.mountingOrientation = MOUNTING_ORIENTATIONS.has(assembly.mountingOrientation) ? assembly.mountingOrientation : null;
+    model.requiredSpindleDirection = SPINDLE_DIRECTIONS.has(assembly.requiredSpindleDirection) ? assembly.requiredSpindleDirection : null;
+  }
   const directionReady = CONFIRMED_AXIAL_DIRECTIONS.has(model.axialDirection);
   const simulationReady = model.mode === "point"
     ? directionReady && model.referenceSemantics === "programmed-contact-point"
@@ -637,7 +894,7 @@ function resolvedCuttingModel(assembly) {
         && model.referenceSemantics === "flat-end-mill-tip"
         && Number(model.diameter) > EPSILON
         && Number(model.lengthOfCut) > EPSILON;
-  return {...model, simulationReady};
+  return {...model, simulationReady: mountingReady && simulationReady};
 }
 
 function buildToolAssemblyWithValidation(assembly, referencePoint, validator, displayState = null) {
@@ -646,10 +903,13 @@ function buildToolAssemblyWithValidation(assembly, referencePoint, validator, di
   if (errors.length) return {valid: false, errors, id: assembly?.id || null, verification: assembly?.verification || "unverified"};
   let geometry = null;
   if (assembly.geometryKind === "diamond-turning") {
-    geometry = displayState && assembly.cadProjectionId === MCLNR164D_CAD_PROJECTION.id
-      ? mclnr164dCadDisplayModel(assembly, referencePoint, displayState)
+    const projection = cadProjectionForAssembly(assembly);
+    geometry = displayState && projection
+      ? turningCadDisplayModel(assembly, referencePoint, displayState, projection)
       : turningModel(assembly, referencePoint, displayState);
   }
+  else if (assembly.geometryKind === "profiled-display") geometry = buildProfileDisplay(assembly, referencePoint, displayState, cadProjectionForAssembly(assembly));
+  else if (assembly.geometryKind === "diamond-boring") geometry = boringCadDisplayModel(assembly, referencePoint, displayState, cadProjectionForAssembly(assembly));
   else if (assembly.geometryKind === "groove") geometry = grooveModel(assembly, referencePoint);
   else if (assembly.geometryKind === "axial-milling-cutter") geometry = axialMillingCutterModel(assembly, referencePoint);
   else {

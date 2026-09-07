@@ -1,3 +1,6 @@
+import {nominalLatheCuttingDefinition, resolveNominalLatheCuttingModel} from "./tool-lathe-cutting.mjs";
+import {noseCompensationSetupIssues} from "./lathe-compensation.mjs";
+
 const TOOL_WORD = /T\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))/gi;
 const AXIS_MOTION_WORD = /[XZ]\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)/i;
 const PROGRAM_WORD = /^\s*%?\s*(?:\/\s*)?(?:N\s*[+-]?\d+(?:\.\d*)?\s*)?O\s*(\d+)\b/i;
@@ -167,14 +170,29 @@ export function createVersionedToolAssignment(assembly, setup = {}) {
 
 /**
  * Normalize an assignment against an already-resolved assembly. Exact v2
- * assignments survive unchanged; legacy or stale same-id revisions migrate to
- * the resolved revision with confirmation and provenance deliberately revoked.
+ * assignments survive unchanged only when all currently required mounting
+ * facts are explicit; missing facts, legacy or stale same-id revisions revoke
+ * confirmation and provenance without inferring a physical setup.
  */
 export function normalizeVersionedToolAssignment(assignment, resolvedAssembly) {
   const resolvedRef = exactAssemblyRef(resolvedAssembly);
   const assignmentRef = toolAssignmentAssemblyRef(assignment);
   if (!resolvedRef || !assignmentRef || assignmentRef.id !== resolvedRef.id) return {};
   if (assignmentRef.legacy !== true && assignmentRef.revision === resolvedRef.revision) {
+    if (assignment.noseCompensation !== undefined
+      && (typeof assignment.noseCompensation?.accepted !== "boolean"
+        || (assignment.noseCompensation.accepted === true && noseCompensationSetupIssues(assignment.noseCompensation).length))) {
+      return createVersionedToolAssignment(resolvedRef, assignment);
+    }
+    if (nominalLatheCuttingDefinition(resolvedRef.id)
+      && !resolveNominalLatheCuttingModel(resolvedAssembly, assignment).simulationReady) {
+      return createVersionedToolAssignment(resolvedRef, assignment);
+    }
+    if (resolvedAssembly.mountingRequired === true
+      && (!["standard", "flipped"].includes(assignment.mountingOrientation)
+        || !["m3", "m4"].includes(assignment.requiredSpindleDirection))) {
+      return createVersionedToolAssignment(resolvedRef, assignment);
+    }
     return {...assignment, assemblyRef: {...assignmentRef}};
   }
   return createVersionedToolAssignment(resolvedRef, assignment);
@@ -191,15 +209,28 @@ export function programAssignmentScope(source, options = {}) {
   if (!filename) return null;
   const normalizedSource = String(source ?? "").replace(/\r/g, "");
   if (!normalizedSource.trim()) return null;
-  const lines = normalizedSource.split("\n");
-  let programKey = null;
-  for (const raw of lines) {
-    const match = lineParts(raw).code.match(PROGRAM_WORD);
-    if (!match) continue;
-    programKey = `O${match[1]}`;
-    break;
-  }
+  const programKey = programKeyFromSource(normalizedSource);
   return `program-tool-scope:v2:${JSON.stringify([filename, programKey, normalizedSource])}`;
+}
+
+function programKeyFromSource(source) {
+  for (const raw of String(source ?? "").replace(/\r/g, "").split("\n")) {
+    const match = lineParts(raw).code.match(PROGRAM_WORD);
+    if (match) return `O${match[1]}`;
+  }
+  return null;
+}
+
+/**
+ * Stable identity for edits to the currently open document. Exact source text
+ * remains part of the persisted assignment scope; this narrower identity is
+ * used only during an in-place editor transition.
+ */
+export function programToolDocumentIdentity(source, options = {}) {
+  const filename = programFilename(options);
+  const normalizedSource = String(source ?? "").replace(/\r/g, "");
+  if (!filename || !normalizedSource.trim()) return null;
+  return `program-tool-document:v1:${JSON.stringify([filename, programKeyFromSource(normalizedSource)])}`;
 }
 
 /**
@@ -284,12 +315,36 @@ export function reviseToolAssignmentSetup(assignment, changes = {}) {
   const normalizedChanges = changes && typeof changes === "object" && !Array.isArray(changes)
     ? changes
     : {};
-  const changed = Object.entries(normalizedChanges).some(([key, value]) => current[key] !== value);
+  const changed = Object.entries(normalizedChanges).some(([key, value]) => key === "noseCompensation"
+    ? JSON.stringify(current[key]) !== JSON.stringify(value)
+    : current[key] !== value);
   const revised = {
     ...current,
     ...normalizedChanges,
     confirmed: changed ? false : current.confirmed === true,
   };
+  if (Object.hasOwn(normalizedChanges, "mountingOrientation")
+    && current.mountingOrientation !== normalizedChanges.mountingOrientation) {
+    // A physically flipped installation needs its own direction and spindle
+    // expectation. Do not carry or infer either from the previous mounting.
+    delete revised.axialDirection;
+    delete revised.requiredSpindleDirection;
+    if (revised.noseCompensation) {
+      // The imaginary-tip orientation describes an actual installation. A flip
+      // cannot carry its old compensation acceptance or orientation forward.
+      revised.noseCompensation = {...revised.noseCompensation, accepted: false};
+      delete revised.noseCompensation.tipDirection;
+      delete revised.noseCompensation.wallSide;
+    }
+    if (nominalLatheCuttingDefinition(current.assemblyRef?.id)) {
+      // A new physical mounting cannot inherit a bore wall or a cutter datum
+      // confirmed for the previous installation, including stored nominal consent.
+      delete revised.wallSide;
+      delete revised.tipDatum;
+      delete revised.nominalAccepted;
+      delete revised.nominalModelRef;
+    }
+  }
   if (changed) delete revised.confirmationSource;
   return revised;
 }
@@ -312,4 +367,21 @@ export function reconcileToolAssignments(toolCalls, previousAssignments = {}, sc
     next[call.key] = previousIsMap ? previousAssignments.get(call.key) : previousAssignments[call.key];
   }
   return next;
+}
+
+/**
+ * Retain exact T-key assignments while the owner edits the currently open
+ * program. Opening or loading a program must continue to use the scope-aware
+ * reconciliation path instead. Newly introduced T keys remain unassigned and
+ * removed/non-executable keys are discarded.
+ */
+export function reconcileToolAssignmentsForEditorEdit(toolCalls, previousAssignments = {}, {
+  editOrigin = null,
+  previousDocumentIdentity = null,
+  nextDocumentIdentity = null,
+} = {}) {
+  if (editOrigin !== "editor"
+    || !previousDocumentIdentity
+    || previousDocumentIdentity !== nextDocumentIdentity) return {};
+  return reconcileToolAssignments(toolCalls, previousAssignments);
 }

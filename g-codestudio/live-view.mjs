@@ -90,6 +90,7 @@ export function renderLiveFace2d(context, {
   visibleCount = 0,
   xScale = 1,
   stockRadius = 0,
+  stockFaceIntervals = null,
   axialBores = [],
   lengthScale = 1,
   lengthUnit = "mm",
@@ -115,11 +116,20 @@ export function renderLiveFace2d(context, {
     context.beginPath();
     context.arc(origin.x, origin.y, radius, 0, Math.PI * 2);
     context.fillStyle = "rgba(56, 189, 248, .10)";
-    context.fill();
+    if (!stockFaceIntervals) context.fill();
     context.strokeStyle = "rgba(86, 204, 220, .58)";
     context.setLineDash([5, 4]);
     context.stroke();
     context.setLineDash([]);
+    for (const [innerRadius, outerRadius] of stockFaceIntervals || []) {
+      context.beginPath();
+      context.arc(origin.x, origin.y, projectedRadius(project, {x: 0, y: 0}, outerRadius), 0, Math.PI * 2);
+      if (innerRadius > 0) {
+        context.moveTo(origin.x + projectedRadius(project, {x: 0, y: 0}, innerRadius), origin.y);
+        context.arc(origin.x, origin.y, projectedRadius(project, {x: 0, y: 0}, innerRadius), 0, Math.PI * 2, true);
+      }
+      context.fill("evenodd"); context.stroke();
+    }
   }
 
   for (const bore of axialBores || []) {

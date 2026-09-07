@@ -10,8 +10,8 @@ const MOTION_CODES = new Map([[0, "rapid"], [1, "linear"], [2, "arc-cw"], [3, "a
 const CONTROL_FLOW_M_CODES = new Set([96, 97, 98, 99]);
 const COMMON_MODELED_M_CODES = new Set([2, 3, 4, 5, 8, 9, 30, ...CONTROL_FLOW_M_CODES]);
 const GENERIC_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 133, 134, 135, 154, 155]);
-const HAAS_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 133, 134, 135, 154, 155]);
-const HAAS_UNSUPPORTED_GROUP_01_MOTIONS = new Set([32, 90, 92, 94]);
+const HAAS_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 23, 24, 133, 134, 135, 154, 155]);
+const HAAS_UNSUPPORTED_GROUP_01_MOTIONS = new Set([90, 92, 94]);
 const HAAS_UNSUPPORTED_GROUP_09_CYCLES = new Set([81, 82, 83, 84, 85, 86, 87, 88, 89, 95]);
 const HAAS_DEFAULT_TO_FLOAT_ADDRESSES = new Set(["X", "Y", "Z", "A", "B", "C", "D", "E", "I", "J", "K", "U", "W"]);
 const HAAS_INTEGER_FEED_SCALES = new Set(["default", "integer", ".1", ".01", ".001", ".0001"]);
@@ -643,7 +643,8 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
     return false;
   }
   if (state.liveToolDialect !== "haas-lathe-ngc") return true;
-  const unsupportedAxes = ["A", "B", "E", "V"].filter((letter) => record.byLetter.has(letter));
+  const unsupportedAxes = ["A", "B", "E", "V"].filter((letter) => record.byLetter.has(letter)
+    && !(letter === "A" && hasG(record, 76)));
   const invalidToolAddress = (record.lexemesByLetter?.get("T") || []).find((lexeme) => !/^\d{1,4}$/.test(lexeme));
   const invalidSequenceAddress = record.byLetter.has("N") && !isUnsignedIntegerWord(record, "N");
   const isContourCycle = hasG(record, 70) || hasG(record, 71) || hasG(record, 72);
@@ -657,7 +658,8 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
   const invalidFeedAddress = record.byLetter.has("F") && (!(feedValue > 0) || !Number.isFinite(feedValue));
   const integerFeedAmbiguous = record.byLetter.has("F") && !invalidFeedAddress
     && feedLexeme && !feedLexeme.includes(".") && state.haasIntegerFeedScale === "unknown";
-  const ambiguousAddresses = ambiguousHaasIntegerAddresses(record, state, [...HAAS_DEFAULT_TO_FLOAT_ADDRESSES]);
+  const ambiguousAddresses = ambiguousHaasIntegerAddresses(record, state, [...HAAS_DEFAULT_TO_FLOAT_ADDRESSES]
+    .filter(letter => !(letter === "A" && hasG(record, 76))));
   if (!unsupportedAxes.length && !duplicateAddress
     && invalidToolAddress === undefined && !invalidSequenceAddress && !invalidContourReference
     && !invalidFeedAddress && !integerFeedAmbiguous && !ambiguousAddresses.length) return true;
@@ -754,7 +756,7 @@ function activeUnsupportedMotionMode(state) {
 
 function activeMotionBlocker(state) {
   return activeUnsupportedMotionMode(state)
-    || state.cutterCompMode
+    || (state.cutterCompMode && !state.cutterCompensationContract)
     || state.unsupportedCoordinateTransform
     || null;
 }
@@ -834,6 +836,7 @@ function applyRecordToolCall(record, state, liveToolEvents = null) {
   // no station/offset split (or T0000 cancellation) is guessed here.
   state.activeToolKey = call.key;
   state.activeToolCallLine = call.line;
+  state.threadingPositionEstablished = false;
   // Haas documents that a tool change stops the live-tool drive. Apply that
   // before any motion in the tool-change block, while retaining the last
   // commanded direction and speed just as a stopped main spindle does.
@@ -962,6 +965,12 @@ function updateG112Mode(record, state) {
 }
 
 function updateModalState(record, state, warnings) {
+  const previousCompMode = state.cutterCompMode;
+  const previousCompOffEstablished = state.sawCutterCompOff;
+  state.compensationEvent = null;
+  if (state.liveToolDialect === "haas-lathe-ngc" && record.byLetter.has("P") && !hasG(record, 76)) {
+    state.g76PHistory = {value: lastWord(record, "P"), otherCommand: true};
+  }
   const feedModes = state.liveToolDialectDefinition.feedModes;
   const modeledHaasCodes = state.liveToolDialect === "haas-lathe-ngc" ? [112, 113] : [];
   const g112Context = state.g112Active || hasG(record, 112);
@@ -1004,12 +1013,38 @@ function updateModalState(record, state, warnings) {
     }
     if (MOTION_CODES.has(code)) {
       state.motion = MOTION_CODES.get(code);
+      state.threadingActive = false;
+      state.threadingSequenceRpm = null;
       if (state.liveToolDialect === "haas-lathe-ngc") {
         // G90/G92/G94 are Haas Group 01 turning cycles. A modeled Group 01
         // motion replaces them. Haas also documents G00/G01 as canned-cycle
         // cancellation commands for the Group 09 drilling family.
         state.unsupportedGroup01MotionMode = null;
         if (code === 0 || code === 1) state.unsupportedGroup09MotionMode = null;
+      }
+    }
+    else if (code === 32) {
+      if (state.liveToolDialect === "haas-lathe-ngc") {
+        state.threadingActive = true;
+        state.motion = "linear";
+        state.unsupportedGroup01MotionMode = null;
+      } else {
+        state.blockCurrentMotionLine = record.line;
+        invalidateExecutionState(state);
+        warningOnce(warnings, {
+          line: record.line, code: "g32-controller-contract-required", verificationBlocked: true,
+          message: "G32 is supported only by the explicit Haas lathe NGC threading contract; no generic/Fanuc threading semantics are inferred.",
+        });
+      }
+    }
+    else if (code === 76) {
+      if (state.liveToolDialect !== "haas-lathe-ngc" || state.g76Settings?.contract !== "haas-lathe-ngc-g76-v1") {
+        state.blockCurrentMotionLine = record.line;
+        invalidateExecutionState(state);
+        warningOnce(warnings, {
+          line: record.line, code: "g76-threading-cycle-unsupported", verificationBlocked: true,
+          message: "G76 needs the explicit Haas one-block threading contract and declared controller settings; no generic/Fanuc cycle is inferred.",
+        });
       }
     }
     else if ([17, 18, 19].includes(code)) {
@@ -1061,10 +1096,15 @@ function updateModalState(record, state, warnings) {
     else if (code === 96) state.spindleMode = "css";
     else if (code === 97) state.spindleMode = "rpm";
     else if (code === 80) state.unsupportedGroup09MotionMode = null;
-    else if (code === 40) state.cutterCompMode = null;
+    else if (code === 40) {
+      state.cutterCompMode = null; state.sawCutterCompOff = true;
+      if (previousCompMode && state.cutterCompensationContract) state.compensationEvent = "cancel";
+    }
     else if (code === 41 || code === 42) {
       state.cutterCompMode = `G${code}`;
-      warningOnce(warnings, {
+      state.sawCutterCompOff = false;
+      if (state.cutterCompensationContract) state.compensationEvent = previousCompMode ? "active" : "start";
+      else warningOnce(warnings, {
         line: record.line,
         code: "cutter-compensation-unsupported",
         verificationBlocked: hasMotionWords,
@@ -1123,7 +1163,7 @@ function updateModalState(record, state, warnings) {
       message: `Motion is blocked while unsupported modal cycle ${activeCycle} remains active.`,
     });
   }
-  if (hasMotionWords && state.cutterCompMode) {
+  if (hasMotionWords && state.cutterCompMode && !state.cutterCompensationContract) {
     state.blockCurrentMotionLine = record.line;
     if (g112Context) state.g112PathTainted = true;
     warningOnce(warnings, {
@@ -1150,6 +1190,92 @@ function updateModalState(record, state, warnings) {
     else state.spindleSpeed = lastWord(record, "S");
   }
   updateG112Mode(record, state);
+  if (state.cutterCompensationContract && (state.cutterCompMode || state.compensationEvent)) {
+    const register = state.activeToolKey?.slice(1).padStart(4, "0").slice(-2);
+    const transition = state.compensationEvent === "start" || state.compensationEvent === "cancel";
+    const unsupportedWord = ["D", "P", "Q", "U", "W", "C", "H", "Y", "T"].some(letter => record.byLetter.has(letter));
+    const special = (record.byLetter.get("G") || []).some(code => [4, 28, 32, 70, 71, 72, 76, 112, 113].includes(code));
+    const invalid = !state.sawUnitMode || !state.sawPlane || state.plane !== "G18"
+      || !state.threadingPositionEstablished || state.turningPathTainted || !isKnownPoint(state)
+      || !/^\d{2}$/.test(register || "") || register === "00" || unsupportedWord || special
+      || state.g112Active || state.liveToolRunning === true || state.cAxisEngaged === true
+      || (transition && (!hasMotionWords || state.motion !== "linear"))
+      || (state.compensationEvent === "start" && !previousCompOffEstablished)
+      || (state.compensationEvent === "cancel" && ["I", "K", "R"].some(letter => record.byLetter.has(letter)))
+      || (previousCompMode && state.cutterCompMode && previousCompMode !== state.cutterCompMode);
+    if (invalid) {
+      state.blockCurrentMotionLine = record.line;
+      invalidateExecutionState(state);
+      warningOnce(warnings, {line: record.line, code: "tool-nose-compensation-contract-blocked", verificationBlocked: true,
+        message: "Bounded Haas nose compensation requires a known G18 X/Z baseline, exact nonzero T offset, and G01 entry/cancel. Tool changes, side changes, cycles, extra axes and cancellation vectors are not inferred."});
+    } else {
+      state.compensationMetadata = Object.freeze({
+        mode: state.cutterCompMode === "G41" ? "left" : (state.cutterCompMode === "G42" ? "right" : "off"),
+        event: state.compensationEvent || "active", controller: "haas-lathe-ngc",
+        contract: "haas-lathe-ngc-nose-v1", offsetRegister: register,
+      });
+    }
+  } else {
+    state.compensationMetadata = null;
+    const register = state.activeToolKey?.slice(1).padStart(4, "0").slice(-2);
+    if (state.cutterCompensationContract && state.sawCutterCompOff && state.sawUnitMode
+      && state.sawPlane && state.plane === "G18" && state.threadingPositionEstablished
+      && isKnownPoint(state) && !state.turningPathTainted && !state.g112Active
+      && state.liveToolRunning !== true && state.cAxisEngaged !== true
+      && /^\d{2}$/.test(register || "") && register !== "00") {
+      state.compensationMetadata = Object.freeze({mode: "off", event: "off", controller: "haas-lathe-ngc",
+        contract: "haas-lathe-ngc-nose-v1", offsetRegister: register});
+    }
+  }
+  if (state.threadingActive) validateG32ModalRecord(record, state, warnings);
+}
+
+// Haas G32 is a synchronized reference-point line, not a G01 cut, cycle or
+// helical stock model. Its F is the larger Z / physical-radius-X lead.
+// Retained controller evidence and narrower implementation limits:
+// docs/LATHE_THREADING_SCOPE.md. This must also run for non-motion records so
+// a speed, plane, live-mode or special-cycle change cannot evade the gate.
+function validateG32ModalRecord(record, state, warnings) {
+  let reason = null;
+  const hasAxes = ["X", "Z", "U", "W"].some(letter => record.byLetter.has(letter));
+  const extraWords = ["I", "J", "K", "R", "D", "P", "Q", "Y", "C", "H", "T"]
+    .filter(letter => record.byLetter.has(letter));
+  if ([4, 28, 70, 71, 72, 76, 112, 113].some(code => hasG(record, code))) {
+    reason = "G32 cannot be combined with dwell, reference return, canned cycles or live interpolation; cancel G32 with a supported Group 01 move first.";
+  } else if (extraWords.length) {
+    reason = `G32 ${extraWords.join("/")} is outside the bounded X/Z constant-lead contract; start-angle/phase and auxiliary geometry are not modeled.`;
+  } else if (!state.sawUnitMode || !state.sawPlane || state.plane !== "G18" || !state.sawCutterCompOff) {
+    reason = "G32 requires explicit G20/G21, G18 and G40 before threading; inherited units, plane or compensation are not guessed.";
+  } else if (state.feedMode !== "per-revolution" || state.spindleMode !== "rpm") {
+    reason = "G32 requires G99 feed per revolution and G97 constant RPM; G98 or G96 cannot supply this threading contract.";
+  } else if (!(state.feed > 0) || !Number.isFinite(state.feed * state.scale)
+    || numericUncertainty(state.feed * state.scale) > PROFILE_NUMERICAL_BUDGET_MM) {
+    reason = "G32 requires a positive finite thread lead F in the active program units.";
+  } else if (state.spindleRunning !== true || !["m3", "m4"].includes(state.spindleDirection)
+    || !(state.spindleSpeed > 0) || !Number.isFinite(state.spindleSpeed)) {
+    reason = "G32 requires a known running main spindle, explicit M3/M4 and a positive finite S RPM before the threading block.";
+  } else if (state.threadingSequenceRpm !== null && state.threadingSequenceRpm !== state.spindleSpeed) {
+    reason = "Spindle RPM cannot change during an active G32 sequence; cancel G32 before changing S.";
+  } else if ((record.byLetter.get("M") || []).some(code => [3, 4, 5, 133, 134, 135, 154, 155].includes(code))) {
+    reason = "Spindle or machining-mode changes inside a G32 sequence are not supported; cancel G32 before changing them.";
+  } else if (state.turningMode !== "turning" || state.liveToolRunning === true || state.cAxisEngaged === true
+    || state.g112Active || state.unconfiguredG112Active) {
+    reason = "G32 requires ordinary main-spindle X/Z turning, not live-tool or C-axis interpolation.";
+  } else if (hasG(record, 32) && !hasAxes) {
+    reason = "The G32 entry block must command axial or tapered X/Z motion.";
+  } else if (hasAxes && (!state.threadingPositionEstablished || state.turningPathTainted || !isKnownPoint(state))) {
+    reason = "G32 requires an explicit complete absolute G00 X/Z baseline after tool selection; no incoming threading start is invented.";
+  } else if ((record.byLetter.has("X") && record.byLetter.has("U"))
+    || (record.byLetter.has("Z") && record.byLetter.has("W"))) {
+    reason = "G32 cannot combine X/U or Z/W addresses for the same axis.";
+  } else if (!state.absolute && (record.byLetter.has("X") || record.byLetter.has("Z"))) {
+    reason = "This G32 contract uses absolute X/Z or explicit incremental U/W; G391 X/Z threading is not qualified.";
+  }
+  if (!reason) return true;
+  state.blockCurrentMotionLine = record.line;
+  invalidateExecutionState(state);
+  warningOnce(warnings, {line: record.line, code: "g32-threading-contract-blocked", verificationBlocked: true, message: reason});
+  return false;
 }
 
 function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEvents) {
@@ -1202,6 +1328,10 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
       handled = true;
     } else if (code === 5) {
       state.spindleRunning = false;
+      handled = true;
+    }
+    if (state.liveToolDialect === "haas-lathe-ngc" && (code === 23 || code === 24)) {
+      state.threadChamferEnabled = code === 23;
       handled = true;
     }
     if (state.liveToolDialect !== "haas-lathe-ngc") {
@@ -1961,7 +2091,7 @@ function parseBasicRecord(record, state, xMode, warnings, {
     invalidateUnsupportedPosition(record, state);
     return null;
   }
-  if (record.byLetter.has("U") || record.byLetter.has("W")) {
+  if (!state.threadingActive && (record.byLetter.has("U") || record.byLetter.has("W"))) {
     const aliases = [
       record.byLetter.has("X") && record.byLetter.has("U") ? "X/U" : null,
       record.byLetter.has("Z") && record.byLetter.has("W") ? "Z/W" : null,
@@ -2002,8 +2132,8 @@ function parseBasicRecord(record, state, xMode, warnings, {
 
   const cAxis = parseDirectCAxis(record, state, warnings, cAxisMotions);
   if (cAxis.blocked) return null;
-  const hasX = record.byLetter.has("X");
-  const hasZ = record.byLetter.has("Z");
+  const hasX = record.byLetter.has("X") || (state.threadingActive && record.byLetter.has("U"));
+  const hasZ = record.byLetter.has("Z") || (state.threadingActive && record.byLetter.has("W"));
   if (!hasX && !hasZ) {
     const hasArcIntent = hasG(record, 2)
       || hasG(record, 3)
@@ -2099,10 +2229,12 @@ function parseBasicRecord(record, state, xMode, warnings, {
   const xCoordinateScale = xMode === "diameter" ? 0.5 : 1;
   const start = {x: state.x, z: state.z};
   const startAxisUncertainty = {x: state.xUncertaintyMm, z: state.zUncertaintyMm};
-  const xAddress = hasX ? scaledPositionAddress(record, "X", state) : null;
-  const zAddress = hasZ ? scaledPositionAddress(record, "Z", state) : null;
-  const resolvedX = resolvedPositionCoordinate(state.x, state.xUncertaintyMm, xAddress, state.absolute);
-  const resolvedZ = resolvedPositionCoordinate(state.z, state.zUncertaintyMm, zAddress, state.absolute);
+  const xIncremental = state.threadingActive && record.byLetter.has("U");
+  const zIncremental = state.threadingActive && record.byLetter.has("W");
+  const xAddress = hasX ? scaledPositionAddress(record, xIncremental ? "U" : "X", state) : null;
+  const zAddress = hasZ ? scaledPositionAddress(record, zIncremental ? "W" : "Z", state) : null;
+  const resolvedX = resolvedPositionCoordinate(state.x, state.xUncertaintyMm, xAddress, xIncremental ? false : state.absolute);
+  const resolvedZ = resolvedPositionCoordinate(state.z, state.zUncertaintyMm, zAddress, zIncremental ? false : state.absolute);
   const end = {x: resolvedX.value, z: resolvedZ.value};
   const endAxisUncertainty = {x: resolvedX.uncertaintyMm, z: resolvedZ.uncertaintyMm};
   state.x = end.x;
@@ -2111,6 +2243,10 @@ function parseBasicRecord(record, state, xMode, warnings, {
   state.zUncertaintyMm = endAxisUncertainty.z;
   const startPositionUncertaintyMm = physicalPointUncertaintyMm(startAxisUncertainty, xCoordinateScale);
   const endPositionUncertaintyMm = physicalPointUncertaintyMm(endAxisUncertainty, xCoordinateScale);
+  if (state.motion === "rapid" && state.absolute && hasX && hasZ && isKnownPoint(end)
+    && verificationIssues.length === 0 && endPositionUncertaintyMm <= PROFILE_NUMERICAL_BUDGET_MM) {
+    state.threadingPositionEstablished = true;
+  }
   const turningResynchronizes = wasTurningPathTainted
     && state.absolute
     && state.motion === "rapid"
@@ -2186,6 +2322,45 @@ function parseBasicRecord(record, state, xMode, warnings, {
     verificationBlocked: verificationIssues.length > 0,
     verificationIssues: [...new Set(verificationIssues)],
   };
+  if (state.compensationMetadata) {
+    segment.compensation = state.compensationMetadata;
+  }
+  if (state.compensationMetadata && state.compensationMetadata.event !== "off") {
+    if (distance(start, end) < EPSILON) {
+      invalidateExecutionState(state);
+      warningOnce(warnings, {line: record.line, code: "tool-nose-compensation-zero-move", verificationBlocked: true,
+        message: "A zero-length compensation move cannot establish an approach, join or departure."});
+      return null;
+    }
+    segment.compensationPending = true;
+    segment.verificationBlocked = true;
+    segment.verificationIssues.push("tool-nose-compensation-pending");
+    warningOnce(warnings, {line: record.line, code: "tool-nose-compensation-pending", verificationBlocked: true,
+      message: "Commanded geometry awaits the explicit nose-radius/imaginary-tip compensation transform; the raw path cannot authorize stock or reference checks."});
+  }
+  if (state.threadingActive) {
+    const axialDistance = Math.abs(end.z - start.z);
+    const radialDistance = Math.abs(end.x - start.x) * xCoordinateScale;
+    const maximumAxisDistance = Math.max(axialDistance, radialDistance);
+    const lead = state.feed * state.scale;
+    if (!(axialDistance > 2 * positionUncertaintyMm) || !(maximumAxisDistance > 0)
+      || !Number.isFinite(maximumAxisDistance) || positionUncertaintyMm > PROFILE_NUMERICAL_BUDGET_MM
+      || !Number.isFinite(maximumAxisDistance / lead) || !(lead * (axialDistance / maximumAxisDistance) > 0)
+      || start.x <= 0 || end.x <= 0 || verificationIssues.length) {
+      warningOnce(warnings, {line: record.line, code: "g32-threading-geometry-blocked", verificationBlocked: true,
+        message: "G32 needs finite, resolved axial/taper motion on the positive-radius side; radial-only, center-crossing and uncertain thread paths are not modeled."});
+      invalidateExecutionState(state);
+      return null;
+    }
+    state.threadingSequenceRpm = state.spindleSpeed;
+    segment.threading = Object.freeze({
+      code: "G32", contract: "haas-lathe-ngc-g32-v1", leadMmPerRev: lead,
+      axialLeadMmPerRev: lead * (axialDistance / maximumAxisDistance),
+      radialLeadMmPerRev: lead * (radialDistance / maximumAxisDistance),
+      synchronized: true, phaseVerified: false, physicalHelixVerified: false,
+    });
+    segment.sourceMotion = "G32";
+  }
   if (liveStateActive) {
     segment.liveTool = true;
     segment.machiningMode = "live-tool";
@@ -2349,7 +2524,8 @@ function contourFor(records, startIndex, endIndex, state, xMode, warnings) {
     const contourRecord = records[index];
     const prohibitedAxes = ["C", "H", "Y"].filter((letter) => contourRecord.byLetter.has(letter));
     const hasMCode = contourRecord.byLetter.has("M");
-    if (prohibitedAxes.length || hasMCode) {
+    const hasThreading = hasG(contourRecord, 32) || hasG(contourRecord, 76);
+    if (prohibitedAxes.length || hasMCode || hasThreading) {
       prohibitedSemantics = true;
       warningOnce(contourWarnings, {
         line: contourRecord.line,
@@ -2358,6 +2534,7 @@ function contourFor(records, startIndex, endIndex, state, xMode, warnings) {
         message: `P/Q turning contours cannot be verified with ${[
           prohibitedAxes.length ? `${prohibitedAxes.join("/")} axes` : null,
           hasMCode ? "M-code state/control commands" : null,
+          hasThreading ? "G32/G76 threading" : null,
         ].filter(Boolean).join(" and ")}; the canned cycle is blocked.`,
       });
       localState.x = null;
@@ -2984,6 +3161,135 @@ function expandCycle({
   return {segments, warnings, passes: passCount, type: typeII ? "II" : "I", truncated};
 }
 
+// Sourced one-block Haas G76, deliberately limited to straight radial infeed.
+// Keep source-programmed settings separate from machine defaults. See
+// docs/LATHE_THREADING_SCOPE.md for the pass-schedule acceptance boundary.
+function expandHaasG76(record, state, warnings) {
+  const fail = (code, message) => {
+    warningOnce(warnings, {line: record.line, code, verificationBlocked: true, message});
+    invalidateExecutionState(state);
+    return null;
+  };
+  if (state.executionBlocked || state.blockCurrentMotionLine === record.line) return null;
+  const settings = state.g76Settings;
+  const allowed = new Set(["N", "G", "X", "Z", "U", "W", "D", "K", "F", "A", "I", "P"]);
+  if (state.liveToolDialect !== "haas-lathe-ngc" || settings?.contract !== "haas-lathe-ngc-g76-v1"
+    || [...record.byLetter.keys()].some(letter => !allowed.has(letter))
+    || (record.byLetter.get("G") || []).some(code => code !== 76)
+    || !state.sawUnitMode || !state.sawPlane || state.plane !== "G18" || !state.sawCutterCompOff
+    || state.cutterCompMode || state.threadingActive || activeUnsupportedMotionMode(state)
+    || state.unsupportedCoordinateTransform || state.g112Active || state.unconfiguredG112Active
+    || state.liveToolRunning === true || state.cAxisEngaged === true
+    || state.feedMode !== "per-revolution" || state.spindleMode !== "rpm" || state.spindleRunning !== true
+    || !["m3", "m4"].includes(state.spindleDirection) || !(state.spindleSpeed > 0) || !Number.isFinite(state.spindleSpeed)
+    || !state.threadingPositionEstablished || state.turningPathTainted || !isKnownPoint(state)
+    || state.xMode !== "diameter") {
+    return fail("g76-controller-state-blocked", "G76 requires the explicit Haas straight/radial contract, diameter X, G18/G20 or G21/G40/G99/G97, known running main-spindle RPM and a complete absolute G00 X/Z baseline. Combined codes, live axes and extra cycle words are not inferred.");
+  }
+  const p = record.byLetter.has("P") ? lastWord(record, "P") : settings.defaultP;
+  if (!record.byLetter.has("P") && state.g76PHistory
+    && (state.g76PHistory.otherCommand || state.g76PHistory.value !== settings.defaultP)) {
+    return fail("g76-p-history-ambiguous", "Haas G76's modal-P note and Setting 232's per-line default rule disagree for this P-word history. Put explicit P1–P4 on this G76 line; no retained strategy or default is guessed.");
+  }
+  const angle = record.byLetter.has("A") ? lastWord(record, "A") : 0;
+  const taper = record.byLetter.has("I") ? interpretedHaasAddressValue(record, "I", state) : 0;
+  if (![1, 2, 3, 4].includes(p) || (record.byLetter.has("P") && !isUnsignedIntegerWord(record, "P"))
+    || angle !== 0 || (record.byLetter.has("A") && !isUnsignedIntegerWord(record, "A")) || taper !== 0
+    || state.threadChamferEnabled !== false) {
+    return fail("g76-strategy-unsupported", "G76 needs explicit P1–P4 or declared Setting 232, radial A0 infeed and zero taper. Chamfer must be explicitly disabled by M24 or declared setup; angled infeed, taper and phase/chamfer geometry remain unsupported.");
+  }
+  const finish = settings.finishAllowanceMm, minimum = settings.minimumCutMm;
+  if (![finish, minimum].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
+    return fail("g76-settings-required", "Declare nonnegative canonical-mm Haas Setting 86 finish allowance and Setting 99 minimum cut; blank settings are unknown, not zero.");
+  }
+  const hasX = record.byLetter.has("X"), hasU = record.byLetter.has("U");
+  const hasZ = record.byLetter.has("Z"), hasW = record.byLetter.has("W");
+  if (hasX === hasU || hasZ === hasW || (!state.absolute && (hasX || hasZ))
+    || !record.byLetter.has("D") || !record.byLetter.has("K") || !record.byLetter.has("F")) {
+    return fail("g76-required-addresses", "G76 requires one X/U endpoint, one Z/W endpoint, explicit positive D first radial cut, K radial height and F lead. Aliases and G391 absolute-address interpretation are not guessed.");
+  }
+  const x = resolvedPositionCoordinate(state.x, state.xUncertaintyMm, scaledPositionAddress(record, hasU ? "U" : "X", state), !hasU);
+  const z = resolvedPositionCoordinate(state.z, state.zUncertaintyMm, scaledPositionAddress(record, hasW ? "W" : "Z", state), !hasW);
+  const first = scaledPositionAddress(record, "D", state), height = scaledPositionAddress(record, "K", state);
+  const lead = state.feed * state.scale;
+  const uncertainty = boundedUncertaintySum(
+    physicalPointUncertaintyMm({x: state.xUncertaintyMm, z: state.zUncertaintyMm}, 0.5),
+    physicalPointUncertaintyMm({x: x.uncertaintyMm, z: z.uncertaintyMm}, 0.5),
+    first.uncertaintyMm, height.uncertaintyMm, numericUncertainty(lead), numericUncertainty(finish), numericUncertainty(minimum),
+  );
+  if (![x.value, z.value, first.value, height.value, lead, uncertainty].every(Number.isFinite)
+    || !(first.value > 0) || !(height.value > finish) || first.value > height.value - finish
+    || !(lead > 0) || !(x.value > 2 * uncertainty) || !(state.x > 2 * uncertainty)
+    || !(Math.abs(state.z - z.value) > 2 * uncertainty)
+    || !Number.isFinite(Math.abs(state.z - z.value) / lead) || uncertainty > PROFILE_NUMERICAL_BUDGET_MM) {
+    return fail("g76-dimensions-invalid", "G76 dimensions, lead and source arithmetic must be finite and resolved; D must fit K minus finish allowance, and the straight thread must stay on positive physical X.");
+  }
+  const outside = state.x > x.value;
+  const sign = outside ? 1 : -1;
+  const crestX = x.value + sign * 2 * height.value;
+  if (!(crestX > 2 * uncertainty) || !(sign * (state.x - crestX) > 2 * uncertainty)) {
+    return fail("g76-start-clearance-unresolved", "G76 start X must be strictly clear of the source-defined crest (X ± 2K); OD/ID direction and entry clearance cannot be guessed from an inside or touching start.");
+  }
+  const roughTarget = height.value - finish;
+  const depths = [];
+  let previous = 0;
+  // The manufacturer gives cumulative D*sqrt(N) (P1/P2) and constant-depth
+  // (P3/P4). Do not invent redistribution when minimum cut would bind.
+  for (let pass = 1; pass <= 1000; pass += 1) {
+    const nominal = first.value * (p <= 2 ? Math.sqrt(pass) : pass);
+    const targetRoundoff = numericUncertainty(nominal, 64) + numericUncertainty(roughTarget, 64);
+    const depth = nominal >= roughTarget || Math.abs(nominal - roughTarget) <= targetRoundoff
+      ? roughTarget : nominal;
+    const delta = depth - previous;
+    const roundoff = numericUncertainty(depth, 64);
+    if (!(delta > roundoff) || delta + roundoff < minimum) {
+      return fail("g76-minimum-cut-redistribution-unresolved", "Setting 99 would alter the documented radial pass schedule (including a short final rough pass). This redistribution is not modeled; no guessed pass count or partial cycle is emitted.");
+    }
+    depths.push({depth, finish: false});
+    previous = depth;
+    if (depth === roughTarget) break;
+  }
+  if (previous !== roughTarget) return fail("g76-pass-budget", "G76 exceeds the 1,000-pass budget; the complete cycle is blocked, not truncated.");
+  if (finish > 0) depths.push({depth: height.value, finish: true});
+  const output = [];
+  const cycleStart = {x: state.x, z: state.z};
+  const append = (type, start, end, entry, pass, phase) => {
+    if (distance(start, end) <= EPSILON) return;
+    const derivedUncertainty = boundedUncertaintySum(uncertainty, numericUncertainty(start.x, 64), numericUncertainty(end.x, 64));
+    const segment = {
+      type, sourceMotion: type === "linear" ? "G76" : "G00", start, end, points: [start, end],
+      line: record.line, executionLine: record.line, raw: record.raw.trim(),
+      generated: true, cycle: "G76", pass, cyclePhase: phase, ...timingSnapshot(state),
+      toolKey: state.activeToolKey, toolCallLine: state.activeToolCallLine,
+      geometryUncertaintyMm: derivedUncertainty, verificationBlocked: false, verificationIssues: [],
+    };
+    if (type === "linear") segment.threading = Object.freeze({
+      code: "G76", contract: "haas-lathe-ngc-g76-v1", leadMmPerRev: lead,
+      axialLeadMmPerRev: lead, radialLeadMmPerRev: 0, synchronized: true,
+      phaseVerified: false, physicalHelixVerified: false, pass, passCount: depths.length,
+      depthMm: entry.depth, finishPass: entry.finish, infeedStrategy: p,
+    });
+    output.push(segment);
+  };
+  depths.forEach((entry, index) => {
+    const cutX = x.value + sign * 2 * (height.value - entry.depth);
+    const cutStart = {x: cutX, z: state.z}, cutEnd = {x: cutX, z: z.value};
+    const retracted = {x: state.x, z: z.value};
+    append("rapid", {...cycleStart}, cutStart, entry, index + 1, "infeed");
+    append("linear", cutStart, cutEnd, entry, index + 1, entry.finish ? "finish" : "thread");
+    append("rapid", cutEnd, retracted, entry, index + 1, "retract");
+    append("rapid", retracted, {...cycleStart}, entry, index + 1, "return");
+  });
+  if (output.some(segment => !Number.isFinite(segment.geometryUncertaintyMm)
+    || segment.geometryUncertaintyMm > PROFILE_NUMERICAL_BUDGET_MM)) {
+    return fail("g76-numerical-resolution", "Derived G76 pass arithmetic exceeds the numerical budget; no partial cycle is emitted.");
+  }
+  if (record.byLetter.has("P")) state.g76PHistory = {value: p, otherCommand: false};
+  return {segments: output, cycle: {code: "G76", line: record.line, passes: depths.length,
+    type: outside ? "od-thread" : "id-thread", contract: "haas-lathe-ngc-g76-v1", infeedStrategy: p,
+    finishAllowanceMm: finish, minimumCutMm: minimum, chamferEnabled: false, truncated: false}};
+}
+
 function cycleCall(record, pending, state) {
   const code = hasG(record, 71) ? "G71" : "G72";
   const first = pending?.code === code ? pending.record : null;
@@ -3013,6 +3319,8 @@ export function parseGcode(source, {
   liveToolMaxRpm: requestedLiveToolMaxRpm = null,
   haasDefaultToFloat: requestedHaasDefaultToFloat = "unknown",
   haasIntegerFeedScale: requestedHaasIntegerFeedScale = "unknown",
+  g76Settings = null,
+  cutterCompensationContract = null,
 } = {}) {
   const lines = source.replace(/\r/g, "").split("\n");
   const records = lines.map(recordFor);
@@ -3029,6 +3337,13 @@ export function parseGcode(source, {
     rapidBehavior, rapidXMax, rapidZMax, arcChordTolerance,
     absolute: true, scale: normalizedDefaultUnits === "in" ? 25.4 : 1, units: normalizedDefaultUnits,
     motion: "rapid", feed: null, feedMode: "unknown", spindleMode: "unknown", spindleSpeed: null,
+    threadingActive: false, threadingSequenceRpm: null, threadingPositionEstablished: false, sawCutterCompOff: false,
+    g76Settings: g76Settings && typeof g76Settings === "object" ? {...g76Settings} : null,
+    g76PHistory: null,
+    threadChamferEnabled: typeof g76Settings?.chamferEnabled === "boolean" ? g76Settings.chamferEnabled : null,
+    cutterCompensationContract: liveToolDialectDefinition.id === "haas-lathe-ngc"
+      && cutterCompensationContract === "haas-lathe-ngc-nose-v1" ? cutterCompensationContract : null,
+    compensationEvent: null, compensationMetadata: null,
     spindleLimit: null, spindleRunning: null, spindleDirection: "unknown",
     plane: "G18", sawPlane: false, sawUnitMode: false, assumedUnitsUsed: false,
     activeToolKey: null, activeToolCallLine: null,
@@ -3163,6 +3478,15 @@ export function parseGcode(source, {
     }
     applyRecordToolCall(record, state, liveToolEvents);
     try {
+      if (hasG(record, 76)) {
+        updateModalState(record, state, warnings);
+        const expanded = expandHaasG76(record, state, warnings);
+        if (expanded) {
+          segments.push(...expanded.segments);
+          cycles.push(expanded.cycle);
+        }
+        continue;
+      }
       const enteringSupportedG112 = state.liveToolDialect === "haas-lathe-ngc" && hasG(record, 112);
       if (record.byLetter.has("Y") && !state.g112Active && !enteringSupportedG112) {
         updateModalState(record, state, warnings);

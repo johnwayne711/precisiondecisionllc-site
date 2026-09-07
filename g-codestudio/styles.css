@@ -160,6 +160,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .gcode-search-highlights { position: absolute; z-index: 4; inset: 0; overflow: hidden; pointer-events: none; }
 .gcode-search-match { position: absolute; box-sizing: border-box; border-radius: 2px; background: rgba(245, 158, 11, .34); box-shadow: inset 0 0 0 1px rgba(251, 191, 36, .62); }
 .gcode-search-match.is-active { background: rgba(86, 227, 159, .42); box-shadow: inset 0 0 0 1px rgba(125, 238, 179, .92), 0 0 7px rgba(86, 227, 159, .28); }
+.gcode-risk-highlights { position: absolute; z-index: 1; inset: 0 0 0 var(--gcode-gutter-width); overflow: hidden; pointer-events: none; }
+.gcode-risk-line { position: absolute; right: 0; left: 0; box-sizing: border-box; border-left: 4px solid #ff365c; background: linear-gradient(90deg, rgba(255, 54, 92, .3), rgba(127, 29, 29, .12) 82%, transparent); box-shadow: inset 0 1px rgba(255, 95, 124, .15), inset 0 -1px rgba(255, 95, 124, .15); }
 .gcode-active-line { position: absolute; z-index: 1; right: 0; left: var(--gcode-gutter-width); height: 20.16px; background: linear-gradient(90deg, rgba(86, 227, 159, .22), rgba(86, 227, 159, .07) 75%, transparent); box-shadow: inset 0 1px rgba(125, 238, 179, .08), inset 0 -1px rgba(125, 238, 179, .08); pointer-events: none; }
 .gcode-line-gutter { position: absolute; z-index: 3; inset: 0 auto 0 0; width: var(--gcode-gutter-width); overflow: hidden; color: #53657a; border-right: 1px solid rgba(80, 110, 132, .18); background: #090f1a; pointer-events: none; user-select: none; }
 .gcode-line-numbers { position: absolute; inset: 0 0 auto; margin: 0; padding: 0 9px 0 0; color: inherit; text-align: right; white-space: pre; font: 11px/1.832727 "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
@@ -202,9 +204,27 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .legend .arc { background: var(--arc); }
 .legend .live { height: 3px; background: repeating-linear-gradient(90deg, #f472b6 0 5px, transparent 5px 8px); }
 .legend .reference { height: 3px; background: repeating-linear-gradient(90deg, #fbbf24 0 7px, transparent 7px 10px); }
+.tool-rotation-alert { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; background: #4a1020; border-bottom: 2px solid #ff6683; color: #fff1f2; }
+.tool-rotation-alert[hidden] { display: none; }
+.tool-rotation-alert > div { flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.tool-rotation-alert strong { color: #ff8ba1; font-size: 12px; letter-spacing: .06em; }
+.tool-rotation-alert span { font-size: 11px; line-height: 1.45; }
+.tool-rotation-alert button { flex: 0 0 auto; min-height: 32px; padding: 6px 9px; border: 1px solid #ff8ba1; border-radius: 6px; background: #681c31; color: #fff1f2; font-size: 10px; font-weight: 750; }
+.tool-rotation-alert button:hover, .tool-rotation-alert button:focus-visible { background: #922844; outline-color: #fecdd3; }
 .canvas-wrap { position: relative; flex: 1; min-height: 500px; overflow: hidden; background-color: #071012; background-image: radial-gradient(circle at center, rgba(35, 91, 79, .2), transparent 65%); }
 #plotCanvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
 .canvas-wrap.face-view #plotCanvas { cursor: default; }
+.profile-penetration-alert { position: absolute; z-index: 6; top: 12px; left: 50%; display: flex; width: min(690px, calc(100% - 28px)); align-items: center; justify-content: space-between; gap: 14px; padding: 11px 12px; color: #fff1f2; border: 1px solid rgba(255, 72, 105, .9); border-radius: 9px; background: linear-gradient(105deg, rgba(88, 10, 28, .97), rgba(45, 8, 18, .94)); box-shadow: 0 0 0 2px rgba(255, 54, 92, .13), 0 12px 38px rgba(0, 0, 0, .48), 0 0 30px rgba(244, 63, 94, .17); transform: translateX(-50%); }
+.profile-penetration-alert[hidden] { display: none; }
+.profile-penetration-alert > div { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.profile-penetration-alert strong { color: #ff6683; font: 900 12px/1.2 "Cascadia Code", Consolas, monospace; letter-spacing: .08em; }
+.profile-penetration-alert span { color: #ffe4e8; font-size: 10px; line-height: 1.45; }
+.profile-penetration-alert button { flex: 0 0 auto; min-height: 31px; padding: 6px 10px; color: #fff1f2; border: 1px solid rgba(255, 123, 146, .65); border-radius: 7px; background: rgba(127, 29, 29, .72); font-size: 9px; font-weight: 850; white-space: nowrap; }
+.profile-penetration-alert button:hover, .profile-penetration-alert button:focus-visible { border-color: #fecdd3; outline: none; background: rgba(159, 18, 57, .88); }
+.profile-penetration-alert.review { color: #fff7d6; border-color: rgba(251, 191, 36, .82); background: linear-gradient(105deg, rgba(78, 50, 5, .96), rgba(38, 28, 8, .93)); box-shadow: 0 0 0 2px rgba(251, 191, 36, .1), 0 12px 38px rgba(0, 0, 0, .44); }
+.profile-penetration-alert.review strong { color: #fbbf24; }
+.profile-penetration-alert.review span { color: #fef3c7; }
+.profile-penetration-alert.review button { color: #fef3c7; border-color: rgba(251, 191, 36, .55); background: rgba(92, 61, 8, .72); }
 .face-view-status { position: absolute; z-index: 3; right: 12px; bottom: 12px; display: flex; max-width: min(430px, calc(100% - 24px)); flex-direction: column; gap: 3px; padding: 8px 10px; color: #edb6d4; border: 1px solid rgba(244, 114, 182, .42); border-radius: 8px; background: rgba(37, 14, 30, .88); box-shadow: 0 9px 28px rgba(0, 0, 0, .32); pointer-events: none; }
 .face-view-status[hidden] { display: none; }
 .face-view-status strong { font: 850 9px "Cascadia Code", Consolas, monospace; letter-spacing: .08em; }
@@ -275,6 +295,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .control-stack input.calculated-input { color: #8fb8ba; border-style: dashed; background: #091219; cursor: default; }
 .quality-hint { color: #7f9ca1; font: 8px/1.45 "Cascadia Code", Consolas, monospace; letter-spacing: 0; }
 .stock-placement-hint { margin-top: -7px; color: #7f9ca1; font: 8px/1.45 "Cascadia Code", Consolas, monospace; }
+.stock-setup { display: flex; flex-direction: column; gap: 12px; padding: 10px; border: 1px solid #305458; border-radius: 8px; background: #09191e; }
+.stock-setup .control-divider { margin: 0; }
+.stock-setup .field-pair label > span { min-height: 2.6em; }
+.stock-setup .stock-placement-hint { font: 10px/1.45 Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 0; }
+.stock-setup input:focus { border-color: #72e4d1; box-shadow: 0 0 0 2px #72e4d122; }
+.stock-setup input[aria-invalid="true"] { border-color: #ff7081; }
+.stock-setup-status { margin: 0; color: #96b8bc; font-size: 10px; line-height: 1.4; }
+.stock-setup-status[data-error="true"] { color: #ff8b98; }
 .quality-note { margin: -2px 0 0; color: #69868c; font-size: 8px; line-height: 1.45; }
 .tool-assembly-setup { border: 1px solid rgba(251, 191, 36, .24); border-radius: 8px; background: rgba(40, 29, 8, .2); }
 .tool-assembly-setup summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 9px; color: #c8d7d9; cursor: pointer; font-size: 8px; font-weight: 850; letter-spacing: .1em; list-style: none; }
@@ -294,6 +322,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .reference-geometry-setup summary strong { margin-left: auto; color: #7dd3fc; font-size: 7px; letter-spacing: .08em; }
 .reference-geometry-setup.blocked { border-color: rgba(251, 113, 133, .42); background: rgba(43, 13, 21, .2); }
 .reference-geometry-setup.blocked summary strong { color: #fb7185; }
+.reference-geometry-setup.penetration { border-color: rgba(255, 54, 92, .78); background: rgba(73, 8, 25, .3); box-shadow: 0 0 0 1px rgba(255, 54, 92, .08), 0 0 20px rgba(244, 63, 94, .08); }
+.reference-geometry-setup.penetration summary strong { color: #ff5b79; }
 .reference-geometry-body { display: flex; flex-direction: column; gap: 9px; padding: 9px; border-top: 1px solid rgba(56, 189, 248, .18); }
 .reference-geometry-body p { margin: 0; color: #91afb5; font-size: 8px; line-height: 1.45; }
 .reference-geometry-body .solid-machine-context,
@@ -302,8 +332,32 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .reference-geometry-body .solid-placement-boundary { font-size: 12px; }
 .reference-geometry-body [hidden] { display: none !important; }
 #referenceDxfControls, .reference-step-controls { display: flex; flex-direction: column; gap: 9px; }
+.reference-demo-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .reference-shared-tolerance { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .reference-shared-tolerance input { width: min(116px, 48%); }
+.dxf-material-controls { display: flex; flex-direction: column; gap: 8px; padding: 9px; border: 1px solid rgba(56, 189, 248, .3); border-radius: 8px; background: linear-gradient(145deg, rgba(8, 47, 64, .52), rgba(13, 25, 45, .62)); }
+.dxf-material-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dxf-material-heading span { color: #bae6fd; font-size: 8px; font-weight: 900; letter-spacing: .09em; }
+.dxf-material-heading strong { color: #7dd3fc; font: 850 8px/1.2 "Cascadia Code", Consolas, monospace; letter-spacing: .08em; }
+.dxf-material-heading strong.ready { color: #c4b5fd; }
+.dxf-material-heading strong.review { color: #fbbf24; }
+.dxf-material-heading strong.blocked { color: #fb7185; }
+.dxf-material-controls > p { color: #9ccbd8; }
+.dxf-material-controls > label { gap: 6px; }
+.dxf-material-step { display: flex; min-width: 0; align-items: flex-start; gap: 7px; }
+.dxf-material-step > b { display: inline-grid; width: 18px; height: 18px; flex: 0 0 18px; place-items: center; color: #071012; border-radius: 50%; background: #7dd3fc; font: 900 9px/1 "Cascadia Code", Consolas, monospace; }
+.dxf-material-step > span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.dxf-material-step strong { color: #dff7ff; font-size: 9px; line-height: 1.35; }
+.dxf-material-step small { color: #86aeb8; font-size: 7.5px; font-weight: 600; line-height: 1.4; letter-spacing: 0; }
+.dxf-material-confirmation { display: flex !important; align-items: flex-start; flex-direction: row !important; gap: 8px !important; padding: 8px; border: 1px solid rgba(167, 139, 250, .28); border-radius: 7px; background: rgba(49, 37, 92, .25); cursor: pointer; }
+.dxf-material-confirmation:has(input:checked) { border-color: rgba(167, 139, 250, .72); background: rgba(76, 57, 135, .38); box-shadow: 0 0 0 1px rgba(167, 139, 250, .09); }
+.dxf-material-confirmation:has(input:disabled) { cursor: not-allowed; opacity: .55; }
+.dxf-material-confirmation input { margin-top: 3px; accent-color: #a78bfa; }
+.dxf-material-confirmation input:checked + .dxf-material-step > b { background: #a78bfa; }
+.dxf-material-status { min-height: 30px; padding: 7px 8px; color: #9ccbd8 !important; border: 1px solid rgba(125, 211, 252, .2); border-radius: 6px; background: rgba(3, 15, 24, .55); font: 7.5px/1.45 "Cascadia Code", Consolas, monospace; }
+.dxf-material-status.ready { color: #c4b5fd !important; border-color: rgba(167, 139, 250, .42); }
+.dxf-material-status.review { color: #fbbf24 !important; border-color: rgba(251, 191, 36, .34); }
+.dxf-material-status.blocked { color: #fb7185 !important; border-color: rgba(251, 113, 133, .38); }
 .field-pair.three-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .build-step-section { min-height: 30px; padding: 6px 8px; color: #d5f4ff; border: 1px solid rgba(56, 189, 248, .38); border-radius: 7px; background: rgba(8, 49, 65, .5); font-size: 8px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
 .build-step-section:disabled { opacity: .5; cursor: wait; }
@@ -314,6 +368,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .reference-geometry-results strong.ready { color: #56e39f; }
 .reference-geometry-results strong.review { color: #fbbf24; }
 .reference-geometry-results strong.blocked { color: #fb7185; }
+.inspect-reference-deviation { min-height: 30px; padding: 6px 8px; color: #b7d6da; border: 1px solid rgba(125, 211, 252, .3); border-radius: 7px; background: rgba(10, 37, 48, .62); font-size: 8px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
+.inspect-reference-deviation:hover:not(:disabled) { color: #e8fbff; border-color: rgba(125, 211, 252, .6); background: rgba(14, 52, 67, .78); }
+.inspect-reference-deviation[aria-pressed="true"] { color: #dff9ff; border-color: rgba(125, 211, 252, .72); background: rgba(17, 66, 84, .68); }
+.inspect-reference-deviation:disabled { cursor: not-allowed; opacity: .42; }
 .reference-geometry-diagnostics { display: flex; flex-direction: column; gap: 4px; max-height: 105px; margin: 0; padding: 7px 7px 7px 20px; overflow: auto; color: #91aeb3; border: 1px solid rgba(130, 159, 164, .18); border-radius: 7px; background: rgba(7, 16, 18, .62); font-size: 7.5px; line-height: 1.4; }
 .reference-geometry-diagnostics li.warning { color: #fbbf24; }
 .reference-geometry-diagnostics li.error { color: #fb7185; }
@@ -466,6 +524,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tool-library-footer .button:disabled { cursor: not-allowed; filter: none; opacity: .42; }
 .tool-library-preview { display: grid; min-height: 210px; margin: 0 0 13px; padding: 11px; place-items: center; border: 1px solid #263b41; border-radius: 9px; background: #061013; }
 .tool-library-preview-svg { display: block; width: 100%; height: 190px; max-width: 430px; overflow: visible; }
+.tool-library-preview-svg.cutting-end { overflow: hidden; }
+.tool-library-nominal { justify-items: stretch; gap: 10px; }
+.tool-library-nominal h4, .tool-library-nominal p { margin: 0; font-size: 12px; line-height: 1.5; }
+.tool-library-nominal p { color: #b8cbd0; }
+.tool-library-nominal label { display: grid; gap: 6px; color: #8ba1a6; font-size: 11px; }
+.tool-library-nominal select { width: 100%; min-height: 36px; padding: 6px 8px; border: 1px solid #263b41; border-radius: 6px; color: #e7f0f3; background: #0b1422; }
+.tool-library-nominal figure { width: 100%; margin: 0; }
 .tool-library-preview-svg .holder-envelope { stroke: #b8cbd0; stroke-width: 1.2; vector-effect: non-scaling-stroke; }
 .tool-library-preview-svg .holder-head-zone { stroke: #7e969c; stroke-width: 1; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
 .tool-library-preview-svg .insert-outline { stroke: #f8c83f; stroke-width: 1.7; vector-effect: non-scaling-stroke; }
@@ -699,6 +764,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .gcode-editor, #gcodeInput { min-height: 340px; }
   .canvas-wrap { min-height: 400px; }
   .face-view-status, .mill-view-status { right: 8px; bottom: 8px; max-width: calc(100% - 16px); }
+  .profile-penetration-alert { top: 8px; width: calc(100% - 16px); align-items: stretch; flex-direction: column; gap: 8px; padding: 10px; }
+  .profile-penetration-alert button { align-self: flex-start; }
+  .reference-demo-actions { grid-template-columns: 1fr; }
   .face-view-status strong, .mill-view-status strong { font-size: 10px; }
   .face-view-status span, .mill-view-status span { font-size: 9px; }
   .view-cube { transform: scale(.9); transform-origin: right top; }
