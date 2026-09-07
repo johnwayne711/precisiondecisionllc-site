@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="application-name" content="G-Code Studio">
-  <meta name="description" content="Offline-first lathe and 3-axis mill G-code backplotter with bounded, explicit machining semantics.">
+  <meta name="description" content="Offline-first CNC toolpath verification workspace for lathe and bounded 3-axis mill G-code.">
   <meta name="robots" content="index,follow">
   <meta name="apple-mobile-web-app-title" content="G-Code Studio">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#071012">
-  <title>G-Code Studio — CNC G-code backplotter</title>
+  <title>G-Code Studio — CNC toolpath verification</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
@@ -20,13 +20,14 @@
   <div class="app-shell">
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true"><span>G</span><i>·</i><span>S</span></div>
+        <div class="brand-mark" aria-hidden="true">
+          <span class="brand-letter brand-letter-g">G</span><span class="brand-letter brand-letter-i">i</span><span class="brand-letter brand-letter-s">S</span><i class="brand-cut"></i>
+        </div>
         <div class="brand-lockup">
           <div class="brand-title-row">
             <h1><span class="brand-wordmark"><em>G-CODE</em> <b>STUDIO</b></span></h1>
-            <span class="brand-signature">by Joseph H. Smith</span>
           </div>
-          <div class="brand-subline"><i aria-hidden="true"></i><span id="brandSubtitle" class="brand-subtitle">LATHE BACKPLOT</span></div>
+          <div class="brand-subline"><i aria-hidden="true"></i><span class="brand-subtitle">CNC TOOLPATH VERIFICATION</span></div>
         </div>
       </div>
       <div class="header-status">
@@ -36,6 +37,23 @@
         <span id="programStatus">Sample loaded</span>
       </div>
       <div class="header-actions">
+        <details id="sessionPrivacy" class="session-privacy" data-mode="private">
+          <summary aria-label="Open local session privacy controls">
+            <span class="session-privacy-dot" aria-hidden="true"></span>
+            <span><strong id="sessionPrivacyTitle">PRIVATE SESSION</strong><small id="sessionPrivacyStatus">RAM ONLY</small></span>
+          </summary>
+          <div class="session-privacy-popover">
+            <strong>Local session privacy</strong>
+            <p>By default, G-code, filenames, comments, coordinates, tool setup, stock setup, and imported geometry stay in memory and disappear on reload or close.</p>
+            <label class="session-remember-row">
+              <input id="rememberJobToggle" type="checkbox">
+              <span><strong>Remember this job on this device</strong><small>Opt in only on a trusted device.</small></span>
+            </label>
+            <p class="session-plaintext-warning">Remembering stores the program, filename, controller/tool setup, and stock setup as unencrypted browser data. Imported DXF/STEP source and derived reference geometry are never stored.</p>
+            <button id="clearLocalDataButton" type="button">Clear saved job &amp; settings</button>
+            <output id="sessionPrivacyMessage" aria-live="polite">Private mode is on. Nothing from this job is saved automatically.</output>
+          </div>
+        </details>
         <input id="fileInput" type="file" accept=".nc,.cnc,.tap,.gcode,.txt" hidden>
         <input id="originalFileInput" type="file" accept=".nc,.cnc,.tap,.gcode,.txt" hidden>
         <input id="geometryFileInput" type="file" accept=".dxf" hidden>

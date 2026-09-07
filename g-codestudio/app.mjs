@@ -12,6 +12,11 @@ import {
   stockContourPoints, stockMaterialIntervals, stockPlacement, stockVerificationColumns,
 } from "./simulation.mjs";
 import {convertUnitValue, scaleForUnits} from "./units.mjs";
+import {
+  PRIVATE_PREFERENCE_IDS, clearLocalApplicationData, isRememberJobEnabled, migrateLegacySession,
+  readPrivatePreferences, readRememberedJob, saveRememberedJob, setRememberJobEnabled,
+  writePrivatePreferences,
+} from "./session-storage.mjs";
 import {roundBarSetup, roundBarSetupFromLegacy} from "./stock-setup.mjs";
 import {hasStockCavities, stockSectionPolygons} from "./stock-section-view.mjs";
 import {turningSpindleIssue} from "./tool-mounting.mjs";
@@ -238,6 +243,9 @@ const elements = {
   programReplaceRow: $("programReplaceRow"), programReplaceInput: $("programReplaceInput"),
   programReplaceOne: $("programReplaceOne"), programReplaceAll: $("programReplaceAll"),
   fileName: $("fileName"), lineCount: $("lineCount"), status: $("programStatus"), timeline: $("timeline"),
+  sessionPrivacy: $("sessionPrivacy"), sessionPrivacyTitle: $("sessionPrivacyTitle"),
+  sessionPrivacyStatus: $("sessionPrivacyStatus"), sessionPrivacyMessage: $("sessionPrivacyMessage"),
+  rememberJob: $("rememberJobToggle"), clearLocalData: $("clearLocalDataButton"),
   blockReadout: $("blockReadout"), play: $("playButton"), stepBack: $("stepBackButton"), stepForward: $("stepForwardButton"),
   readerElapsedTime: $("readerElapsedTime"), readerRemainingTime: $("readerRemainingTime"), readerTotalTime: $("readerTotalTime"),
   speed: $("speedSelect"), machineMode: $("machineModeSelect"), machine: $("machineSelect"), editMachine: $("editMachineButton"), orientation: $("orientationSelect"),
@@ -306,7 +314,7 @@ const elements = {
   latheMachineSelectRow: $("latheMachineSelectRow"), millSetupIdentity: $("millSetupIdentity"),
   latheOrientationControl: $("latheOrientationControl"), latheXModeControl: $("latheXModeControl"),
   latheSetupControls: $("latheSetupControls"), millSetupBoundary: $("millSetupBoundary"),
-  compare: $("compareButton"), brandSubtitle: $("brandSubtitle"), workspaceSafetyNote: $("workspaceSafetyNote"),
+  compare: $("compareButton"), workspaceSafetyNote: $("workspaceSafetyNote"),
 };
 
 const state = {
@@ -330,6 +338,7 @@ const state = {
   referenceGeometry: null, referenceComparison: null, showReferenceWitness: false, referenceGeneration: 0, referenceIntentRevision: 0,
   programRevision: 0,
   solidSetupActive: false,
+  rememberJob: false, rememberedJobSaved: false,
 };
 const ctx = elements.canvas.getContext("2d");
 const solidSetupDialog = createSolidSetupDialog({
@@ -353,7 +362,6 @@ const navigation3dRenderer = createFrameScheduler({
   cancelFrame: (frame) => cancelAnimationFrame(frame),
   render: () => { if (state.viewMode === "3d") draw(); },
 });
-const STORAGE_KEY = "verify.session.v1";
 // Keep the established saved L / jaw-face / grip contract. UI drafts never
 // become simulation or persisted stock until the whole setup is valid.
 const stockSetupKeys = {
@@ -712,32 +720,75 @@ function replaceEveryProgramMatch() {
   elements.programReplaceInput.focus();
 }
 
+function capturedPreferences(ids = preferenceIds) {
+  const preferences = {};
+  for (const id of ids) {
+    const control = $(id);
+    if (!control) continue;
+    preferences[id] = control.type === "checkbox" ? control.checked : control.value;
+    if (appliedStockSetup && stockSetupKeys[id]) preferences[id] = preciseDisplayInput(appliedStockSetup[stockSetupKeys[id]]);
+  }
+  return preferences;
+}
+
+function applyStoredPreferences(preferences) {
+  for (const [id, value] of Object.entries(preferences || {})) {
+    const control = $(id);
+    if (!control) continue;
+    if (control.type === "checkbox") control.checked = Boolean(value);
+    else if (control.tagName !== "SELECT" || [...control.options].some((option) => option.value === value)) control.value = String(value);
+  }
+}
+
+function renderSessionPrivacy() {
+  const remembered = state.rememberJob && state.rememberedJobSaved;
+  elements.rememberJob.checked = state.rememberJob;
+  elements.sessionPrivacy.dataset.mode = remembered ? "remembered" : "private";
+  elements.sessionPrivacyTitle.textContent = remembered ? "JOB REMEMBERED" : "PRIVATE SESSION";
+  elements.sessionPrivacyStatus.textContent = remembered ? "SAVED LOCALLY" : "RAM ONLY";
+}
+
+function disableRememberedJob(message) {
+  state.rememberJob = false;
+  state.rememberedJobSaved = false;
+  setRememberJobEnabled(localStorage, false);
+  renderSessionPrivacy();
+  if (message) elements.sessionPrivacyMessage.textContent = message;
+}
+
 function persistSession() {
+  writePrivatePreferences(localStorage, capturedPreferences(PRIVATE_PREFERENCE_IDS));
+  if (!state.rememberJob) {
+    setRememberJobEnabled(localStorage, false);
+    state.rememberedJobSaved = false;
+    renderSessionPrivacy();
+    return true;
+  }
   if (isMillMode()) {
-    if (millSourceByteSummary(elements.input.value).exceeded) return;
-    if (millSourceRecordSummary(elements.input.value, {maxRecords: PROGRAM_EDITOR_LINE_LIMIT}).exceeded) return;
-  }
-  try {
-    const preferences = {};
-    for (const id of preferenceIds) {
-      const control = $(id);
-      preferences[id] = control.type === "checkbox" ? control.checked : control.value;
-      if (appliedStockSetup && stockSetupKeys[id]) preferences[id] = preciseDisplayInput(appliedStockSetup[stockSetupKeys[id]]);
+    if (millSourceByteSummary(elements.input.value).exceeded
+      || millSourceRecordSummary(elements.input.value, {maxRecords: PROGRAM_EDITOR_LINE_LIMIT}).exceeded) {
+      disableRememberedJob("This program exceeds the bounded save limit. The job remains private and was not stored.");
+      return false;
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      preferences,
-      fileName: elements.fileName.textContent,
-      program: elements.input.value,
-      toolAssignments: toolAssignmentsForPersistence(state.toolAssignments),
-      latheControllerSettings: state.latheControllerSettings || null,
-      toolAssignmentScope: state.toolAssignmentScope,
-      bundledSample: isExactBundledSample(elements.input.value, state.bundledSample),
-      bundledStepReference: state.bundledStepReference === true
-        && isExactBundledProgram(elements.input.value, stepSampleProgram, state.bundledSample),
-    }));
-  } catch {
-    // Storage can be unavailable in hardened browsers; G-Code Studio remains fully usable.
   }
+  const result = saveRememberedJob(localStorage, {
+    preferences: capturedPreferences(),
+    fileName: elements.fileName.textContent,
+    program: elements.input.value,
+    toolAssignments: toolAssignmentsForPersistence(state.toolAssignments),
+    latheControllerSettings: state.latheControllerSettings || null,
+    toolAssignmentScope: state.toolAssignmentScope,
+    bundledSample: isExactBundledSample(elements.input.value, state.bundledSample),
+    bundledStepReference: state.bundledStepReference === true
+      && isExactBundledProgram(elements.input.value, stepSampleProgram, state.bundledSample),
+  });
+  if (!result.saved) {
+    disableRememberedJob("Browser storage is unavailable. The job remains private and was not stored.");
+    return false;
+  }
+  state.rememberedJobSaved = true;
+  renderSessionPrivacy();
+  return true;
 }
 
 function schedulePersist() {
@@ -745,36 +796,26 @@ function schedulePersist() {
   persistTimer = setTimeout(persistSession, 180);
 }
 
-function restoreSession() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
-    if (!saved || typeof saved !== "object") return false;
-    state.latheControllerSettings = saved.latheControllerSettings || null;
-    for (const [id, value] of Object.entries(saved.preferences || {})) {
-      const control = $(id);
-      if (!control) continue;
-      if (control.type === "checkbox") control.checked = Boolean(value);
-      else if (control.tagName !== "SELECT" || [...control.options].some((option) => option.value === value)) control.value = String(value);
+function restoreSession(saved) {
+  if (!saved || typeof saved !== "object") return false;
+  state.latheControllerSettings = saved.latheControllerSettings || null;
+  applyStoredPreferences(saved.preferences);
+  if (typeof saved.program === "string" && saved.program.trim()) {
+    elements.input.value = saved.program;
+    elements.fileName.textContent = typeof saved.fileName === "string" ? saved.fileName : "restored-program.nc";
+    state.bundledSample = isExactBundledSample(saved.program, saved.bundledSample === true);
+    state.bundledStepReference = saved.bundledStepReference === true
+      && isExactBundledProgram(saved.program, stepSampleProgram, state.bundledSample);
+    if (saved.toolAssignments && typeof saved.toolAssignments === "object" && !Array.isArray(saved.toolAssignments)) {
+      state.toolAssignments = Object.fromEntries(Object.entries(saved.toolAssignments).filter(([key, assignment]) => (
+        /^T[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/i.test(key)
+        && assignment
+        && typeof assignment === "object"
+        && !Array.isArray(assignment)
+      )));
     }
-    if (typeof saved.program === "string" && saved.program.trim()) {
-      elements.input.value = saved.program;
-      elements.fileName.textContent = typeof saved.fileName === "string" ? saved.fileName : "restored-program.nc";
-      state.bundledSample = isExactBundledSample(saved.program, saved.bundledSample === true);
-      state.bundledStepReference = saved.bundledStepReference === true
-        && isExactBundledProgram(saved.program, stepSampleProgram, state.bundledSample);
-      if (saved.toolAssignments && typeof saved.toolAssignments === "object" && !Array.isArray(saved.toolAssignments)) {
-        state.toolAssignments = Object.fromEntries(Object.entries(saved.toolAssignments).filter(([key, assignment]) => (
-          /^T[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/i.test(key)
-          && assignment
-          && typeof assignment === "object"
-          && !Array.isArray(assignment)
-        )));
-      }
-      state.toolAssignmentScope = typeof saved.toolAssignmentScope === "string" ? saved.toolAssignmentScope : null;
-      return true;
-    }
-  } catch {
-    // Ignore damaged or unavailable local state and load the sample instead.
+    state.toolAssignmentScope = typeof saved.toolAssignmentScope === "string" ? saved.toolAssignmentScope : null;
+    return true;
   }
   return false;
 }
@@ -3118,8 +3159,6 @@ function isMillMode() { return elements.machineMode?.value === "mill"; }
 function applyMachineModeUi({refreshView = true} = {}) {
   const mill = isMillMode();
   document.body.dataset.machineMode = mill ? "mill" : "lathe";
-  document.title = mill ? "G-Code Studio — 3-axis mill backplotter" : "G-Code Studio — Lathe G-code backplotter";
-  elements.brandSubtitle.textContent = mill ? "3-AXIS MILL BACKPLOT" : "LATHE BACKPLOT";
   elements.latheMachineSelectRow.hidden = mill;
   elements.millSetupIdentity.hidden = !mill;
   elements.latheOrientationControl.hidden = mill;
@@ -6932,6 +6971,31 @@ elements.importStep.addEventListener("click", openStepGeometry);
 $("openSolidSetupButton").addEventListener("click", () => solidSetupDialog.open(state.referenceGeometry));
 $("compareButton").addEventListener("click", openComparison);
 elements.save.addEventListener("click", saveProgram);
+elements.rememberJob.addEventListener("change", () => {
+  if (!elements.rememberJob.checked) {
+    disableRememberedJob("Saved job data was removed. The open job remains in memory until this tab closes or reloads.");
+    writePrivatePreferences(localStorage, capturedPreferences(PRIVATE_PREFERENCE_IDS));
+    return;
+  }
+  if (!setRememberJobEnabled(localStorage, true)) {
+    disableRememberedJob("Browser storage is unavailable. The job remains private and was not stored.");
+    return;
+  }
+  state.rememberJob = true;
+  if (persistSession()) {
+    elements.sessionPrivacyMessage.textContent = "This job is saved locally on this device. Turn this off when persistence is no longer needed.";
+  }
+});
+elements.clearLocalData.addEventListener("click", () => {
+  clearTimeout(persistTimer);
+  const removed = clearLocalApplicationData(localStorage, sessionStorage);
+  state.rememberJob = false;
+  state.rememberedJobSaved = false;
+  renderSessionPrivacy();
+  elements.sessionPrivacyMessage.textContent = removed
+    ? `Cleared ${removed} local G-Code Studio ${removed === 1 ? "record" : "records"}. The open job remains only in memory.`
+    : "No saved G-Code Studio data was present. The open job remains only in memory.";
+});
 elements.fileInput.addEventListener("change", async () => {
   await loadBrowserFile(elements.fileInput.files[0]);
   elements.fileInput.value = "";
@@ -7617,9 +7681,19 @@ new ResizeObserver(resizeCanvas).observe(elements.wrap);
 new ResizeObserver(() => {
   if (elements.compareDialog.open && state.compareView === "graphics") requestAnimationFrame(renderComparisonGraphics);
 }).observe(elements.compareGraphicsAudit);
+const legacySessionMigration = migrateLegacySession(localStorage);
+applyStoredPreferences(readPrivatePreferences(localStorage));
 state.machineProfiles = mergeMachineProfiles(DEFAULT_MACHINE_PROFILES, readMachineProfileCache());
 renderMachineSelect();
-const restored = restoreSession();
+state.rememberJob = isRememberJobEnabled(localStorage);
+const rememberedJob = state.rememberJob ? readRememberedJob(localStorage) : null;
+state.rememberJob = isRememberJobEnabled(localStorage);
+const restored = restoreSession(rememberedJob);
+state.rememberedJobSaved = restored;
+renderSessionPrivacy();
+if (legacySessionMigration.removed) {
+  elements.sessionPrivacyMessage.textContent = "Removed the previous plaintext autosave. This job now starts in private RAM-only mode.";
+}
 const requestedBundledStepReferenceRestore = restored
   && state.bundledStepReference
   && isExactBundledProgram(elements.input.value, stepSampleProgram, state.bundledSample);
