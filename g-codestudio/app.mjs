@@ -2961,17 +2961,19 @@ function strokeComparisonItems(surface, items, toScreen, color, lineWidth, shado
       || item.segment.pathPreviewOnly
       || item.segment.cAxisMotion?.blocked
     );
-    const strokeColor = blocked ? "#fb7185" : color;
+    const controllerPreview = isUnsupportedControllerPathPreview(item.segment);
+    const hardBlocked = blocked && !controllerPreview;
+    const strokeColor = hardBlocked ? "#fb7185" : (controllerPreview ? "#fbbf24" : color);
     context.beginPath();
     points.forEach((point, index) => {
       const screen = toScreen(point);
       if (index) context.lineTo(screen.x, screen.y); else context.moveTo(screen.x, screen.y);
     });
     context.strokeStyle = strokeColor;
-    context.lineWidth = blocked ? Math.max(2.8, lineWidth) : lineWidth;
+    context.lineWidth = hardBlocked ? Math.max(2.8, lineWidth) : lineWidth;
     context.setLineDash(blocked ? [2, 2] : (item.segment.type === "rapid" ? [6, 4] : []));
     context.shadowColor = blocked || shadowBlur ? strokeColor : "transparent";
-    context.shadowBlur = blocked ? Math.max(6, shadowBlur) : shadowBlur;
+    context.shadowBlur = hardBlocked ? Math.max(6, shadowBlur) : shadowBlur;
     context.stroke();
   }
   context.setLineDash([]);
@@ -3254,6 +3256,11 @@ function updateLiveToolStatus(profile = currentMachineProfile()) {
     status.title = "Live-tool capability or controller dialect is not configured for the selected machine profile.";
   }
 }
+function isToolSetupStockWarning(warning) {
+  return typeof warning?.code === "string"
+    && (warning.code.startsWith("tool-") || warning.code === "nominal-thread-tool-required");
+}
+
 function updateStockRemovedStatus(stock, fallback = null) {
   const output = $("stockRemoved");
   output.className = "";
@@ -3301,7 +3308,9 @@ function updateStockRemovedStatus(stock, fallback = null) {
       output.className = "warning-value";
     } else {
       output.textContent = `BLOCKED · ${reason}`;
-      output.className = "danger-value";
+      output.className = !programBlockers.length && isToolSetupStockWarning(warning)
+        ? "warning-value"
+        : "danger-value";
     }
     const blockedDetail = turningBlockedCuts
       ? `${turningBlockedCuts} turning cut${turningBlockedCuts === 1 ? " was" : "s were"} blocked.`
@@ -3981,7 +3990,7 @@ function toolRotationReport() {
     const warningKey = `${segment.toolKey}:${issue.code}`;
     if (!warningKeys.has(warningKey)) {
       warningKeys.add(warningKey);
-      report.warnings.push({line: entry.line, danger: true, message: `${entry.toolKey}: ${issue.message} Stock removal is blocked on affected cutting moves.`});
+      report.warnings.push({line: entry.line, message: `${entry.toolKey}: ${issue.message} Stock removal is blocked on affected cutting moves.`});
     }
   });
   toolRotationReportCache = report;
@@ -4021,7 +4030,6 @@ function assignmentWarnings() {
   if (firstUnassignedMotion) {
     warnings.push({
       line: firstUnassignedMotion.executionLine || firstUnassignedMotion.line || null,
-      danger: true,
       message: "A cutting move occurs before any executable T call. Its tool-dependent stock removal is blocked.",
     });
   }
@@ -4037,7 +4045,7 @@ function assignmentWarnings() {
       for (const segment of state.parsed.segments.filter((entry) => entry.toolKey === toolKey && entry.type !== "rapid")) {
         const sourceMotion = segment.sourceMotion || segment.type;
         if (sourceMotion === "arc-cw" || sourceMotion === "arc-ccw") {
-          messages.push({line: segment.executionLine || segment.line, danger: true, message: `${toolKey} uses a finite-width cutter on an arc. Exact swept-arc stock removal is not yet supported, so that cut is blocked.`});
+          messages.push({line: segment.executionLine || segment.line, message: `${toolKey} uses a finite-width cutter on an arc. Exact swept-arc stock removal is not yet supported, so that cut is blocked.`});
           continue;
         }
         const deltaZ = segment.end.z - segment.start.z;
@@ -4045,7 +4053,7 @@ function assignmentWarnings() {
           || Math.abs(deltaZ) <= 1e-9
           || (model.axialDirection === "positive-z" && deltaZ > 0)
           || (model.axialDirection === "negative-z" && deltaZ < 0);
-        if (!allowed) messages.push({line: segment.executionLine || segment.line, danger: true, message: `${toolKey} is not confirmed for this Z cutting direction; stock removal is blocked for this move.`});
+        if (!allowed) messages.push({line: segment.executionLine || segment.line, message: `${toolKey} is not confirmed for this Z cutting direction; stock removal is blocked for this move.`});
       }
       return messages;
     }
@@ -4054,7 +4062,7 @@ function assignmentWarnings() {
       ? `${toolKey} is unassigned. Its motion remains visible, but stock removal is blocked until the program tool is selected.`
       : readiness.status === "display-only" ? `${toolKey}: ${readiness.errors[0]}`
         : `${toolKey} tool definition is incomplete: ${readiness.errors[0]}`;
-    return [{line: first?.line || null, danger: true, message}];
+    return [{line: first?.line || null, message}];
   }));
   warnings.push(...toolRotationReport().warnings);
   return warnings;
@@ -5550,18 +5558,25 @@ function segmentScreenPoints(segment) {
   }));
 }
 
+function isUnsupportedControllerPathPreview(segment) {
+  return segment?.pathPreviewOnly === true
+    && segment?.verificationIssues?.includes("unsupported-controller-command-preview");
+}
+
 function strokeSegment(segment, pending = false) {
   const colors = {rapid: "#f59e0b", rough: "#22c55e", "cycle-profile": "#67e8f9", finish: "#e5eefc", linear: "#38bdf8", "arc-cw": "#a78bfa", "arc-ccw": "#a78bfa"};
   const live = isLiveToolSegment(segment);
   const rapid = isRapidMotion(segment);
-  const blocked = Boolean(segment.verificationBlocked || segment.liveToolBlocked || toolRotationReport().segments.has(segment));
-  const collision = !pending && !live && !blocked && collisionPointForSegment(segment, collisionOptions());
+  const semanticBlocked = Boolean(segment.verificationBlocked || segment.liveToolBlocked);
+  const controllerPreview = isUnsupportedControllerPathPreview(segment);
+  const hardBlocked = semanticBlocked && !controllerPreview;
+  const collision = !pending && !live && !semanticBlocked && collisionPointForSegment(segment, collisionOptions());
   ctx.strokeStyle = pending
-    ? (blocked ? "#7f1d1d" : (live ? "#80506e" : "#64748b"))
-    : (blocked || collision ? "#fb7185" : (live ? "#f472b6" : (colors[segment.type] || "#94a3b8")));
-  ctx.lineWidth = blocked || collision ? 2.8 : (rapid ? 1.2 : (pending ? 1.35 : 2.15));
+    ? (hardBlocked ? "#7f1d1d" : (live ? "#80506e" : "#64748b"))
+    : (hardBlocked || collision ? "#fb7185" : (live ? "#f472b6" : (colors[segment.type] || "#94a3b8")));
+  ctx.lineWidth = hardBlocked || collision ? 2.8 : (rapid ? 1.2 : (pending ? 1.35 : 2.15));
   ctx.globalAlpha = pending ? (live ? 0.48 : 0.38) : 0.98;
-  ctx.setLineDash(blocked ? [2, 2] : (live ? (rapid ? [7, 4, 2, 4] : [3, 2]) : (rapid ? [6, 5] : [])));
+  ctx.setLineDash(hardBlocked || controllerPreview ? [2, 2] : (live ? (rapid ? [7, 4, 2, 4] : [3, 2]) : (rapid ? [6, 5] : [])));
   ctx.beginPath();
   segmentScreenPoints(segment).forEach((screen, index) => {
     if (index === 0) ctx.moveTo(screen.x, screen.y); else ctx.lineTo(screen.x, screen.y);
@@ -6195,7 +6210,9 @@ function renderProgramNotes(notes) {
   }
   notes.slice(0, 12).forEach((warning) => {
     const item = document.createElement("li");
-    if (warning.danger || warning.verificationBlocked) item.className = "danger";
+    const controllerPreview = warning.code === "unsupported-m-code"
+      && state.parsed.machineState?.blockedPathPreview === true;
+    if ((warning.danger || warning.verificationBlocked) && !controllerPreview) item.className = "danger";
     else if (warning.info) item.className = "muted";
     item.textContent = `${warning.line ? `Line ${warning.line}: ` : ""}${warning.message}`;
     list.append(item);
@@ -6364,7 +6381,7 @@ function updateStats() {
     : null;
   const stockWarnings = (analyzedStock?.toolWarnings || []).filter(warning => warning.code !== "live-tool-stock-removal-unsupported");
   state.stockCuttingWarning = stockWarnings.length ? {...stockWarnings[0], blockedCuts: analyzedStock.turningBlockedCuts} : null;
-  notes.unshift(...stockWarnings.map(warning => ({...warning, danger: true})));
+  notes.unshift(...stockWarnings.map(warning => ({...warning, danger: !isToolSetupStockWarning(warning)})));
   if (analyzedStock?.nominalModeledCuts > 0 || analyzedStock?.compensatedModeledCuts > 0) {
     notes.push({line: null, info: true, message: analyzedStock.threadEnvelopeCuts > 0
       ? "THREAD SECTION ENVELOPE — nominal axisymmetric removal, not helical thread geometry, pitch-diameter inspection or holder clearance."

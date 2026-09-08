@@ -640,7 +640,7 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
       message: liveSpecific && state.liveToolDialect !== "haas-lathe-ngc"
         ? `M${unsupportedMCode} is machine-builder-specific and cannot be interpreted until a live-tool controller dialect is configured.`
         : retainBlockedPreview
-          ? `M${unsupportedMCode} is not modeled for the selected controller; downstream X/Z commands are shown only as a red dashed PATH ONLY preview. Execution, timing, stock, comparison, and clearance remain blocked.`
+          ? `M${unsupportedMCode} is not modeled for the selected controller; downstream X/Z commands are shown only as a dashed, motion-colored PATH ONLY preview. Execution, timing, stock, comparison, and clearance remain blocked.`
           : `M${unsupportedMCode} is not modeled for the selected controller; its machine-state or control-flow effects are unknown, so execution is blocked.`,
     });
     if (retainBlockedPreview) {

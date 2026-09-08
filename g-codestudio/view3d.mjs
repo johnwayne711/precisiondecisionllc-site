@@ -800,14 +800,17 @@ export function toolpathStyleForSegment(segment, {pending = false} = {}) {
   const live = isLiveToolSegment(segment);
   const rapid = segment?.type === "rapid" || segment?.type === "live-rapid";
   const blocked = Boolean(segment?.verificationBlocked || segment?.liveToolBlocked);
+  const controllerPreview = segment?.pathPreviewOnly === true
+    && segment?.verificationIssues?.includes("unsupported-controller-command-preview");
+  const hardBlocked = blocked && !controllerPreview;
   return {
-    color: blocked
+    color: hardBlocked
       ? (pending ? "#7f1d1d" : "#fb7185")
       : (pending ? (live ? LIVE_PENDING_PATH_COLOR : "#64748b") : (live ? LIVE_PATH_COLOR : (PATH_COLORS[segment?.type] || "#94a3b8"))),
-    width: blocked ? (pending ? 1.4 : 2.8) : (pending ? 1.1 : (rapid ? 1.35 : 2.1)),
-    dash: blocked ? [2, 2] : (live ? (rapid ? [7, 4, 2, 4] : [3, 2]) : (rapid ? [6, 5] : [])),
-    alpha: pending ? (blocked ? 0.48 : 0.28) : 0.98,
-    glow: pending ? 0 : (blocked ? 7 : 5),
+    width: hardBlocked ? (pending ? 1.4 : 2.8) : (pending ? 1.1 : (rapid ? 1.35 : 2.1)),
+    dash: hardBlocked || controllerPreview ? [2, 2] : (live ? (rapid ? [7, 4, 2, 4] : [3, 2]) : (rapid ? [6, 5] : [])),
+    alpha: pending ? (hardBlocked ? 0.48 : 0.28) : 0.98,
+    glow: pending ? 0 : (hardBlocked ? 7 : 5),
   };
 }
 
