@@ -68,7 +68,7 @@
       </div>
     </header>
 
-    <main class="workspace">
+    <main id="workspace" class="workspace">
       <aside id="programPanel" class="editor-panel panel">
         <div class="panel-heading">
           <div><span class="eyebrow">PROGRAM</span><strong id="fileName">sample-g71-rough.nc</strong></div>
@@ -95,6 +95,7 @@
           </div>
         </section>
         <div id="gcodeEditor" class="gcode-editor">
+          <div id="gcodeSyntaxLayer" class="gcode-syntax-layer" aria-hidden="true"><pre id="gcodeSyntaxCode" class="gcode-syntax-code"></pre></div>
           <div id="gcodeRiskHighlights" class="gcode-risk-highlights" aria-hidden="true"></div>
           <div id="gcodeActiveLine" class="gcode-active-line" aria-hidden="true" hidden></div>
           <div id="gcodeSearchHighlights" class="gcode-search-highlights" aria-hidden="true"></div>
@@ -104,8 +105,19 @@
           </div>
           <textarea id="gcodeInput" wrap="off" spellcheck="false" aria-label="G-code program"></textarea>
         </div>
+        <aside id="gcodeCodeInspector" class="gcode-code-inspector" aria-labelledby="gcodeCodeInspectorTitle" aria-live="polite" hidden>
+          <div class="gcode-code-inspector-heading">
+            <span class="eyebrow">CODE INSPECTOR</span>
+            <code id="gcodeCodeInspectorCode"></code>
+            <span id="gcodeCodeInspectorStatus" class="gcode-code-inspector-status"></span>
+            <button id="gcodeCodeInspectorClose" type="button" aria-label="Close code inspector">×</button>
+          </div>
+          <strong id="gcodeCodeInspectorTitle"></strong>
+          <p id="gcodeCodeInspectorDescription"></p>
+          <small id="gcodeCodeInspectorScope"></small>
+        </aside>
         <div class="editor-footer">
-          <span>Graphics selection follows the source line</span>
+          <span>Click a code to identify it · Graphics selection follows the source line</span>
           <span class="editor-sample-actions">
             <button id="loadMillSampleButton" class="text-button">Mill sample</button>
             <button id="loadLiveBoreSampleButton" class="text-button">Live bore sample</button>
@@ -115,7 +127,9 @@
         </div>
       </aside>
 
-      <section class="plot-panel panel">
+      <div id="programPaneSplitter" class="pane-splitter" role="separator" tabindex="0" aria-label="Resize program and graphics panes" aria-controls="programPanel graphicsPanel" aria-orientation="vertical" title="Drag to resize · Arrow keys adjust · Double-click resets"><span aria-hidden="true"></span></div>
+
+      <section id="graphicsPanel" class="plot-panel panel">
         <div class="plot-toolbar">
           <div class="plot-toolbar-left">
             <div class="segmented" aria-label="View controls">

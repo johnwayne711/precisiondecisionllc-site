@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "verify-app-";
-const CACHE_NAME = "verify-app-v93";
+const CACHE_NAME = "verify-app-v94";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -35,6 +35,8 @@ const APP_ASSETS = [
   "./render-scheduler.mjs",
   "./interaction.mjs",
   "./editor-search.mjs",
+  "./gcode-language.mjs",
+  "./pane-splitter.mjs",
   "./geometry-inspector.mjs",
   "./tool-assembly.mjs",
   "./tool-mounting.mjs",

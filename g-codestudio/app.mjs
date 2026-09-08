@@ -73,6 +73,8 @@ import {
   nextProgramSearchIndex, programSearchIndexFromAnchor, programSearchMatches, replaceAllProgramSearchMatches,
   replaceProgramSearchMatch,
 } from "./editor-search.mjs";
+import {gcodeTokenAtOffset, identifyGcodeToken, tokenizeGcodeLanguage} from "./gcode-language.mjs";
+import {createPaneSplitter} from "./pane-splitter.mjs";
 import {
   cameraViewForDirection, navigationDragMode, orbitCameraFromDrag, renderLathe3d, renderViewCube, standardCameraView,
   zoomCameraAt,
@@ -234,11 +236,16 @@ const NUMERIC_MACHINE_FIELDS = new Set([
 
 const $ = (id) => document.getElementById(id);
 const elements = {
-  canvas: $("plotCanvas"), wrap: $("canvasWrap"), input: $("gcodeInput"), fileInput: $("fileInput"),
+  workspace: $("workspace"), canvas: $("plotCanvas"), wrap: $("canvasWrap"), input: $("gcodeInput"), fileInput: $("fileInput"),
   geometryFileInput: $("geometryFileInput"), importGeometry: $("importGeometryButton"),
   stepFileInput: $("stepFileInput"), importStep: $("importStepButton"),
   programPanel: $("programPanel"), editor: $("gcodeEditor"), activeLine: $("gcodeActiveLine"), lineNumbers: $("gcodeLineNumbers"),
+  syntaxLayer: $("gcodeSyntaxLayer"), syntaxCode: $("gcodeSyntaxCode"), paneSplitter: $("programPaneSplitter"), graphicsPanel: $("graphicsPanel"),
   activeLineNumber: $("gcodeActiveNumber"), searchHighlights: $("gcodeSearchHighlights"), riskHighlights: $("gcodeRiskHighlights"),
+  codeInspector: $("gcodeCodeInspector"), codeInspectorCode: $("gcodeCodeInspectorCode"),
+  codeInspectorStatus: $("gcodeCodeInspectorStatus"), codeInspectorTitle: $("gcodeCodeInspectorTitle"),
+  codeInspectorDescription: $("gcodeCodeInspectorDescription"), codeInspectorScope: $("gcodeCodeInspectorScope"),
+  codeInspectorClose: $("gcodeCodeInspectorClose"),
   programSearchPanel: $("programSearchPanel"), programSearchInput: $("programSearchInput"),
   programSearchStatus: $("programSearchStatus"), programSearchPrevious: $("programSearchPrevious"),
   programSearchNext: $("programSearchNext"), programSearchClose: $("programSearchClose"),
@@ -381,6 +388,10 @@ const preferenceIds = [
 let installPrompt = null;
 let persistTimer = null;
 let programCursorFrame = null;
+let programLanguageFrame = null;
+let programLanguageSource = "";
+let programLanguage = tokenizeGcodeLanguage("");
+let programSyntaxDisplayEnabled = true;
 const programSearch = {
   matches: [], index: -1, kind: "empty", anchorStart: 0, anchorEnd: 0, selectionDirection: "none",
   anchorScrollTop: 0, anchorScrollLeft: 0,
@@ -390,9 +401,207 @@ const STOCK_FRAME_CACHE_LIMIT = 64;
 const THREE_D_SETTLE_MS = 850;
 const MAX_DXF_BYTES = 25 * 1024 * 1024;
 const PROGRAM_EDITOR_LINE_LIMIT = MILL_PARSE_LIMITS.maxRecords;
+const PROGRAM_SYNTAX_SOURCE_LIMIT = 1024 * 1024;
+const PROGRAM_SYNTAX_TOKEN_LIMIT = 25_000;
+const PROGRAM_SYNTAX_LINE_LIMIT = 512;
+const PROGRAM_INSPECT_LINE_LIMIT = 4096;
 const TOOL_LIBRARY_SOURCE_BY_ID = new Map(TOOL_LIBRARY_CATALOG.sources.map((source) => [source.id, source]));
 const LIVE_TOOL_LIBRARY_SOURCE_BY_ID = new Map(LIVE_TOOL_LIBRARY_CATALOG.sources.map((source) => [source.id, source]));
 const MILLING_TOOL_LIBRARY_SOURCE_BY_ID = new Map(MILLING_TOOL_LIBRARY_CATALOG.sources.map((source) => [source.id, source]));
+const PROGRAM_SYNTAX_STYLED_TYPES = new Set([
+  "comment", "sequence", "g-code", "m-code", "tool", "speed", "feed", "coordinate", "address",
+  "number", "punctuation", "malformed-word", "unknown",
+]);
+
+function positionProgramSyntax() {
+  elements.editor.classList.toggle(
+    "syntax-horizontal-fallback",
+    programSyntaxDisplayEnabled && elements.input.scrollLeft > 0.5,
+  );
+  elements.syntaxCode.style.transform = `translate(${-elements.input.scrollLeft}px, ${-elements.input.scrollTop}px)`;
+}
+
+function programSyntaxLineLimitExceeded(source) {
+  let lineCharacters = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] === "\r" || source[index] === "\n") lineCharacters = 0;
+    else if (++lineCharacters > PROGRAM_SYNTAX_LINE_LIMIT) return true;
+  }
+  return false;
+}
+
+function showNativeProgramText(source, message) {
+  programLanguageSource = source;
+  programLanguage = {
+    sourceLength: source.length,
+    lineCount: null,
+    complete: false,
+    tokens: [],
+    diagnostics: [{severity: "warning", code: "syntax-display-limit", message, offset: 0}],
+  };
+  programSyntaxDisplayEnabled = false;
+  elements.syntaxCode.replaceChildren();
+  elements.editor.classList.remove("syntax-ready");
+  elements.syntaxLayer.title = message;
+  positionProgramSyntax();
+  if (!elements.codeInspector.hidden) inspectProgramTokenAtCaret({hideWhenNone: true});
+}
+
+function renderProgramSyntax() {
+  if (programLanguageFrame !== null) {
+    cancelAnimationFrame(programLanguageFrame);
+    programLanguageFrame = null;
+  }
+  const source = elements.input.value;
+  if (source.length > PROGRAM_SYNTAX_SOURCE_LIMIT) {
+    showNativeProgramText(
+      source,
+      `Native editor shown because syntax coloring is limited to ${PROGRAM_SYNTAX_SOURCE_LIMIT.toLocaleString("en-US")} characters. Click help remains available for an individual bounded line.`,
+    );
+    return;
+  }
+  if (programSyntaxLineLimitExceeded(source)) {
+    showNativeProgramText(
+      source,
+      `Native editor shown because a line exceeds the ${PROGRAM_SYNTAX_LINE_LIMIT.toLocaleString("en-US")}-character color-alignment limit. Click help remains available for an individual bounded line.`,
+    );
+    return;
+  }
+  const language = tokenizeGcodeLanguage(source, {
+    maxSourceCharacters: PROGRAM_SYNTAX_SOURCE_LIMIT,
+    maxTokens: PROGRAM_SYNTAX_TOKEN_LIMIT,
+  });
+  if (!language.complete) {
+    showNativeProgramText(
+      source,
+      language.diagnostics[0]?.message || "Native editor shown because syntax coloring reached its bounded local limit.",
+    );
+    return;
+  }
+  programLanguage = language;
+  programLanguageSource = source;
+  programSyntaxDisplayEnabled = true;
+  const fragment = document.createDocumentFragment();
+  for (const token of programLanguage.tokens) {
+    if (!PROGRAM_SYNTAX_STYLED_TYPES.has(token.type)) {
+      fragment.append(document.createTextNode(token.text));
+      continue;
+    }
+    const span = document.createElement("span");
+    span.className = `gcode-token-${token.type}`;
+    if (token.malformed) span.classList.add("gcode-token-malformed-word");
+    span.textContent = token.text;
+    fragment.append(span);
+  }
+  elements.syntaxCode.replaceChildren(fragment);
+  elements.editor.classList.add("syntax-ready");
+  elements.syntaxLayer.title = "Color-coded G-code. Click a code in the editor to identify it.";
+  positionProgramSyntax();
+  if (!elements.codeInspector.hidden) inspectProgramTokenAtCaret({hideWhenNone: true});
+}
+
+function scheduleProgramSyntaxRender() {
+  if (programLanguageFrame !== null) return;
+  programLanguageFrame = requestAnimationFrame(() => {
+    programLanguageFrame = null;
+    renderProgramSyntax();
+  });
+}
+
+function programLanguageContext() {
+  const profile = currentMachineProfile();
+  return {
+    machineType: isMillMode() ? "mill" : "lathe",
+    dialect: profile?.liveToolDialect === "haas-lathe-ngc" ? "haas-lathe-ngc" : "generic",
+  };
+}
+
+function nonCodeTokenIdentification(token) {
+  const exact = token.normalized || token.text.trim() || token.text;
+  const base = {
+    status: "not-code", code: exact, title: "Program word", description: "This token is not a G or M command.",
+    scope: "Its meaning is not inferred without the surrounding block and selected controller context.",
+  };
+  if (token.type === "sequence") return {...base, title: `${exact} · sequence number`, description: "Labels this source block for navigation and supported P/Q contour references.", scope: "A sequence number does not command motion by itself."};
+  if (token.type === "tool") return {...base, title: `${exact} · tool call`, description: "Selects the exact program tool key used by this block.", scope: "Tool assignment is optional for command-centerline backplotting. Confirmed tool geometry is still required for tool-dependent stock removal and cutter authority."};
+  if (token.type === "speed") return {...base, title: `${exact} · spindle speed word`, description: "Supplies a speed value to the active spindle mode.", scope: "RPM or surface-speed interpretation depends on the active G-code and controller context; the word alone does not establish a safe machine speed."};
+  if (token.type === "feed") return {...base, title: `${exact} · feed word`, description: "Supplies a feed value to the active motion and feed mode.", scope: "Per-minute, per-revolution, and cycle-specific interpretation depends on established modal state."};
+  if (token.type === "coordinate") return {...base, title: `${exact} · coordinate / geometry word`, description: `Supplies an ${token.address}-address value to the active command.`, scope: "Axis, arc-center, radius, or auxiliary meaning depends on the active plane, motion, controller, and units; no standalone meaning is guessed."};
+  if (token.type === "address") return {...base, title: `${exact} · address word`, description: `Supplies a ${token.address}-address value to the active command.`, scope: "The local inspector does not assign it a standalone controller meaning."};
+  if (token.type === "comment") return {...base, status: token.malformed ? "malformed" : "not-code", code: "COMMENT", title: token.malformed ? "Malformed program comment" : "Program comment", description: "Human-readable program text; it does not command modeled motion.", scope: token.malformed ? "This comment is malformed and may change how a controller reads the rest of the line." : "Comment conventions can still vary by controller."};
+  if (token.type === "malformed-word" || token.malformed) return {...base, status: "malformed", title: `${exact || "TOKEN"} · malformed`, description: "This is not a complete numeric address word.", scope: "Review the exact machine/control syntax; G-Code Studio will not repair or infer the missing value."};
+  if (token.type === "unknown" || token.type === "unparsed") return {...base, status: "unresolved", title: `${exact || "TOKEN"} · unresolved`, description: "This source text is outside the bounded local syntax classification.", scope: "No controller meaning is guessed or executed."};
+  if (token.type === "punctuation" && token.text === "#") return {...base, status: "unresolved", title: "# · macro expression marker", description: "Macro-variable and expression execution is not modeled by the current local engine.", scope: "Treat the affected control flow and values as unresolved; no expression result is guessed."};
+  if (token.type === "punctuation" && token.text === "/") return {...base, status: "unresolved", title: "/ · optional block marker", description: "Marks a block whose execution can depend on the control's block-delete state.", scope: "Reachability is unresolved unless that machine setting is explicitly established; G-Code Studio does not guess it."};
+  if (token.type === "punctuation" && (token.text === "%" || token.text === "$")) return {...base, title: `${token.text} · tape boundary marker`, description: "Marks a program transport boundary in the bounded local source envelope.", scope: `${token.text} is accepted only in its exact supported boundary position; it is not a machining command.`};
+  return base;
+}
+
+function programLineNumberAtOffset(source, offset) {
+  let line = 1;
+  for (let index = 0; index < offset; index += 1) {
+    if (source[index] === "\n" || (source[index] === "\r" && source[index + 1] !== "\n")) line += 1;
+  }
+  return line;
+}
+
+function programTokenAtCaret(offset) {
+  if (programSyntaxDisplayEnabled) return gcodeTokenAtOffset(programLanguage, offset);
+  const source = elements.input.value;
+  const caret = Math.max(0, Math.min(source.length, Number(offset) || 0));
+  let lineStart = caret;
+  while (lineStart > 0 && source[lineStart - 1] !== "\n" && source[lineStart - 1] !== "\r") {
+    lineStart -= 1;
+    if (caret - lineStart > PROGRAM_INSPECT_LINE_LIMIT) return null;
+  }
+  let lineEnd = caret;
+  while (lineEnd < source.length && source[lineEnd] !== "\n" && source[lineEnd] !== "\r") {
+    lineEnd += 1;
+    if (lineEnd - lineStart > PROGRAM_INSPECT_LINE_LIMIT) return null;
+  }
+  const lineSource = source.slice(lineStart, lineEnd);
+  const localLanguage = tokenizeGcodeLanguage(lineSource, {
+    maxSourceCharacters: PROGRAM_INSPECT_LINE_LIMIT,
+    maxTokens: PROGRAM_INSPECT_LINE_LIMIT,
+  });
+  if (!localLanguage.complete) return null;
+  const localToken = gcodeTokenAtOffset(localLanguage, caret - lineStart);
+  if (!localToken) return null;
+  const lineOffset = programLineNumberAtOffset(source, lineStart) - 1;
+  return {
+    ...localToken,
+    start: localToken.start + lineStart,
+    end: localToken.end + lineStart,
+    line: localToken.line + lineOffset,
+    endLine: localToken.endLine + lineOffset,
+  };
+}
+
+function inspectProgramTokenAtCaret({hideWhenNone = false} = {}) {
+  if (programLanguageSource !== elements.input.value) renderProgramSyntax();
+  const token = programTokenAtCaret(elements.input.selectionStart);
+  if (!token) {
+    if (hideWhenNone) elements.codeInspector.hidden = true;
+    return;
+  }
+  const identified = identifyGcodeToken(token, programLanguageContext());
+  const detail = identified.status === "not-code" ? nonCodeTokenIdentification(token) : identified;
+  const statusLabels = {
+    modeled: "MODELED HERE",
+    "not-modeled-here": "NOT MODELED HERE",
+    unresolved: "UNRESOLVED",
+    malformed: "MALFORMED",
+    "not-code": "PROGRAM WORD",
+  };
+  const profile = currentMachineProfile();
+  elements.codeInspector.dataset.status = detail.status;
+  elements.codeInspectorCode.textContent = detail.code || token.normalized || token.text.trim() || "TOKEN";
+  elements.codeInspectorStatus.textContent = statusLabels[detail.status] || "IDENTIFIED";
+  elements.codeInspectorTitle.textContent = detail.title;
+  elements.codeInspectorDescription.textContent = detail.description;
+  elements.codeInspectorScope.textContent = `Line ${token.line} · ${detail.scope} Selected context: ${isMillMode() ? "3-axis mill / Fanuc-style" : `lathe / ${profile?.name || "generic controller"}`}.`;
+  elements.codeInspector.hidden = false;
+}
 
 function programEditorMetrics() {
   const style = getComputedStyle(elements.input);
@@ -656,6 +865,8 @@ function markProgramChanged() {
   state.highlightedSourceLine = null;
   positionProgramLineHighlight();
   renderProgramLineNumbers();
+  elements.editor.classList.remove("syntax-ready");
+  scheduleProgramSyntaxRender();
   elements.status.textContent = "Program changed — plot to refresh";
   updateStockRemovedStatus(null, "PLOT REQUIRED");
   updateTransport();
@@ -1015,6 +1226,7 @@ function loadProgram(name, content, {bundledSample = false, machineMode = null} 
   state.bundledSample = bundledSample === true;
   state.bundledStepReference = false;
   elements.input.value = content;
+  elements.codeInspector.hidden = true;
   elements.fileName.textContent = name || "program.nc";
   elements.programSearchPanel.hidden = true;
   elements.programReplaceRow.hidden = true;
@@ -6660,6 +6872,7 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
   updateReferenceComparison();
   renderReferenceGeometryUi();
   renderProgramLineNumbers();
+  renderProgramSyntax();
   if (!mill) renderProgramToolAssignments();
   const cycleStatus = state.parsed.cycles.filter((cycle) => cycle.code !== "G70").map((cycle) => `${cycle.code} ${cycle.passes} passes`).join(" • ");
   if (mill) {
@@ -7549,6 +7762,7 @@ elements.canvas.addEventListener("pointerleave", () => {
 });
 elements.input.addEventListener("scroll", () => {
   positionProgramLineHighlight();
+  positionProgramSyntax();
   renderProgramSearchHighlights();
   renderProgramRiskHighlights();
 });
@@ -7565,13 +7779,24 @@ function scheduleProgramCursorSync() {
   programCursorFrame = requestAnimationFrame(() => {
     programCursorFrame = null;
     syncProgramLineToCursor();
+    if (!elements.codeInspector.hidden) inspectProgramTokenAtCaret({hideWhenNone: true});
   });
 }
-elements.input.addEventListener("click", () => syncProgramLineToCursor({force: true}));
+document.addEventListener("selectionchange", () => {
+  if (document.activeElement === elements.input) scheduleProgramCursorSync();
+});
+elements.input.addEventListener("click", () => {
+  syncProgramLineToCursor({force: true});
+  inspectProgramTokenAtCaret({hideWhenNone: true});
+});
 elements.input.addEventListener("keydown", (event) => {
   if (programCursorNavigationKey(event.key)) scheduleProgramCursorSync();
 });
 elements.input.addEventListener("input", markProgramChanged);
+elements.codeInspectorClose.addEventListener("click", () => {
+  elements.codeInspector.hidden = true;
+  elements.input.focus({preventScroll: true});
+});
 elements.programSearchInput.addEventListener("input", refreshProgramSearch);
 elements.programSearchInput.addEventListener("keydown", (event) => {
   if (event.key === "Escape") { event.preventDefault(); closeProgramSearch(); }
@@ -7672,6 +7897,30 @@ if ("serviceWorker" in navigator && !window.pywebview) {
     .then((registration) => registration.update())
     .catch(() => {}));
 }
+
+createPaneSplitter({
+  container: elements.workspace,
+  separator: elements.paneSplitter,
+  primaryPane: elements.programPanel,
+  orientation: "vertical",
+  minSize: () => window.matchMedia("(min-width: 1101px)").matches ? 255 : 230,
+  maxSize: 720,
+  secondaryMinSize: () => window.matchMedia("(min-width: 1101px)").matches
+    ? 740
+    : 408,
+  defaultSize: 330,
+  step: 16,
+  largeStep: 64,
+  applySize: (size) => elements.workspace.style.setProperty("--program-pane-width", `${size}px`),
+  onChange: () => requestAnimationFrame(() => {
+    resizeCanvas();
+    positionProgramSyntax();
+    renderProgramSearchHighlights();
+    renderProgramRiskHighlights();
+  }),
+  label: "Resize program and graphics panes",
+  controls: [elements.programPanel.id, elements.graphicsPanel.id],
+});
 
 new ResizeObserver(resizeCanvas).observe(elements.wrap);
 new ResizeObserver(() => {
