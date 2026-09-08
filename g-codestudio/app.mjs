@@ -937,6 +937,7 @@ function machinePlotOptions(profile) {
     haasIntegerFeedScale: profile.haasIntegerFeedScale || "unknown",
     g76Settings: latheControllerSettings(state.latheControllerSettings, profile.id),
     cutterCompensationContract: profile.liveToolDialect === 'haas-lathe-ngc' ? 'haas-lathe-ngc-nose-v1' : null,
+    retainBlockedPathAfterUnsupportedM: true,
   };
 }
 
@@ -2954,16 +2955,23 @@ function strokeComparisonItems(surface, items, toScreen, color, lineWidth, shado
   for (const item of items) {
     const points = (item.segment.points?.length ? item.segment.points : [item.segment.start, item.segment.end]).filter(Boolean).map(geometryDisplayPoint);
     if (points.length < 2) continue;
+    const blocked = Boolean(
+      item.segment.verificationBlocked
+      || item.segment.liveToolBlocked
+      || item.segment.pathPreviewOnly
+      || item.segment.cAxisMotion?.blocked
+    );
+    const strokeColor = blocked ? "#fb7185" : color;
     context.beginPath();
     points.forEach((point, index) => {
       const screen = toScreen(point);
       if (index) context.lineTo(screen.x, screen.y); else context.moveTo(screen.x, screen.y);
     });
-    context.strokeStyle = color;
-    context.lineWidth = lineWidth;
-    context.setLineDash(item.segment.type === "rapid" ? [6, 4] : []);
-    context.shadowColor = shadowBlur ? color : "transparent";
-    context.shadowBlur = shadowBlur;
+    context.strokeStyle = strokeColor;
+    context.lineWidth = blocked ? Math.max(2.8, lineWidth) : lineWidth;
+    context.setLineDash(blocked ? [2, 2] : (item.segment.type === "rapid" ? [6, 4] : []));
+    context.shadowColor = blocked || shadowBlur ? strokeColor : "transparent";
+    context.shadowBlur = blocked ? Math.max(6, shadowBlur) : shadowBlur;
     context.stroke();
   }
   context.setLineDash([]);
@@ -2974,6 +2982,7 @@ function strokeComparisonOverlay(surface, geometry, bounds, scale) {
   const layers = overlayGeometryLayers(geometry);
   const toScreen = drawComparisonGrid(surface, bounds, scale);
   strokeComparisonItems(surface, layers.common, toScreen, "rgba(142, 163, 168, .72)", 1.35, 0);
+  strokeComparisonItems(surface, layers.blockedCommon, toScreen, "#fb7185", 2.8, 6);
   strokeComparisonItems(surface, layers.originalOnly, toScreen, "#f59e0b", 4.6, 8);
   strokeComparisonItems(surface, layers.revisedOnly, toScreen, "#fb4f68", 2.25, 8);
 }
@@ -2989,6 +2998,8 @@ function renderComparisonGraphics() {
     revisedCAxisMotions: revisedParsed.cAxisMotions,
     originalUnresolvedOperations: originalParsed.liveToolAttempts,
     revisedUnresolvedOperations: revisedParsed.liveToolAttempts,
+    originalParserWarnings: originalParsed.warnings,
+    revisedParserWarnings: revisedParsed.warnings,
   });
   state.comparisonGeometry = geometry;
   const originalLabel = `${geometry.originalOnly} original-only move${geometry.originalOnly === 1 ? "" : "s"}`;
@@ -2998,7 +3009,7 @@ function renderComparisonGraphics() {
   $("graphicsInfoDifferenceCount").textContent = `${geometry.revisedOnly} difference${geometry.revisedOnly === 1 ? "" : "s"}`;
   const noMotion = !geometry.original.length && !geometry.revised.length;
   $("graphicsVerdict").textContent = geometry.verificationUnresolved
-    ? `PATH ONLY · ${geometry.unresolvedOriginal + geometry.unresolvedRevised} unresolved operation${geometry.unresolvedOriginal + geometry.unresolvedRevised === 1 ? "" : "s"}`
+    ? "PATH ONLY · comparison unresolved by blocked program behavior"
     : (noMotion
       ? "No comparable motion was parsed"
       : (geometry.originalOnly || geometry.revisedOnly ? `${geometry.revisedOnly} revised toolpath difference${geometry.revisedOnly === 1 ? "" : "s"}` : "Toolpaths match geometrically"));
@@ -5544,7 +5555,7 @@ function strokeSegment(segment, pending = false) {
   const live = isLiveToolSegment(segment);
   const rapid = isRapidMotion(segment);
   const blocked = Boolean(segment.verificationBlocked || segment.liveToolBlocked || toolRotationReport().segments.has(segment));
-  const collision = !pending && !live && collisionPointForSegment(segment, collisionOptions());
+  const collision = !pending && !live && !blocked && collisionPointForSegment(segment, collisionOptions());
   ctx.strokeStyle = pending
     ? (blocked ? "#7f1d1d" : (live ? "#80506e" : "#64748b"))
     : (blocked || collision ? "#fb7185" : (live ? "#f472b6" : (colors[segment.type] || "#94a3b8")));
@@ -6121,6 +6132,9 @@ function draw() {
   renderGeometryInspector();
   updateDimensionControls();
   const liveAttempts = isMillMode() ? [] : liveToolOperations();
+  const firstBlockingWarning = (state.parsed.warnings || []).find((warning) => (
+    warning?.verificationBlocked === true && Number.isFinite(warning.line)
+  ));
   elements.empty.hidden = state.parsed.segments.length > 0;
   elements.empty.textContent = liveAttempts.length
     ? (liveAttempts.some((attempt) => attempt.blocked)
@@ -6130,7 +6144,9 @@ function draw() {
       ? (millPositionAt(state.parsed, {sourceLine: state.programLine, visibleCount: state.visibleBlocks})
         ? "Mill XYZ baseline established; no incoming rapid path was invented"
         : "No drawable mill motion — see Program notes")
-      : "No motion blocks found");
+      : firstBlockingWarning
+        ? `Path blocked at line ${firstBlockingWarning.line} — see Program notes`
+        : "No motion blocks found");
 }
 
 function updateBoundsReadout(bounds) {
@@ -6141,7 +6157,8 @@ function updateBoundsReadout(bounds) {
   const unresolvedLive = liveSummary.notDisplayed.length > 0;
   const pathOnly = hasYBounds
     || liveSummary.operations.length > 0
-    || (state.parsed.cAxisMotions || []).length > 0;
+    || (state.parsed.cAxisMotions || []).length > 0
+    || state.parsed.machineState?.blockedPathPreview === true;
   output.className = "";
   if (!bounds) {
     output.textContent = pathOnly ? "PATH ONLY · UNRESOLVED" : "—";
@@ -6271,8 +6288,9 @@ function updateStats() {
     return;
   }
   const segments = state.parsed.segments;
-  const rapid = segments.filter((segment) => segment.type === "rapid").reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
-  const cut = segments.filter((segment) => !isRapidMotion(segment) && !isLiveToolSegment(segment)).reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
+  const verifiedSegments = segments.filter((segment) => !segment.verificationBlocked && !segment.liveToolBlocked);
+  const rapid = verifiedSegments.filter((segment) => segment.type === "rapid").reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
+  const cut = verifiedSegments.filter((segment) => !isRapidMotion(segment) && !isLiveToolSegment(segment)).reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
   const bounds = programBounds(segments, xScale());
   const collisionEvaluation = evaluateCollisions(segments, {
     ...collisionOptions(),
@@ -6316,7 +6334,8 @@ function updateStats() {
   const collisionStatus = $("collisionStatus");
   const pathOnlyCollisions = collisionEvaluation.warnings.length > 0
     || liveToolOperations().length > 0
-    || (state.parsed.cAxisMotions || []).length > 0;
+    || (state.parsed.cAxisMotions || []).length > 0
+    || state.parsed.machineState?.blockedPathPreview === true;
   collisionStatus.textContent = collisions.length
     ? `${collisions.length} HIT${collisions.length === 1 ? "" : "S"}${pathOnlyCollisions ? " · PATH ONLY" : ""}`
     : pathOnlyCollisions ? "PATH ONLY" : "CLEAR";
@@ -6324,7 +6343,11 @@ function updateStats() {
   collisionStatus.title = pathOnlyCollisions
     ? "The configured 2D chuck keep-out was evaluated for turning paths only. Live-tool 3D cutter/holder sweeps are not modeled."
     : "Configured 2D chuck keep-out status for supported turning paths.";
-  const notes = [...state.parsed.warnings, ...assignmentWarnings()];
+  const primaryProgramBlockers = state.parsed.warnings.filter((warning) => warning.verificationBlocked === true);
+  const notes = [
+    ...state.parsed.warnings.filter((warning) => warning.verificationBlocked !== true),
+    ...assignmentWarnings(),
+  ];
   const rapidAssumption = cycleTime.limitations.find((limitation) => limitation.includes("rapid timing assumes"));
   if (rapidAssumption) notes.unshift({line: null, info: true, message: rapidAssumption});
   if (collisions.length) {
@@ -6375,6 +6398,7 @@ function updateStats() {
     if (cycle.code === "G70") continue;
     notes.push({line: cycle.line, info: true, message: `${cycle.code} Type ${cycle.type} expanded to ${cycle.passes} roughing passes (P${cycle.p}–Q${cycle.q}).`});
   }
+  notes.unshift(...primaryProgramBlockers);
   renderProgramNotes(notes);
 }
 
@@ -6628,8 +6652,12 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
       : blockingWarnings ? "No drawable mill path · see blocked Program notes" : "No mill motion found";
   } else {
     const liveSummary = liveToolOperationSummary();
+    const blockedPreviewSegments = state.parsed.segments.filter((segment) => segment.pathPreviewOnly).length;
+    const blockedPreviewLine = state.parsed.machineState?.blockedPathPreviewLine;
     elements.status.textContent = state.parsed.segments.length
-      ? `${state.parsed.segments.length} motion blocks${cycleStatus ? ` • ${cycleStatus}` : ""}`
+      ? blockedPreviewSegments
+        ? `${state.parsed.segments.length} motion blocks · PATH ONLY · blocked from line ${blockedPreviewLine}`
+        : `${state.parsed.segments.length} motion blocks${cycleStatus ? ` • ${cycleStatus}` : ""}`
       : liveSummary.operations.length
         ? `No drawable live-tool path · ${liveSummary.blocked.length} blocked · ${liveSummary.notDisplayed.length} not drawn`
         : "No motion found";

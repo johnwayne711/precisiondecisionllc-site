@@ -626,6 +626,8 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
     : GENERIC_MODELED_M_CODES;
   const unsupportedMCode = mCodes.find((code) => !modeledMCodes.has(code));
   if (unsupportedMCode !== undefined) {
+    const retainBlockedPreview = state.retainBlockedPathAfterUnsupportedM
+      && state.liveToolDialect !== "haas-lathe-ngc";
     const liveSpecific = state.liveToolDialect === "haas-lathe-ngc"
       ? [14, 15, 19].includes(unsupportedMCode)
       : [133, 134, 135, 154, 155].includes(unsupportedMCode);
@@ -637,8 +639,14 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
       verificationBlocked: true,
       message: liveSpecific && state.liveToolDialect !== "haas-lathe-ngc"
         ? `M${unsupportedMCode} is machine-builder-specific and cannot be interpreted until a live-tool controller dialect is configured.`
-        : `M${unsupportedMCode} is not modeled for the selected controller; its machine-state or control-flow effects are unknown, so execution is blocked.`,
+        : retainBlockedPreview
+          ? `M${unsupportedMCode} is not modeled for the selected controller; downstream X/Z commands are shown only as a red dashed PATH ONLY preview. Execution, timing, stock, comparison, and clearance remain blocked.`
+          : `M${unsupportedMCode} is not modeled for the selected controller; its machine-state or control-flow effects are unknown, so execution is blocked.`,
     });
+    if (retainBlockedPreview) {
+      beginBlockedPathPreview(state, record);
+      return true;
+    }
     if (stopExecution) invalidateExecutionState(state);
     return false;
   }
@@ -786,6 +794,20 @@ function invalidateExecutionState(state) {
   state.g112PathTainted = true;
   state.turningMode = "unknown";
   state.executionBlocked = true;
+}
+
+function beginBlockedPathPreview(state, record) {
+  state.blockedPathPreview = true;
+  if (!Number.isFinite(state.blockedPathPreviewLine)) {
+    state.blockedPathPreviewLine = record.line;
+  }
+  // Unknown machine commands may change spindle/live-tool state, so none of
+  // that state remains authoritative. X/Z is retained only to draw a visibly
+  // blocked command-path preview; it cannot support time, stock, comparison,
+  // or clearance results.
+  state.spindleRunning = null;
+  state.liveToolRunning = null;
+  state.cAxisEngaged = null;
 }
 
 function noteLiveToolAttempt(record, state, motion = state.motion) {
@@ -1341,6 +1363,10 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
       }
       if (!handled) {
         const liveSpecific = [133, 134, 135, 154, 155].includes(code);
+        if (!liveSpecific && state.retainBlockedPathAfterUnsupportedM) {
+          beginBlockedPathPreview(state, record);
+          continue;
+        }
         state.liveToolRunning = null;
         state.cAxisEngaged = null;
         state.turningMode = "unknown";
@@ -3321,9 +3347,19 @@ export function parseGcode(source, {
   haasIntegerFeedScale: requestedHaasIntegerFeedScale = "unknown",
   g76Settings = null,
   cutterCompensationContract = null,
+  retainBlockedPathAfterUnsupportedM = false,
 } = {}) {
   const lines = source.replace(/\r/g, "").split("\n");
   const records = lines.map(recordFor);
+  const nonblankRecordIndexes = records
+    .filter((record) => stripComments(record.raw).length > 0)
+    .map((record) => record.index);
+  const boundaryDollarIndexes = new Set();
+  for (const index of [nonblankRecordIndexes[0], nonblankRecordIndexes.at(-1)]) {
+    if (Number.isInteger(index) && stripComments(records[index].raw) === "$") {
+      boundaryDollarIndexes.add(index);
+    }
+  }
   const extractedToolCalls = extractProgramToolCalls(source);
   const normalizedDefaultUnits = defaultUnits === "inch" || defaultUnits === "in" ? "in" : "mm";
   const liveToolDialectDefinition = resolveLiveToolDialect(requestedLiveToolDialect);
@@ -3384,6 +3420,9 @@ export function parseGcode(source, {
     blockCurrentMotionLine: null,
     programEnded: false,
     executionBlocked: false,
+    retainBlockedPathAfterUnsupportedM: retainBlockedPathAfterUnsupportedM === true,
+    blockedPathPreview: false,
+    blockedPathPreviewLine: null,
     liveToolAttempts: new Map(),
   };
   const segments = [];
@@ -3447,6 +3486,7 @@ export function parseGcode(source, {
   let semanticExecutionStopIndex = -1;
   for (const record of records) {
     if (state.programEnded || state.executionBlocked) break;
+    if (boundaryDollarIndexes.has(record.index)) continue;
     if (definitionIndexes.has(record.index)) continue;
     if (!validateHaasRecordAddresses(record, state, warnings, {stopExecution: true})) {
       if (state.g112Active || state.unconfiguredG112Active) noteLiveToolAttempt(record, state, null);
@@ -3726,6 +3766,13 @@ export function parseGcode(source, {
     }
   }
 
+  if (Number.isFinite(state.blockedPathPreviewLine)) {
+    const previewStopIndex = state.blockedPathPreviewLine - 1;
+    if (semanticExecutionStopIndex < 0 || previewStopIndex < semanticExecutionStopIndex) {
+      semanticExecutionStopIndex = previewStopIndex;
+    }
+  }
+
   if (pending && state.liveToolDialect === "haas-lathe-ngc") {
     warningOnce(warnings, {
       line: pending.record.line,
@@ -3750,6 +3797,23 @@ export function parseGcode(source, {
       };
     });
     executableToolCalls = toolCalls.filter((call) => call.executable);
+  }
+  if (state.blockedPathPreview && Number.isFinite(state.blockedPathPreviewLine)) {
+    for (const segment of segments) {
+      const executionLine = Number.isFinite(segment.executionLine) ? segment.executionLine : segment.line;
+      if (!Number.isFinite(executionLine) || executionLine < state.blockedPathPreviewLine) continue;
+      segment.verificationBlocked = true;
+      segment.pathPreviewOnly = true;
+      segment.verificationIssues = [...new Set([
+        ...(segment.verificationIssues || []),
+        "unsupported-controller-command-preview",
+      ])];
+    }
+    for (let index = timingEvents.length - 1; index >= 0; index -= 1) {
+      if (Number(timingEvents[index]?.line) >= state.blockedPathPreviewLine) {
+        timingEvents.splice(index, 1);
+      }
+    }
   }
   const spindleEvents = programSpindleEvents(records, definitionIndexes, state.liveToolDialect, semanticExecutionStopIndex);
 
@@ -3803,7 +3867,9 @@ export function parseGcode(source, {
       spindleDirection: state.spindleDirection,
       turningMode: state.turningMode,
       turningPathTainted: state.turningPathTainted,
-      executionBlocked: state.executionBlocked,
+      executionBlocked: state.executionBlocked || state.blockedPathPreview,
+      blockedPathPreview: state.blockedPathPreview,
+      blockedPathPreviewLine: state.blockedPathPreviewLine,
     },
   };
 }

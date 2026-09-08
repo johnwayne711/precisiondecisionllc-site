@@ -642,6 +642,9 @@ export const buildStockGrid = buildStockProfile;
 export function collisionPointForSegment(segment, {
   chuckFaceZ = -80, jawDiameter = 70, clearance = 3, chuckDepth = 18, xScale = 0.5,
 } = {}) {
+  if (segment?.verificationBlocked || segment?.liveToolBlocked) {
+    throw new Error("Verification-blocked collision clearance is unresolved; use evaluateCollisions() and inspect its warnings.");
+  }
   if (isLiveToolSegment(segment)) {
     throw new Error("Live-tool collision clearance is unresolved in the axisymmetric model; use evaluateCollisions() and inspect its warnings.");
   }
@@ -690,6 +693,20 @@ export function evaluateCollisions(segments, options = {}) {
     }
   }
   segments.forEach((segment, segmentIndex) => {
+    if (segment?.verificationBlocked || segment?.liveToolBlocked) {
+      const warning = {
+        line: segment.executionLine || segment.line || null,
+        toolKey: segment.toolKey || null,
+        code: "verification-blocked-collision",
+        message: "A verification-blocked path is displayed for review only; collision clearance is PATH ONLY.",
+      };
+      const key = `${warning.code}|${warning.line}|${warning.toolKey}`;
+      if (!warningKeys.has(key)) {
+        warningKeys.add(key);
+        warnings.push(warning);
+      }
+      return;
+    }
     if (isLiveToolSegment(segment)) {
       const warning = liveToolSimulationWarning(segment, "collision");
       const key = `${warning.code}|${warning.line}|${warning.toolKey}`;
@@ -708,7 +725,7 @@ export function evaluateCollisions(segments, options = {}) {
 export function findCollisions(segments, options = {}) {
   const evaluation = evaluateCollisions(segments, options);
   if (evaluation.warnings.length) {
-    throw new Error("Collision verification is unresolved for one or more live-tool moves; use evaluateCollisions() and inspect both collisions and warnings.");
+    throw new Error("Collision verification is unresolved for one or more verification-blocked or unmodeled paths; use evaluateCollisions() and inspect both collisions and warnings.");
   }
   return evaluation.collisions;
 }

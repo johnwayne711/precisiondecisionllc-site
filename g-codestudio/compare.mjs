@@ -223,6 +223,15 @@ export function comparePrograms(originalSource, revisedSource, {ignoreFormatting
   return {rows, summary, words: summarizeWords(rows)};
 }
 
+function segmentVerificationBlocked(segment) {
+  return Boolean(
+    segment?.verificationBlocked
+    || segment?.liveToolBlocked
+    || segment?.pathPreviewOnly
+    || segment?.cAxisMotion?.blocked
+  );
+}
+
 function geometrySignature(segment, tolerance) {
   const precision = Math.max(0, Math.ceil(-Math.log10(tolerance)));
   const coordinate = (value) => Number.isFinite(Number(value)) ? Number(value).toFixed(precision) : "_";
@@ -237,7 +246,7 @@ function geometrySignature(segment, tolerance) {
     segment.liveTool ? "live" : "turn",
     segment.coordinateMode || "xz",
     segment.plane || "G18",
-    segment.verificationBlocked ? "blocked" : "clear",
+    segmentVerificationBlocked(segment) ? "blocked" : "clear",
     verificationIssues,
     cAxisSemantics,
     segment.unresolvedOperation || "resolved",
@@ -294,11 +303,19 @@ export function compareSegmentGeometry(originalSegments, revisedSegments, {
   revisedCAxisMotions = [],
   originalUnresolvedOperations = [],
   revisedUnresolvedOperations = [],
+  originalParserWarnings = [],
+  revisedParserWarnings = [],
 } = {}) {
   const originalUnresolved = unresolvedOperationSegments(originalUnresolvedOperations);
   const revisedUnresolved = unresolvedOperationSegments(revisedUnresolvedOperations);
   const originalComparable = [...originalSegments, ...standaloneCAxisSegments(originalCAxisMotions), ...originalUnresolved];
   const revisedComparable = [...revisedSegments, ...standaloneCAxisSegments(revisedCAxisMotions), ...revisedUnresolved];
+  const blockedOriginal = originalComparable.filter(segmentVerificationBlocked).length;
+  const blockedRevised = revisedComparable.filter(segmentVerificationBlocked).length;
+  const parserBlockersOriginal = (Array.isArray(originalParserWarnings) ? originalParserWarnings : [])
+    .filter((warning) => warning?.verificationBlocked === true).length;
+  const parserBlockersRevised = (Array.isArray(revisedParserWarnings) ? revisedParserWarnings : [])
+    .filter((warning) => warning?.verificationBlocked === true).length;
   const original = markGeometryDifferences(originalComparable, revisedComparable, tolerance);
   const revised = markGeometryDifferences(revisedComparable, originalComparable, tolerance);
   return {
@@ -308,7 +325,16 @@ export function compareSegmentGeometry(originalSegments, revisedSegments, {
     revisedOnly: revised.filter((item) => item.different).length,
     unresolvedOriginal: originalUnresolved.length,
     unresolvedRevised: revisedUnresolved.length,
-    verificationUnresolved: originalUnresolved.length > 0 || revisedUnresolved.length > 0,
+    blockedOriginal,
+    blockedRevised,
+    parserBlockersOriginal,
+    parserBlockersRevised,
+    verificationUnresolved: originalUnresolved.length > 0
+      || revisedUnresolved.length > 0
+      || blockedOriginal > 0
+      || blockedRevised > 0
+      || parserBlockersOriginal > 0
+      || parserBlockersRevised > 0,
   };
 }
 
@@ -329,7 +355,8 @@ export function overlayGeometryLayers(geometry) {
   const original = geometry?.original || [];
   const revised = geometry?.revised || [];
   return {
-    common: original.filter((item) => !item.different),
+    common: original.filter((item) => !item.different && !segmentVerificationBlocked(item.segment)),
+    blockedCommon: original.filter((item) => !item.different && segmentVerificationBlocked(item.segment)),
     originalOnly: original.filter((item) => item.different),
     revisedOnly: revised.filter((item) => item.different),
   };
