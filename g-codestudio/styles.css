@@ -344,6 +344,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .transport input[type="range"] { min-width: 0; width: 100%; accent-color: var(--accent); }
 .transport span { color: var(--muted); font: 10px "Cascadia Code", Consolas, monospace; white-space: nowrap; }
 .transport select { padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px; background: #0d1728; font-size: 10px; }
+.transport-options { grid-column: 4; grid-row: 1; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.optional-stop-control { display: inline-flex; min-height: 28px; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid #356955; border-radius: 999px; background: #10291f; cursor: pointer; user-select: none; }
+.optional-stop-control[hidden] { display: none; }
+.optional-stop-control input { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
+.optional-stop-control span { color: #b6ccc7; font-size: 8px; text-transform: uppercase; letter-spacing: .04em; }
+.optional-stop-control strong { color: var(--accent); font: 850 8px "Cascadia Code", Consolas, monospace; }
+.optional-stop-control:has(input:not(:checked)) { border-color: #4a5963; background: #111b25; }
+.optional-stop-control:has(input:not(:checked)) strong { color: #aebbc1; }
 .transport-readouts { grid-column: 2 / 5; grid-row: 2; display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; }
 .reader-time { display: flex; align-items: center; gap: 12px; }
 .reader-time > span { display: inline-flex; align-items: baseline; gap: 4px; }
@@ -855,7 +863,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .plot-toolbar { grid-template-columns: minmax(0, 1fr); align-items: start; gap: 7px; }
   .plot-toolbar-left { width: 100%; min-width: 0; flex-wrap: wrap; }
   .transport { gap: 5px 6px; padding: 7px 8px; }
-  .transport-readouts { flex-direction: column; align-items: stretch; gap: 3px; }
+  .transport-options { grid-column: 2 / 5; grid-row: 2; }
+  .transport-readouts { grid-row: 3; flex-direction: column; align-items: stretch; gap: 3px; }
   .reader-time { justify-content: space-between; gap: 6px; }
   .legend { display: none; }
   .readout { justify-self: start; }

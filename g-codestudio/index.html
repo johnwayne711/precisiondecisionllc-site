@@ -229,12 +229,19 @@
             <button id="stepForwardButton" class="step-button" type="button" aria-label="Step forward one program line" title="Next program line">▶</button>
           </div>
           <input id="timeline" type="range" min="0" max="1" value="0" step="1" aria-label="Program line position">
-          <select id="speedSelect" aria-label="Playback speed">
-            <option value="0.5">0.5×</option>
-            <option value="1" selected>1×</option>
-            <option value="2">2×</option>
-            <option value="4">4×</option>
-          </select>
+          <div class="transport-options">
+            <select id="speedSelect" aria-label="Playback speed">
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+            </select>
+            <label id="optionalStopControl" class="optional-stop-control" title="Pause the local reader at M01 optional-stop blocks">
+              <input id="optionalStopToggle" type="checkbox" checked>
+              <span>M01 pause</span>
+              <strong id="optionalStopStatus">ON</strong>
+            </label>
+          </div>
           <div class="transport-readouts">
             <span id="blockReadout">Line 0 / 0</span>
             <span class="reader-time" aria-label="Cycle time at the current program line">

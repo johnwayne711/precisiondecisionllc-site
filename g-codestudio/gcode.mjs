@@ -8,7 +8,7 @@ import {
 
 const MOTION_CODES = new Map([[0, "rapid"], [1, "linear"], [2, "arc-cw"], [3, "arc-ccw"]]);
 const CONTROL_FLOW_M_CODES = new Set([96, 97, 98, 99]);
-const COMMON_MODELED_M_CODES = new Set([0, 2, 3, 4, 5, 8, 9, 30, ...CONTROL_FLOW_M_CODES]);
+const COMMON_MODELED_M_CODES = new Set([0, 1, 2, 3, 4, 5, 8, 9, 30, ...CONTROL_FLOW_M_CODES]);
 const GENERIC_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 133, 134, 135, 154, 155]);
 const HAAS_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 23, 24, 133, 134, 135, 154, 155]);
 const HAAS_UNSUPPORTED_GROUP_01_MOTIONS = new Set([90, 92, 94]);
@@ -612,19 +612,21 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
   const mCodes = record.byLetter.get("M") || [];
   const mLexemes = record.lexemesByLetter?.get("M") || [];
   const invalidProgramStopLexeme = mCodes.findIndex((code, index) => (
-    code === 0 && !/^\+?0+$/.test(mLexemes[index] || "")
+    (code === 0 && !/^\+?0+$/.test(mLexemes[index] || ""))
+    || (code === 1 && !/^\+?0*1$/.test(mLexemes[index] || ""))
   ));
   if (invalidProgramStopLexeme >= 0) {
+    const code = mCodes[invalidProgramStopLexeme];
     warningOnce(warnings, {
       line: record.line,
       code: "non-integer-m-code",
       verificationBlocked: true,
-      message: `M${mLexemes[invalidProgramStopLexeme]} is not an exact unsigned-integer M00 spelling and was not executed by the model.`,
+      message: `M${mLexemes[invalidProgramStopLexeme]} is not an exact unsigned-integer ${code === 0 ? "M00" : "M01"} spelling and was not executed by the model.`,
     });
     if (stopExecution) invalidateExecutionState(state);
     return false;
   }
-  const nonIntegerMCode = mCodes.find((code) => !Number.isInteger(code));
+  const nonIntegerMCode = mCodes.find((code) => !Number.isInteger(code) || code < 0);
   if (nonIntegerMCode !== undefined) {
     warningOnce(warnings, {
       line: record.line,
@@ -635,12 +637,22 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
     if (stopExecution) invalidateExecutionState(state);
     return false;
   }
-  if (mCodes.includes(0) && mCodes.length > 1) {
+  if (mCodes.some((code) => code === 0 || code === 1) && mCodes.length > 1) {
     warningOnce(warnings, {
       line: record.line,
       code: "multiple-m-codes-unsupported",
       verificationBlocked: true,
-      message: "M00 cannot share a block with another M word in the bounded reader; execution is blocked instead of guessing end-of-block precedence.",
+      message: "M00/M01 cannot share a block with another M word in the bounded reader; execution is blocked instead of guessing end-of-block precedence.",
+    });
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
+  if (mCodes.includes(1) && state.optionalStopEnabled === null) {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "optional-stop-state-required",
+      verificationBlocked: true,
+      message: "M01 depends on the Optional Stop switch. Set it explicitly ON or OFF before execution is modeled.",
     });
     if (stopExecution) invalidateExecutionState(state);
     return false;
@@ -674,10 +686,12 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
     if (stopExecution) invalidateExecutionState(state);
     return false;
   }
-  if (state.liveToolDialect !== "haas-lathe-ngc") return true;
-  const unsupportedAxes = ["A", "B", "E", "V"].filter((letter) => record.byLetter.has(letter)
-    && !(letter === "A" && hasG(record, 76)));
-  const invalidToolAddress = (record.lexemesByLetter?.get("T") || []).find((lexeme) => !/^\d{1,4}$/.test(lexeme));
+  const toolLexemes = record.lexemesByLetter?.get("T") || [];
+  const invalidToolAddress = toolLexemes.find((lexeme) => (
+    state.liveToolDialect === "haas-lathe-ngc"
+      ? !/^\d{1,4}$/.test(lexeme)
+      : !/^\d+$/.test(lexeme)
+  ));
   const invalidSequenceAddress = record.byLetter.has("N") && !isUnsignedIntegerWord(record, "N");
   const isContourCycle = hasG(record, 70) || hasG(record, 71) || hasG(record, 72);
   const hasContourReference = record.byLetter.has("P") || record.byLetter.has("Q");
@@ -685,6 +699,37 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
   const invalidContourReference = requiresContourReference
     && (!record.byLetter.has("P") || !record.byLetter.has("Q")
       || !isUnsignedIntegerWord(record, "P") || !isUnsignedIntegerWord(record, "Q"));
+  if (invalidToolAddress !== undefined || invalidSequenceAddress || invalidContourReference) {
+    if (invalidToolAddress !== undefined) {
+      warningOnce(warnings, {
+        line: record.line,
+        code: state.liveToolDialect === "haas-lathe-ngc" ? "invalid-haas-tool-address" : "invalid-tool-address",
+        verificationBlocked: true,
+        message: state.liveToolDialect === "haas-lathe-ngc"
+          ? `N/T REVIEW: Haas lathe T address "T${invalidToolAddress}" must be an exact unsigned one-to-four-digit value; execution is blocked before tool selection.`
+          : `N/T REVIEW: T address "T${invalidToolAddress}" must be an exact unsigned-integer value; execution is blocked before tool selection.`,
+      });
+    } else if (invalidSequenceAddress) {
+      warningOnce(warnings, {
+        line: record.line,
+        code: state.liveToolDialect === "haas-lathe-ngc" ? "invalid-haas-sequence-address" : "invalid-sequence-address",
+        verificationBlocked: true,
+        message: "N/T REVIEW: N sequence identifiers must be exact unsigned integers; execution is blocked instead of rounding or rewriting a label.",
+      });
+    } else {
+      warningOnce(warnings, {
+        line: record.line,
+        code: "invalid-cycle-contour-reference",
+        verificationBlocked: true,
+        message: "N/T REVIEW: G70/G71/G72 P and Q contour references must both be exact unsigned-integer N identifiers; execution is blocked instead of rounding or guessing a contour.",
+      });
+    }
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
+  if (state.liveToolDialect !== "haas-lathe-ngc") return true;
+  const unsupportedAxes = ["A", "B", "E", "V"].filter((letter) => record.byLetter.has(letter)
+    && !(letter === "A" && hasG(record, 76)));
   const feedLexeme = lastWordLexeme(record, "F");
   const feedValue = lastWord(record, "F");
   const invalidFeedAddress = record.byLetter.has("F") && (!(feedValue > 0) || !Number.isFinite(feedValue));
@@ -693,7 +738,6 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
   const ambiguousAddresses = ambiguousHaasIntegerAddresses(record, state, [...HAAS_DEFAULT_TO_FLOAT_ADDRESSES]
     .filter(letter => !(letter === "A" && hasG(record, 76))));
   if (!unsupportedAxes.length && !duplicateAddress
-    && invalidToolAddress === undefined && !invalidSequenceAddress && !invalidContourReference
     && !invalidFeedAddress && !integerFeedAmbiguous && !ambiguousAddresses.length) return true;
   if (unsupportedAxes.length) {
     warningOnce(warnings, {
@@ -708,27 +752,6 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
       code: "duplicate-haas-address",
       verificationBlocked: true,
       message: `Haas block contains more than one ${duplicateAddress} address; execution is blocked instead of selecting one value.`,
-    });
-  } else if (invalidToolAddress !== undefined) {
-    warningOnce(warnings, {
-      line: record.line,
-      code: "invalid-haas-tool-address",
-      verificationBlocked: true,
-      message: `Haas lathe T address "T${invalidToolAddress}" is not an unsigned one-to-four-digit Txxyy value; execution is blocked before tool selection.`,
-    });
-  } else if (invalidSequenceAddress) {
-    warningOnce(warnings, {
-      line: record.line,
-      code: "invalid-haas-sequence-address",
-      verificationBlocked: true,
-      message: "Haas N sequence identifiers must be unsigned integers; execution is blocked instead of rounding a label.",
-    });
-  } else if (invalidContourReference) {
-    warningOnce(warnings, {
-      line: record.line,
-      code: "invalid-cycle-contour-reference",
-      verificationBlocked: true,
-      message: "Haas G70/G71/G72 P and Q contour references must both be unsigned integer sequence identifiers; execution is blocked instead of rounding or guessing a contour.",
     });
   } else if (invalidFeedAddress) {
     warningOnce(warnings, {
@@ -884,7 +907,7 @@ function invalidateUnsupportedPosition(record, state) {
 
 function applyRecordToolCall(record, state, liveToolEvents = null) {
   if (state.blockedPathPreview) return;
-  const call = record.toolCalls?.at(-1);
+  const call = (record.toolCalls || []).filter((candidate) => candidate.executable).at(-1);
   if (!call || state.activeToolCallLine === call.line) return;
   // This Fanuc-style parser applies a T word before any motion in the same
   // block. The exact address remains opaque: leading zeros are retained and
@@ -1335,7 +1358,7 @@ function validateG32ModalRecord(record, state, warnings) {
 
 function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEvents, timingEvents) {
   const mCodes = record.byLetter.get("M") || [];
-  const programStopCode = mCodes.find((code) => code === 0);
+  const programStopCode = mCodes.find((code) => code === 0 || (code === 1 && state.optionalStopEnabled === true));
   const programEndCode = mCodes.find((code) => code === 2 || code === 30);
   if (state.liveToolDialect === "haas-lathe-ngc" && mCodes.length > 1) {
     invalidateExecutionState(state);
@@ -1375,13 +1398,15 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
       continue;
     }
     let handled = false;
-    if (code === 0) {
+    if (code === 0 || code === 1) {
       handled = true;
-      if (!programStopRecorded) {
+      const stopIsActive = code === 0 || state.optionalStopEnabled === true;
+      if (stopIsActive && !programStopRecorded) {
         timingEvents.push({
           type: "program-stop",
           line: record.line,
-          command: "M00",
+          command: code === 0 ? "M00" : "M01",
+          ...(code === 1 ? {optional: true} : {}),
           seconds: null,
           untimed: true,
           phase: "end-of-block",
@@ -1526,10 +1551,11 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
     }
   }
   if (programStopCode !== undefined) {
-    // M00 always pauses the local reader, but physical stop/restart side
-    // effects are controller-specific. The explicit Haas contract documents
-    // a main-spindle stop; generic state becomes unknown instead of guessed.
-    state.spindleRunning = state.liveToolDialect === "haas-lathe-ngc"
+    // M00 always pauses the local reader; M01 does so only when the explicit
+    // Optional Stop switch is ON. Physical stop/restart side effects remain
+    // controller-specific. The explicit Haas M00 contract documents a main-
+    // spindle stop; M01 and generic state become unknown instead of guessed.
+    state.spindleRunning = programStopCode === 0 && state.liveToolDialect === "haas-lathe-ngc"
       ? false
       : (state.spindleRunning === false ? false : null);
     if (state.liveToolDialect === "haas-lathe-ngc" && state.liveToolRunning === true) {
@@ -1540,8 +1566,24 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
         running: null,
         speed: state.liveToolSpeed,
         phase: "end-of-block",
-        command: "M00",
+        command: programStopCode === 0 ? "M00" : "M01",
         reason: "program-stop-live-tool-effect-unresolved",
+      });
+    }
+    if (programStopCode === 1
+      && state.liveToolDialect === "haas-lathe-ngc"
+      && state.cAxisEngaged === true) {
+      state.cAxisEngaged = null;
+      state.cAxisEngagementSource = "unknown";
+      state.cAxisPosition = null;
+      state.cAxisPositionUncertaintyDegrees = null;
+      state.turningMode = "unknown";
+      cAxisEvents.push({
+        line: record.line,
+        engaged: null,
+        phase: "end-of-block",
+        command: "M01",
+        reason: "program-stop-c-axis-effect-unresolved",
       });
     }
   }
@@ -1565,7 +1607,7 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
   }
 }
 
-function programSpindleEvents(records, definitionIndexes, liveToolDialect, semanticExecutionStopIndex = -1, rejectedEndOfBlockMIndexes = new Set()) {
+function programSpindleEvents(records, definitionIndexes, liveToolDialect, optionalStopEnabled, semanticExecutionStopIndex = -1, rejectedEndOfBlockMIndexes = new Set()) {
   const events = [];
   let direction = "unknown";
   let running = null;
@@ -1577,14 +1619,15 @@ function programSpindleEvents(records, definitionIndexes, liveToolDialect, seman
     }
     const rawMCodes = record.byLetter.get("M") || [];
     const mCodes = rejectedEndOfBlockMIndexes.has(record.index)
-      ? rawMCodes.filter((code) => code !== 0)
+      ? rawMCodes.filter((code) => code !== 0 && code !== 1)
       : rawMCodes;
     if (hasExecutionBoundary(record, liveToolDialect)) {
       running = null;
       events.push({line: record.line, direction, running});
       break;
     }
-    const hasProgramStop = mCodes.some((code) => code === 0);
+    const programStopCode = mCodes.find((code) => code === 0 || (code === 1 && optionalStopEnabled === true));
+    const hasProgramStop = programStopCode !== undefined;
     const hasProgramEnd = mCodes.some((code) => code === 2 || code === 30);
     const beforeDirection = direction;
     const beforeRunning = running;
@@ -1600,7 +1643,7 @@ function programSpindleEvents(records, definitionIndexes, liveToolDialect, seman
       }
     }
     if (hasProgramStop) {
-      running = liveToolDialect === "haas-lathe-ngc" || running === false ? false : null;
+      running = (programStopCode === 0 && liveToolDialect === "haas-lathe-ngc") || running === false ? false : null;
     }
     if (hasProgramEnd) running = false;
     if (direction !== beforeDirection || running !== beforeRunning || hasProgramStop || hasProgramEnd) {
@@ -1609,8 +1652,8 @@ function programSpindleEvents(records, definitionIndexes, liveToolDialect, seman
         direction,
         running,
         ...(hasProgramStop ? {
-          command: "M00",
-          reason: liveToolDialect === "haas-lathe-ngc"
+          command: programStopCode === 0 ? "M00" : "M01",
+          reason: programStopCode === 0 && liveToolDialect === "haas-lathe-ngc"
             ? "program-stop"
             : (beforeRunning === false
               ? "program-stop-already-stopped"
@@ -2618,9 +2661,82 @@ function parseReferenceReturn(record, state, xMode, warnings) {
   return segments;
 }
 
-function sequenceIndex(records, sequence) {
-  if (!Number.isSafeInteger(sequence) || sequence < 0) return -1;
-  return records.findIndex((record) => isUnsignedIntegerWord(record, "N") && lastWord(record, "N") === sequence);
+function sequenceCandidates(records, sequence) {
+  if (!Number.isSafeInteger(sequence) || sequence < 0) return {valid: [], malformed: []};
+  const matching = records.filter((record) => (
+    (record.byLetter.get("N") || []).some((value) => value === sequence)
+  ));
+  const valid = matching.filter((record) => (record.byLetter.get("N") || []).length === 1
+    && isUnsignedIntegerWord(record, "N"));
+  return {valid, malformed: matching.filter((record) => !valid.includes(record))};
+}
+
+function sequenceCandidateDescription(record) {
+  const lexemes = record.lexemesByLetter?.get("N") || [];
+  return `${lexemes.map((lexeme) => `N${lexeme}`).join("/")} on source line ${record.line}`;
+}
+
+function integerEquivalentAddressValues(record, letter) {
+  const values = [];
+  for (const lexeme of record.lexemesByLetter?.get(letter) || []) {
+    const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))$/.exec(lexeme);
+    if (!match) continue;
+    const fractionalDigits = match[3] ?? match[4] ?? "";
+    if (/[^0]/.test(fractionalDigits)) continue;
+    const magnitude = BigInt(match[2] || "0");
+    if (match[1] === "-" && magnitude !== 0n) continue;
+    if (magnitude > BigInt(Number.MAX_SAFE_INTEGER)) continue;
+    values.push(Number(magnitude));
+  }
+  return values;
+}
+
+function contourReferenceResolution(records, record) {
+  if ((record.byLetter.get("P") || []).length !== 1 || (record.byLetter.get("Q") || []).length !== 1
+    || !isUnsignedIntegerWord(record, "P") || !isUnsignedIntegerWord(record, "Q")) {
+    return {valid: false, reason: "the cycle must contain exactly one P and one Q, both exact unsigned-integer N references"};
+  }
+  const p = lastWord(record, "P");
+  const q = lastWord(record, "Q");
+  const startCandidates = sequenceCandidates(records, p);
+  const endCandidates = sequenceCandidates(records, q);
+  const startIndexes = startCandidates.valid.map((candidate) => candidate.index);
+  const endIndexes = endCandidates.valid.map((candidate) => candidate.index);
+  const pLabel = `P${lastWordLexeme(record, "P")}`;
+  const qLabel = `Q${lastWordLexeme(record, "Q")}`;
+  const startAmbiguous = startIndexes.length !== 1 || startCandidates.malformed.length > 0;
+  const endAmbiguous = endIndexes.length !== 1 || endCandidates.malformed.length > 0;
+  if (startAmbiguous || endAmbiguous) {
+    const issue = [];
+    if (startIndexes.length === 1 && startCandidates.malformed.length) {
+      issue.push(`${pLabel} has exact ${sequenceCandidateDescription(startCandidates.valid[0])} plus numeric-equivalent malformed ${startCandidates.malformed.map(sequenceCandidateDescription).join(", ")}`);
+    } else if (startIndexes.length === 0) {
+      issue.push(startCandidates.malformed.length
+        ? `${pLabel} matches only malformed ${startCandidates.malformed.map(sequenceCandidateDescription).join(", ")}`
+        : `${pLabel} has no exact N${p} label`);
+    } else if (startIndexes.length > 1) {
+      issue.push(`${pLabel} matches ${startIndexes.length} numeric-equivalent N labels: ${startCandidates.valid.map(sequenceCandidateDescription).join(", ")}`);
+    }
+    if (endIndexes.length === 1 && endCandidates.malformed.length) {
+      issue.push(`${qLabel} has exact ${sequenceCandidateDescription(endCandidates.valid[0])} plus numeric-equivalent malformed ${endCandidates.malformed.map(sequenceCandidateDescription).join(", ")}`);
+    } else if (endIndexes.length === 0) {
+      issue.push(endCandidates.malformed.length
+        ? `${qLabel} matches only malformed ${endCandidates.malformed.map(sequenceCandidateDescription).join(", ")}`
+        : `${qLabel} has no exact N${q} label`);
+    } else if (endIndexes.length > 1) {
+      issue.push(`${qLabel} matches ${endIndexes.length} numeric-equivalent N labels: ${endCandidates.valid.map(sequenceCandidateDescription).join(", ")}`);
+    }
+    return {valid: false, reason: issue.join("; ")};
+  }
+  const startIndex = startIndexes[0];
+  const endIndex = endIndexes[0];
+  if (endIndex < startIndex) {
+    return {valid: false, reason: `${pLabel} resolves after ${qLabel}; reversed contours are not inferred`};
+  }
+  if (record.index >= startIndex && record.index <= endIndex) {
+    return {valid: false, reason: "the cycle call falls inside its own referenced contour"};
+  }
+  return {valid: true, startIndex, endIndex};
 }
 
 function contourFor(records, startIndex, endIndex, state, xMode, warnings) {
@@ -3430,6 +3546,7 @@ export function parseGcode(source, {
   g76Settings = null,
   cutterCompensationContract = null,
   retainBlockedPathAfterUnsupportedM = false,
+  optionalStopEnabled = null,
 } = {}) {
   const lines = source.replace(/\r/g, "").split("\n");
   const records = lines.map(recordFor);
@@ -3502,6 +3619,7 @@ export function parseGcode(source, {
     blockCurrentMotionLine: null,
     programEnded: false,
     executionBlocked: false,
+    optionalStopEnabled: typeof optionalStopEnabled === "boolean" ? optionalStopEnabled : null,
     retainBlockedPathAfterUnsupportedM: retainBlockedPathAfterUnsupportedM === true,
     blockedPathPreview: false,
     blockedPathPreviewLine: null,
@@ -3516,6 +3634,7 @@ export function parseGcode(source, {
   const cAxisMotions = [];
   const rejectedEndOfBlockMIndexes = new Set();
   const definitionIndexes = new Set();
+  const definitionToolIndexes = new Set();
   const rawProgramEndIndex = records.findIndex(hasProgramEnd);
   const rawExecutionStopIndex = records.findIndex((record) => hasProgramEnd(record)
     || hasExecutionBoundary(record, state.liveToolDialect));
@@ -3529,13 +3648,40 @@ export function parseGcode(source, {
     if (!(hasG(record, 70) || hasG(record, 71) || hasG(record, 72))
       || !Number.isFinite(lastWord(record, "P"))
       || !Number.isFinite(lastWord(record, "Q"))) continue;
-    const startIndex = sequenceIndex(records, lastWord(record, "P"));
-    const endIndex = sequenceIndex(records, lastWord(record, "Q"));
-    if (startIndex >= 0 && endIndex >= startIndex) {
+    const resolution = contourReferenceResolution(records, record);
+    if (resolution.valid) {
+      const {startIndex, endIndex} = resolution;
       for (let index = startIndex; index <= endIndex; index += 1) {
         if (!hasProgramEnd(records[index])
           && !hasExecutionBoundary(records[index], state.liveToolDialect)) {
           definitionIndexes.add(index);
+          definitionToolIndexes.add(index);
+        }
+      }
+    } else {
+      const pValues = integerEquivalentAddressValues(record, "P");
+      const qValues = integerEquivalentAddressValues(record, "Q");
+      if (!pValues.length || !qValues.length) continue;
+      const startIndexes = [...new Set(pValues.flatMap((value) => {
+        const candidates = sequenceCandidates(records, value);
+        return [...candidates.valid, ...candidates.malformed].map((candidate) => candidate.index);
+      }))];
+      const endIndexes = [...new Set(qValues.flatMap((value) => {
+        const candidates = sequenceCandidates(records, value);
+        return [...candidates.valid, ...candidates.malformed].map((candidate) => candidate.index);
+      }))];
+      if (startIndexes.length && endIndexes.length) {
+        // An unresolved contour cannot be executed or skipped as one guessed
+        // range. Possible definition T words still cannot become executable
+        // tool changes merely because malformed/duplicate N/P/Q spelling or a
+        // self-containing reference poisoned exact resolution.
+        for (const startIndex of startIndexes) {
+          for (const endIndex of endIndexes) {
+            if (endIndex < startIndex) continue;
+            for (let index = startIndex; index <= endIndex; index += 1) {
+              if (index !== record.index) definitionToolIndexes.add(index);
+            }
+          }
         }
       }
     }
@@ -3543,7 +3689,7 @@ export function parseGcode(source, {
   const programEndIndex = rawProgramEndIndex;
   const executionStopIndex = rawExecutionStopIndex;
   let toolCalls = extractedToolCalls.map((call) => {
-    const definitionOnly = definitionIndexes.has(call.line - 1);
+    const definitionOnly = definitionToolIndexes.has(call.line - 1);
     const afterProgramEnd = programEndIndex >= 0 && call.line - 1 > programEndIndex;
     const afterExecutionStop = executionStopIndex >= 0 && call.line - 1 >= executionStopIndex;
     return {
@@ -3577,7 +3723,7 @@ export function parseGcode(source, {
       continue;
     }
     if (!record.byLetter.size) continue;
-    if (pending && state.liveToolDialect === "haas-lathe-ngc") {
+    if (pending) {
       const isMatchingCycleBlock = hasG(record, pending.code === "G71" ? 71 : 72)
         && record.byLetter.has("P") && record.byLetter.has("Q");
       const hasExecutableContent = [...record.byLetter.keys()].some((letter) => !["N", "O"].includes(letter));
@@ -3591,6 +3737,24 @@ export function parseGcode(source, {
         invalidateExecutionState(state);
         if (semanticExecutionStopIndex < 0) semanticExecutionStopIndex = pending.record.index;
         break;
+      }
+    }
+    const contourCode = hasG(record, 70) ? "G70" : (hasG(record, 71) ? "G71" : (hasG(record, 72) ? "G72" : null));
+    const hasCompleteContourReference = contourCode
+      && record.byLetter.has("P") && record.byLetter.has("Q");
+    if (hasCompleteContourReference) {
+      const resolution = contourReferenceResolution(records, record);
+      if (!resolution.valid) {
+        warningOnce(warnings, {
+          line: record.line,
+          code: "cycle-contour-reference-unresolved",
+          verificationBlocked: true,
+          message: `N/T REVIEW: ${contourCode} cannot find contour blocks uniquely (${resolution.reason}); execution is blocked at this cycle call.`,
+        });
+        pending = null;
+        invalidateExecutionState(state);
+        if (semanticExecutionStopIndex < 0) semanticExecutionStopIndex = record.index;
+        continue;
       }
     }
     if (hasExecutionBoundary(record, state.liveToolDialect)) {
@@ -3708,22 +3872,18 @@ export function parseGcode(source, {
         }
         const call = cycleCall(record, pending, state);
         pending = null;
-        const startIndex = sequenceIndex(records, p);
-        const endIndex = sequenceIndex(records, q);
-        if (startIndex < 0 || endIndex < startIndex) {
-          if (state.liveToolDialect === "haas-lathe-ngc") {
-            warningOnce(warnings, {
-              line: record.line,
-              code: "cycle-contour-reference-unresolved",
-              verificationBlocked: true,
-              message: `${code} cannot find contour blocks P${p} through Q${q}; execution is blocked at the invalid cycle call.`,
-            });
-            invalidateExecutionState(state);
-          } else {
-            warnings.push({line: record.line, message: `${code} cannot find contour blocks P${p} through Q${q}.`});
-          }
+        const resolution = contourReferenceResolution(records, record);
+        if (!resolution.valid) {
+          warningOnce(warnings, {
+            line: record.line,
+            code: "cycle-contour-reference-unresolved",
+            verificationBlocked: true,
+            message: `N/T REVIEW: ${code} cannot find contour blocks uniquely (${resolution.reason}); execution is blocked at this cycle call.`,
+          });
+          invalidateExecutionState(state);
           continue;
         }
+        const {startIndex, endIndex} = resolution;
         if (!Number.isFinite(call.depth) || call.depth <= 0) {
           const message = `${code} needs a positive depth of cut (${code === "G71" ? "U or D" : "W or D"}).`;
           if (state.liveToolDialect === "haas-lathe-ngc") {
@@ -3778,22 +3938,18 @@ export function parseGcode(source, {
       if (hasG(record, 70)) {
         const p = lastWord(record, "P");
         const q = lastWord(record, "Q");
-        const startIndex = sequenceIndex(records, p);
-        const endIndex = sequenceIndex(records, q);
-        if (startIndex < 0 || endIndex < startIndex) {
-          if (state.liveToolDialect === "haas-lathe-ngc") {
-            warningOnce(warnings, {
-              line: record.line,
-              code: "cycle-contour-reference-unresolved",
-              verificationBlocked: true,
-              message: `G70 cannot find contour blocks P${p} through Q${q}; execution is blocked at the invalid cycle call.`,
-            });
-            invalidateExecutionState(state);
-          } else {
-            warnings.push({line: record.line, message: `G70 cannot find contour blocks P${p} through Q${q}.`});
-          }
+        const resolution = contourReferenceResolution(records, record);
+        if (!resolution.valid) {
+          warningOnce(warnings, {
+            line: record.line,
+            code: "cycle-contour-reference-unresolved",
+            verificationBlocked: true,
+            message: `N/T REVIEW: G70 cannot find contour blocks uniquely (${resolution.reason}); execution is blocked at this cycle call.`,
+          });
+          invalidateExecutionState(state);
           continue;
         }
+        const {startIndex, endIndex} = resolution;
         if (state.turningPathTainted) {
           warningOnce(warnings, {
             line: record.line,
@@ -3845,7 +4001,7 @@ export function parseGcode(source, {
       if (segment) segments.push(segment);
     } finally {
       const hardStoppedBeforeEndOfBlock = state.executionBlocked;
-      if (hardStoppedBeforeEndOfBlock && (record.byLetter.get("M") || []).includes(0)) {
+      if (hardStoppedBeforeEndOfBlock && (record.byLetter.get("M") || []).some((code) => code === 0 || code === 1)) {
         rejectedEndOfBlockMIndexes.add(record.index);
       }
       if (!hardStoppedBeforeEndOfBlock && !state.blockedPathPreview) {
@@ -3862,7 +4018,7 @@ export function parseGcode(source, {
     }
   }
 
-  if (pending && state.liveToolDialect === "haas-lathe-ngc") {
+  if (pending) {
     warningOnce(warnings, {
       line: pending.record.line,
       code: "unmatched-two-block-cycle",
@@ -3876,17 +4032,13 @@ export function parseGcode(source, {
   }
 
   if (semanticExecutionStopIndex >= 0) {
-    const previewStopIndex = Number.isFinite(state.blockedPathPreviewLine)
-      ? state.blockedPathPreviewLine - 1
-      : -1;
-    const rawProgramEndIsPreviewOnly = previewStopIndex >= 0
-      && rawProgramEndIndex >= previewStopIndex;
+    const rawProgramEndIsUnreachable = rawProgramEndIndex >= semanticExecutionStopIndex;
     toolCalls = toolCalls.map((call) => {
       if (call.line - 1 < semanticExecutionStopIndex) return call;
       return {
         ...call,
         executable: false,
-        afterProgramEnd: rawProgramEndIsPreviewOnly ? false : call.afterProgramEnd,
+        afterProgramEnd: rawProgramEndIsUnreachable ? false : call.afterProgramEnd,
         afterExecutionStop: true,
         executionContext: "after-blocked-execution",
       };
@@ -3928,13 +4080,11 @@ export function parseGcode(source, {
     records,
     definitionIndexes,
     state.liveToolDialect,
+    state.optionalStopEnabled,
     semanticExecutionStopIndex,
     rejectedEndOfBlockMIndexes,
   );
 
-  if (pending && state.liveToolDialect !== "haas-lathe-ngc") {
-    warnings.push({line: pending.record.line, message: `${pending.code} first block has no matching P/Q cycle block.`});
-  }
   if (warnOnAssumedUnits && state.assumedUnitsUsed) {
     const label = normalizedDefaultUnits === "in" ? "inches" : "millimeters";
     warnings.unshift({line: null, info: true, message: `No G20/G21 was found before motion; Program units are assuming ${label}.`});
@@ -3983,6 +4133,7 @@ export function parseGcode(source, {
       feedMode: state.feedMode,
       spindleRunning: state.spindleRunning,
       spindleDirection: state.spindleDirection,
+      optionalStopEnabled: state.optionalStopEnabled,
       turningMode: state.turningMode,
       turningPathTainted: state.turningPathTainted,
       executionBlocked: state.executionBlocked || state.blockedPathPreview,

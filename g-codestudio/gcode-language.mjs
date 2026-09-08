@@ -91,6 +91,7 @@ const CODE_HELP = new Map([
   ["M0", entry("Program stop", "Pauses the local program reader at the end of this block until the user resumes it.", "Modeled as an unconditional resumable reader event for bounded lathe and mill paths. Downstream commanded geometry remains parseable. Operator-wait duration and controller-specific spindle, coolant, axis, look-ahead, or auxiliary-state effects are not inferred or included in the motion-and-dwell estimate.", ALL_PATH_CONTEXTS, {
     "lathe:haas-lathe-ngc": {title: "Unconditional program stop", description: "Pauses the local program reader at the end of this block until the user resumes it; the documented Haas contract also stops the main spindle and coolant.", scope: "The reader resumes at the following block and the modeled main-spindle state becomes stopped. Downstream commanded geometry remains parseable. Operator-wait duration, coolant state, live-tool behavior, and other machine-specific restart effects are not inferred or included in the motion-and-dwell estimate."},
   })],
+  ["M1", entry("Optional program stop", "Uses the visible M01 pause switch: ON pauses the local reader at the end of this block; OFF continues through it.", "Modeled for bounded lathe paths as a resumable reader choice. It never converts valid downstream command geometry into PATH ONLY or dashed preview geometry. Operator-wait duration and physical spindle, coolant, axis, look-ahead, or auxiliary-state effects remain unknown. The bounded mill reader remains unchanged while mill work is on hold.", LATHE_CONTEXTS)],
   ["M2", entry("Program end", "Ends executable program flow.", "Modeled as an execution boundary by the lathe and mill engines.", ALL_PATH_CONTEXTS)],
   ["M3", entry("Spindle forward", "Starts the modeled main spindle in the M3 direction.", "Modeled for the bounded lathe and mill spindle-state contracts; physical direction still depends on machine setup.", ALL_PATH_CONTEXTS)],
   ["M4", entry("Spindle reverse", "Starts the modeled main spindle in the M4 direction.", "Modeled for the bounded lathe and mill spindle-state contracts; physical direction still depends on machine setup.", ALL_PATH_CONTEXTS)],
@@ -512,6 +513,13 @@ export function identifyGcodeToken(tokenOrText, context = {}) {
       description: "M00 must use an unsigned integer spelling such as M0 or M00.",
     });
   }
+  if (family === "M" && Number(match[2]) === 1 && !/^\+?0*1$/.test(match[2])) {
+    return baseIdentification("malformed", {
+      family,
+      title: "Malformed M01 optional stop",
+      description: "M01 must use an unsigned integer spelling such as M1 or M01.",
+    });
+  }
   const code = normalizeCode(family, match[2]);
   if (!code) {
     return baseIdentification("malformed", {
@@ -548,10 +556,25 @@ export function identifyGcodeToken(tokenOrText, context = {}) {
   }
 
   const selectedContext = normalizedContext(context);
-  const presentation = selectedContext && known.variants[selectedContext.key]
+  let presentation = selectedContext && known.variants[selectedContext.key]
     ? {...known, ...known.variants[selectedContext.key]}
     : known;
   const modeledHere = Boolean(selectedContext && known.contexts.includes(selectedContext.key));
+  if (code === "M1" && modeledHere && typeof context.optionalStopEnabled === "boolean") {
+    presentation = {
+      ...presentation,
+      description: context.optionalStopEnabled
+        ? "The visible M01 pause switch is currently ON, so this block pauses the local reader until Play resumes."
+        : "The visible M01 pause switch is currently OFF, so the local reader continues through this block.",
+    };
+  } else if (code === "M1" && modeledHere) {
+    presentation = {
+      ...presentation,
+      status: "unresolved",
+      title: "Optional Stop state required",
+      description: "No explicit M01 pause state was supplied, so the local reader cannot choose between pausing and continuing.",
+    };
+  }
   const status = presentation.status || (modeledHere ? "modeled" : "not-modeled-here");
   return baseIdentification(status, {
     code,

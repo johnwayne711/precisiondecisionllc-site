@@ -252,7 +252,8 @@ export function estimateCycleTime(parsed, {
     .sort((before, after) => (Number(before?.line) || 0) - (Number(after?.line) || 0));
   const dwell = sourceTimingEvents.reduce((sum, event) => sum + (event.type === "dwell" ? Math.max(0, Number(event.seconds) || 0) : 0), 0);
   const untimedTimingEvents = sourceTimingEvents.filter((event) => event?.untimed === true).length;
-  const programStops = sourceTimingEvents.filter((event) => event?.type === "program-stop").length;
+  const programStopEvents = sourceTimingEvents.filter((event) => event?.type === "program-stop");
+  const programStops = programStopEvents.length;
   if (fallbackRapidXUsed || fallbackRapidZUsed) {
     const axes = fallbackRapidXUsed && fallbackRapidZUsed ? "X and Z" : (fallbackRapidXUsed ? "X" : "Z");
     limitations.add(`${axes} rapid timing assumes ${LEGACY_RAPID_RATE_IPM} IPM (${LEGACY_RAPID_RATE_MM_PER_MINUTE.toLocaleString("en-US")} mm/min), a conservative older-machine fallback.`);
@@ -267,7 +268,9 @@ export function estimateCycleTime(parsed, {
     limitations.add("C-axis rapid timing needs a confirmed machine C rapid rate.");
   }
   if (programStops) {
-    limitations.add(`${programStops} M00 program stop${programStops === 1 ? " has" : "s have"} unknown operator-response duration and ${programStops === 1 ? "is" : "are"} excluded from cycle-time totals.`);
+    const commands = [...new Set(programStopEvents.map((event) => event.command).filter(Boolean))];
+    const commandLabel = commands.length ? commands.join("/") : "program";
+    limitations.add(`${programStops} ${commandLabel} program stop${programStops === 1 ? " has" : "s have"} unknown operator-response duration and ${programStops === 1 ? "is" : "are"} excluded from cycle-time totals.`);
   }
   if (untimedSegments) limitations.add(`${untimedSegments} motion block${untimedSegments === 1 ? " is" : "s are"} missing feed, spindle, or rapid-rate data; a starting position may also be unresolved.`);
   if (blockedSegments) limitations.add(`${blockedSegments} verification-blocked motion block${blockedSegments === 1 ? " is" : "s are"} excluded from cycle-time claims.`);

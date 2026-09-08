@@ -122,12 +122,17 @@ export function advanceExecutionPosition(segments, totalLines, position, directi
   return {line, visibleBlocks};
 }
 
-export function programStopAtPosition(timingEvents, segments, position) {
+export function programStopEventAtPosition(timingEvents, segments, position) {
   const line = Number(position?.line ?? position?.programLine);
-  if (!Number.isInteger(line) || line <= 0 || !Array.isArray(timingEvents)) return false;
-  if (!timingEvents.some((event) => event?.type === "program-stop" && Number(event.line) === line)) return false;
+  if (!Number.isInteger(line) || line <= 0 || !Array.isArray(timingEvents)) return null;
+  const event = timingEvents.find((candidate) => candidate?.type === "program-stop" && Number(candidate.line) === line);
+  if (!event) return null;
   const visibleBlocks = Math.max(0, Math.min(segments?.length || 0, Number(position?.visibleBlocks) || 0));
-  return visibleBlocks >= executionRangeForSourceLine(segments, line).end;
+  return visibleBlocks >= executionRangeForSourceLine(segments, line).end ? event : null;
+}
+
+export function programStopAtPosition(timingEvents, segments, position) {
+  return Boolean(programStopEventAtPosition(timingEvents, segments, position));
 }
 
 export function programEndAtPosition(programEndLine, segments, position) {

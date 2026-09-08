@@ -68,7 +68,7 @@ import {
 import {
   advanceExecutionPosition, blockedPathPreviewAtPosition, entryVisibleBlocksForSourceLine, executionLineForPosition, executionRangeForSourceLine,
   graphicsHitAt, graphicsSelectionEnabled, latestMachineEventAtPosition, machineRunningState,
-  programCursorNavigationKey, programEndAtPosition, programStopAtPosition, sourceEndAtPosition, sourceLineAtOffset,
+  programCursorNavigationKey, programEndAtPosition, programStopAtPosition, programStopEventAtPosition, sourceEndAtPosition, sourceLineAtOffset,
 } from "./interaction.mjs";
 import {
   nextProgramSearchIndex, programSearchIndexFromAnchor, programSearchMatches, replaceAllProgramSearchMatches,
@@ -258,7 +258,8 @@ const elements = {
   rememberJob: $("rememberJobToggle"), clearLocalData: $("clearLocalDataButton"),
   blockReadout: $("blockReadout"), play: $("playButton"), stepBack: $("stepBackButton"), stepForward: $("stepForwardButton"),
   readerElapsedTime: $("readerElapsedTime"), readerRemainingTime: $("readerRemainingTime"), readerTotalTime: $("readerTotalTime"),
-  speed: $("speedSelect"), machineMode: $("machineModeSelect"), machine: $("machineSelect"), editMachine: $("editMachineButton"), orientation: $("orientationSelect"),
+  speed: $("speedSelect"), optionalStopControl: $("optionalStopControl"), optionalStop: $("optionalStopToggle"), optionalStopStatus: $("optionalStopStatus"),
+  machineMode: $("machineModeSelect"), machine: $("machineSelect"), editMachine: $("editMachineButton"), orientation: $("orientationSelect"),
   xMode: $("xModeSelect"), programUnits: $("programUnits"), programUnitsHint: $("programUnitsHint"), stockDiameter: $("stockDiameter"), stockLength: $("stockLength"), stockGripLength: $("stockGripLength"), stockStickout: $("stockStickout"), stockFrontZ: $("stockFrontZ"), stockToggle: $("stockToggle"),
   empty: $("emptyState"),
   chuckFaceZ: $("chuckFaceZ"), jawDiameter: $("jawDiameter"), clearance: $("clearanceInput"), collisionToggle: $("collisionToggle"),
@@ -514,7 +515,20 @@ function programLanguageContext() {
   return {
     machineType: isMillMode() ? "mill" : "lathe",
     dialect: profile?.liveToolDialect === "haas-lathe-ngc" ? "haas-lathe-ngc" : "generic",
+    optionalStopEnabled: elements.optionalStop.checked,
   };
+}
+
+function updateOptionalStopControl() {
+  const enabled = elements.optionalStop.checked;
+  elements.optionalStopStatus.textContent = enabled ? "ON" : "OFF";
+  elements.optionalStop.setAttribute(
+    "aria-label",
+    enabled ? "M01 optional stop enabled; activate to turn off" : "M01 optional stop disabled; activate to turn on",
+  );
+  elements.optionalStopControl.title = enabled
+    ? "M01 pauses the local reader; Play resumes at the following block"
+    : "M01 is recognized and the local reader continues without pausing";
 }
 
 function nonCodeTokenIdentification(token) {
@@ -1117,7 +1131,8 @@ function updateProgramUnitsHint(profile = currentMachineProfile()) {
 }
 
 function machinePlotOptions(profile) {
-  if (!profile) return {initialPosition: null, referencePosition: null};
+  const optionalStopEnabled = elements.optionalStop.checked;
+  if (!profile) return {initialPosition: null, referencePosition: null, optionalStopEnabled};
   const hasNumber = (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
   const point = (x, z) => hasNumber(x) && hasNumber(z)
     ? {x: machineLengthMm(x, profile), z: machineLengthMm(z, profile)}
@@ -1150,6 +1165,7 @@ function machinePlotOptions(profile) {
     g76Settings: latheControllerSettings(state.latheControllerSettings, profile.id),
     cutterCompensationContract: profile.liveToolDialect === 'haas-lathe-ngc' ? 'haas-lathe-ngc-nose-v1' : null,
     retainBlockedPathAfterUnsupportedM: true,
+    optionalStopEnabled,
   };
 }
 
@@ -3353,6 +3369,7 @@ function applyMachineModeUi({refreshView = true} = {}) {
   elements.latheReadout.hidden = mill;
   elements.millReadout.hidden = !mill;
   elements.millViewStatus.hidden = !mill;
+  elements.optionalStopControl.hidden = mill;
   elements.view2d.textContent = mill ? "Top" : "2D";
   elements.view2d.title = mill ? "Show the native X/Y command-centerline projection" : "Show the X/Z lathe backplot";
   for (const item of document.querySelectorAll("[data-lathe-legend]")) item.hidden = mill;
@@ -6682,7 +6699,8 @@ function updateTransport({scrollProgram = false} = {}) {
   const blockText = range.count > 1
     ? `Line ${state.programLine} / ${totalLines} · ${cycle ? `${cycle} cycle` : "Move"} ${substep} / ${range.count}`
     : `Line ${state.programLine} / ${totalLines} · Block ${state.visibleBlocks} / ${totalBlocks}`;
-  const atProgramStop = programStopAtPosition(state.parsed.timingEvents, state.parsed.segments, state);
+  const programStopEvent = programStopEventAtPosition(state.parsed.timingEvents, state.parsed.segments, state);
+  const atProgramStop = Boolean(programStopEvent);
   const atProgramEnd = programEndAtPosition(state.parsed.programEndLine, state.parsed.segments, state);
   const atBlockedPathPreview = blockedPathPreviewAtPosition(
     state.parsed.machineState?.blockedPathPreviewLine,
@@ -6690,8 +6708,10 @@ function updateTransport({scrollProgram = false} = {}) {
     state,
   );
   const atSourceEnd = sourceEndAtPosition(state.parsed.segments, totalLines, state);
+  const stopCommand = programStopEvent?.command === "M01" ? "M01" : "M00";
+  const stopKind = stopCommand === "M01" ? "OPTIONAL STOP" : "PROGRAM STOP";
   const boundaryText = !state.playing && atProgramStop
-    ? (atSourceEnd ? " · M00 PROGRAM STOP AT SOURCE END — Play replays from start" : " · M00 PROGRAM STOP — Play resumes")
+    ? (atSourceEnd ? ` · ${stopCommand} ${stopKind} AT SOURCE END — Play replays from start` : ` · ${stopCommand} ${stopKind} — Play resumes`)
     : (!state.playing && atProgramEnd
       ? " · M02/M30 PROGRAM END — Play restarts"
       : (!state.playing && atBlockedPathPreview ? " · PATH ONLY BOUNDARY — Play replays verified path; Step inspects preview" : ""));
@@ -6700,7 +6720,7 @@ function updateTransport({scrollProgram = false} = {}) {
   elements.play.setAttribute("aria-label", state.playing
     ? "Pause"
     : (atProgramStop
-      ? (atSourceEnd ? "Replay from start after final M00 program stop" : "Resume after M00 program stop")
+      ? (atSourceEnd ? `Replay from start after final ${stopCommand} ${stopKind.toLowerCase()}` : `Resume after ${stopCommand} ${stopKind.toLowerCase()}`)
       : (atProgramEnd
         ? "Restart after M02 or M30 program end"
         : (atBlockedPathPreview ? "Replay verified path before PATH ONLY boundary" : "Play"))));
@@ -7585,6 +7605,14 @@ elements.play.addEventListener("click", () => {
   state.lastFrame = 0; updateTransport(); if (state.playing) requestAnimationFrame(animate);
 });
 
+elements.optionalStop.addEventListener("change", () => {
+  state.playing = false;
+  state.lastFrame = 0;
+  updateOptionalStopControl();
+  plotProgram({fit: false, clearDimensions: false});
+  if (!elements.codeInspector.hidden) inspectProgramTokenAtCaret({hideWhenNone: true});
+});
+
 for (const control of [
   elements.orientation, elements.xMode, elements.stockToggle,
   elements.jawDiameter, elements.clearance, elements.collisionToggle,
@@ -8014,6 +8042,7 @@ if (!restored) {
   state.bundledSample = true;
 }
 applyMachineModeUi();
+updateOptionalStopControl();
 plotProgram();
 if (restoreBundledStepReference) void loadStepSample({reuseProgram: true});
 else if (requestedBundledStepReferenceRestore) persistSession();
