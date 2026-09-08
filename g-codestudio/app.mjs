@@ -17,6 +17,9 @@ import {
   readPrivatePreferences, readRememberedJob, saveRememberedJob, setRememberJobEnabled,
   writePrivatePreferences,
 } from "./session-storage.mjs";
+import {
+  quarantineLegacyMachineProfileCache, readLocalMachineProfiles, writeLocalMachineProfiles,
+} from "./machine-profile-storage.mjs";
 import {roundBarSetup, roundBarSetupFromLegacy} from "./stock-setup.mjs";
 import {hasStockCavities, stockSectionPolygons} from "./stock-section-view.mjs";
 import {turningSpindleIssue} from "./tool-mounting.mjs";
@@ -182,7 +185,7 @@ function isExactBundledTurningSample(source, bundledOrigin = false) {
 const DEFAULT_MACHINE_PROFILES = [
   {
     id: "hardinge-conquest-t42", name: "Hardinge Conquest T42 · Fanuc 18-T", manufacturer: "Hardinge",
-    model: "Conquest T42", serialNumber: "SGA1079-B", controlMake: "GE Fanuc", controlModel: "18-T",
+    model: "Conquest T42", serialNumber: "", controlMake: "GE Fanuc", controlModel: "18-T",
     status: "draft", templateRevision: 1, units: "inch", xProgramming: "diameter", orientation: "left",
     xTravelMin: -6.37, xTravelMax: 0, zTravelMin: -16, zTravelMax: 0, homeX: 0, homeZ: 0,
     startMode: "home", startX: 12.74, startZ: 16, rapidBehavior: "dogleg", rapidXMax: 945, rapidZMax: 1200,
@@ -215,7 +218,6 @@ const DEFAULT_MACHINE_PROFILES = [
     liveToolEvidence: "", notes: "", updatedAt: null,
   },
 ];
-const MACHINE_PROFILE_CACHE_KEY = "verify.machineProfiles.v1";
 const MACHINE_PROFILE_FIELDS = [
   "name", "manufacturer", "model", "serialNumber", "controlMake", "controlModel", "status", "units",
   "xProgramming", "orientation", "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ",
@@ -856,20 +858,11 @@ function mergeMachineProfiles(...collections) {
 }
 
 function readMachineProfileCache() {
-  try {
-    const cached = JSON.parse(localStorage.getItem(MACHINE_PROFILE_CACHE_KEY) || "null");
-    return Array.isArray(cached?.profiles) ? cached.profiles : [];
-  } catch {
-    return [];
-  }
+  return readLocalMachineProfiles(localStorage);
 }
 
 function persistMachineProfileCache() {
-  try {
-    localStorage.setItem(MACHINE_PROFILE_CACHE_KEY, JSON.stringify({profiles: state.machineProfiles}));
-  } catch {
-    // Profiles can still sync through the hosted API when local browser storage is unavailable.
-  }
+  return writeLocalMachineProfiles(localStorage, state.machineProfiles);
 }
 
 function machineOptionLabel(profile) {
@@ -886,39 +879,6 @@ function renderMachineSelect(preferredId = elements.machine.value) {
   }
   const selected = state.machineProfiles.some((profile) => profile.id === preferredId) ? preferredId : state.machineProfiles[0]?.id;
   if (selected) elements.machine.value = selected;
-}
-
-async function requestMachineProfileSave(profile) {
-  const response = await fetch("/api/machines", {
-    method: "PUT",
-    credentials: "same-origin",
-    headers: {"content-type": "application/json", accept: "application/json"},
-    body: JSON.stringify(profile),
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || "Machine profile sync failed");
-  if (!body.profile?.id) throw new Error("Machine profile sync returned an invalid response");
-  return body.profile;
-}
-
-async function loadMachineProfiles() {
-  try {
-    const response = await fetch("/api/machines", {credentials: "same-origin", headers: {accept: "application/json"}, cache: "no-store"});
-    if (!response.ok) return;
-    const body = await response.json();
-    if (!Array.isArray(body.profiles)) return;
-    const selected = elements.machine.value;
-    state.machineProfiles = mergeMachineProfiles(DEFAULT_MACHINE_PROFILES, body.profiles, state.machineProfiles);
-    persistMachineProfileCache();
-    renderMachineSelect(selected);
-    updateProgramUnitsHint(currentMachineProfile());
-    if (!state.programDirty) {
-      plotProgram();
-      persistSession();
-    }
-  } catch {
-    // The desktop/offline editions intentionally continue with their local profile cache.
-  }
 }
 
 function currentMachineProfile() {
@@ -1012,7 +972,7 @@ function readMachineEditor(profile) {
   return normalizeMachineProfile(next);
 }
 
-async function saveMachineEditor(event) {
+function saveMachineEditor(event) {
   event.preventDefault();
   if (!elements.machineForm.reportValidity()) return;
   const current = currentMachineProfile();
@@ -1020,7 +980,7 @@ async function saveMachineEditor(event) {
   const profile = readMachineEditor(current);
   const index = state.machineProfiles.findIndex((item) => item.id === profile.id);
   if (index >= 0) state.machineProfiles[index] = profile;
-  persistMachineProfileCache();
+  const stored = persistMachineProfileCache();
   renderMachineSelect(profile.id);
   updateProgramUnitsHint(profile);
   elements.machineDialogTitle.textContent = profile.name;
@@ -1028,20 +988,11 @@ async function saveMachineEditor(event) {
   clearToolAssignmentContext();
   plotProgram();
   persistSession();
-  elements.machineSaveStatus.className = "";
-  elements.machineSaveStatus.textContent = "Saving…";
-
-  try {
-    const saved = normalizeMachineProfile(await requestMachineProfileSave(profile));
-    state.machineProfiles[index] = saved;
-    persistMachineProfileCache();
-    renderMachineSelect(saved.id);
-    elements.machineSaveStatus.textContent = "Saved and synced.";
-    setTimeout(() => { if (elements.machineDialog.open) elements.machineDialog.close(); }, 450);
-  } catch {
-    elements.machineSaveStatus.className = "error";
-    elements.machineSaveStatus.textContent = "Saved on this device; online sync is unavailable.";
-  }
+  elements.machineSaveStatus.className = stored ? "" : "error";
+  elements.machineSaveStatus.textContent = stored
+    ? "Saved on this device."
+    : "Saved for this session; device storage is unavailable.";
+  if (stored) setTimeout(() => { if (elements.machineDialog.open) elements.machineDialog.close(); }, 450);
 }
 
 function clearToolAssignmentContext() {
@@ -7682,6 +7633,7 @@ new ResizeObserver(() => {
   if (elements.compareDialog.open && state.compareView === "graphics") requestAnimationFrame(renderComparisonGraphics);
 }).observe(elements.compareGraphicsAudit);
 const legacySessionMigration = migrateLegacySession(localStorage);
+const legacyMachineProfileMigration = quarantineLegacyMachineProfileCache(localStorage);
 applyStoredPreferences(readPrivatePreferences(localStorage));
 state.machineProfiles = mergeMachineProfiles(DEFAULT_MACHINE_PROFILES, readMachineProfileCache());
 renderMachineSelect();
@@ -7691,9 +7643,16 @@ state.rememberJob = isRememberJobEnabled(localStorage);
 const restored = restoreSession(rememberedJob);
 state.rememberedJobSaved = restored;
 renderSessionPrivacy();
-if (legacySessionMigration.removed) {
-  elements.sessionPrivacyMessage.textContent = "Removed the previous plaintext autosave. This job now starts in private RAM-only mode.";
+const startupPrivacyMessages = [];
+if (legacySessionMigration.removed) startupPrivacyMessages.push("Removed the previous plaintext autosave. This job now starts in private RAM-only mode.");
+if (legacyMachineProfileMigration.status === "quarantined") {
+  startupPrivacyMessages.push("Quarantined a legacy unscoped machine-profile cache and did not load it. Re-enter trusted machine settings before use.");
+} else if (legacyMachineProfileMigration.status === "conflict") {
+  startupPrivacyMessages.push("Ignored conflicting legacy machine-profile caches and did not load either. Use Clear local data before entering trusted machine settings.");
+} else if (legacyMachineProfileMigration.status === "retained") {
+  startupPrivacyMessages.push("Ignored a legacy unscoped machine-profile cache, but browser storage prevented quarantining it. Use Clear local data before entering trusted machine settings.");
 }
+if (startupPrivacyMessages.length) elements.sessionPrivacyMessage.textContent = startupPrivacyMessages.join(" ");
 const requestedBundledStepReferenceRestore = restored
   && state.bundledStepReference
   && isExactBundledProgram(elements.input.value, stepSampleProgram, state.bundledSample);
@@ -7719,4 +7678,3 @@ applyMachineModeUi();
 plotProgram();
 if (restoreBundledStepReference) void loadStepSample({reuseProgram: true});
 else if (requestedBundledStepReferenceRestore) persistSession();
-loadMachineProfiles();
