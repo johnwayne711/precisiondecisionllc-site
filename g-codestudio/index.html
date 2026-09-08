@@ -739,8 +739,8 @@
             <label class="graphics-audit-control" hidden><input id="fitGeometryDifferences" type="checkbox" checked> Fit changed geometry</label>
             <label class="graphics-audit-control" hidden title="Frame the machining moves and ignore distant rapid approach or home motion"><input id="fitGeometryPart" type="checkbox"> Fit to part</label>
             <div class="compare-view-toggle graphics-audit-control" hidden aria-label="Toolpath layout">
-              <button id="compareSplitLayout" type="button" class="active" aria-pressed="true">Side by side</button>
-              <button id="compareOverlayLayout" type="button" aria-pressed="false">Overlay</button>
+              <button id="compareSplitLayout" type="button" aria-pressed="false">Side by side</button>
+              <button id="compareOverlayLayout" type="button" class="active" aria-pressed="true">Overlay</button>
             </div>
             <div id="compareNavigation" class="compare-navigation">
               <button id="previousCompareChange" type="button" aria-label="Previous difference">↑</button>
@@ -765,14 +765,15 @@
                   <strong id="graphicsVerdict">Toolpaths match geometrically</strong>
                   <button id="graphicsInfoButton" type="button" class="graphics-info-button" aria-label="Explain the graphical comparison" aria-controls="graphicsInfoPanel" aria-expanded="false" title="What do these differences mean?">i</button>
                 </div>
-                <span id="graphicsViewportNote">Both windows use the same machine setup, orientation, scale, and viewport.</span>
+                <span id="graphicsViewportNote">Both programs share one machine setup, orientation, scale, and viewport.</span>
               </div>
               <div class="graphics-legend" aria-label="Toolpath comparison legend">
-                <span><i class="geometry-common"></i>Unchanged</span>
+                <span><i class="geometry-common"></i>Matching</span>
                 <span><i class="geometry-original"></i>Original only</span>
                 <span><i class="geometry-revised"></i>New / altered</span>
               </div>
             </div>
+            <ul id="comparisonBlockers" class="comparison-blockers" aria-label="First comparison blocker on each side" hidden></ul>
             <aside id="graphicsInfoPanel" class="graphics-info-panel" role="note" aria-label="How to interpret the toolpath audit" hidden>
               <header>
                 <div><span class="eyebrow">HOW TO READ THIS VIEW</span><strong>One edit can change many plotted moves.</strong></div>
@@ -781,12 +782,12 @@
               <div class="graphics-info-grid">
                 <section><span>01</span><div><strong>What the count means</strong><p><b id="graphicsInfoDifferenceCount">0 differences</b> means that many revised motion segments no longer match the original geometry. It does not mean that many separate code edits were made.</p></div></section>
                 <section><span>02</span><div><strong>Why changes multiply</strong><p>A single X, Z, diameter, or profile edit can regenerate several G71 roughing passes, approaches, and retracts. Each affected plotted segment is counted.</p></div></section>
-                <section><span>03</span><div><strong>How the colors work</strong><p><b class="info-gray">Gray</b> still matches. <b class="info-amber">Amber</b> existed only in the proven original. <b class="info-red">Red</b> is new or altered geometry in the revision.</p></div></section>
+                <section><span>03</span><div><strong>How the colors work</strong><p><b class="info-gray">Gray</b> still matches. <b class="info-amber">Orange</b> existed only in the original. <b class="info-red">Pink/red</b> is new or altered in the revision. Short dashes mark unresolved paths without changing these colors; matching paths may still be unresolved.</p></div></section>
                 <section><span>04</span><div><strong>How to verify it</strong><p>Start with <b>Code audit</b> to find the actual edited words, then use this view to inspect their geometric effect. Feed, speed, comment, or sequence changes may not change geometry.</p></div></section>
               </div>
               <p class="graphics-info-limit"><strong>Important:</strong> G-Code Studio compares its modeled backplot. Canned cycles and machine behavior are approximations—not control-certified simulation or a substitute for approved prove-out.</p>
             </aside>
-            <div id="compareSplitPlots" class="compare-plot-grid">
+            <div id="compareSplitPlots" class="compare-plot-grid" hidden>
               <section class="compare-plot-card">
                 <header><span>PROVEN ORIGINAL</span><strong id="originalGeometryCount">0 original-only moves</strong></header>
                 <div class="compare-canvas-wrap"><canvas id="originalCompareCanvas" aria-label="Original program toolpath"></canvas></div>
@@ -796,7 +797,7 @@
                 <div class="compare-canvas-wrap"><canvas id="revisedCompareCanvas" aria-label="Revised program toolpath"></canvas></div>
               </section>
             </div>
-            <section id="compareOverlayPlot" class="compare-plot-card compare-overlay-plot" hidden>
+            <section id="compareOverlayPlot" class="compare-plot-card compare-overlay-plot">
               <header><span>OVERLAY · ORIGINAL + REVISED</span><strong>Shared coordinates and viewport</strong></header>
               <div class="compare-canvas-wrap"><canvas id="overlayCompareCanvas" aria-label="Overlaid original and revised program toolpaths"></canvas></div>
             </section>

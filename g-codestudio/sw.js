@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "verify-app-";
-const CACHE_NAME = "verify-app-v98";
+const CACHE_NAME = "verify-app-v99";
 const APP_ASSETS = [
   "./",
   "./index.html",

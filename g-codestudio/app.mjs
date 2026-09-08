@@ -24,7 +24,7 @@ import {roundBarSetup, roundBarSetupFromLegacy} from "./stock-setup.mjs";
 import {hasStockCavities, stockSectionPolygons} from "./stock-section-view.mjs";
 import {turningSpindleIssue} from "./tool-mounting.mjs";
 import {buildA4cNominalPartoffSection} from "./tool-partoff-nominal.mjs";
-import {comparePrograms, compareSegmentGeometry, diffLineTokens, geometryItemsForFit, overlayGeometryLayers} from "./compare.mjs";
+import {COMPARISON_COLORS, comparePrograms, compareSegmentGeometry, diffLineTokens, firstComparisonBlocker, geometryItemsForFit, overlayGeometryLayers, segmentVerificationBlocked} from "./compare.mjs";
 import {MAX_DXF_MATERIAL_CONTOURS, parseDxf, toLatheGeometry} from "./dxf-import.mjs";
 import {mapStepSectionToLatheGeometry} from "./step-import.mjs";
 import {MAX_STEP_BYTES, StepKernelClient} from "./step-worker-client.mjs";
@@ -332,8 +332,8 @@ const state = {
   parsed: {segments: [], warnings: []}, cycleTime: null, programLine: 0, visibleBlocks: 0, playing: false, lastFrame: 0,
   camera: {scale: 1, offsetX: 0, offsetY: 0, fitted: false}, drag: null, cursor: null,
   machineProfiles: DEFAULT_MACHINE_PROFILES.map((profile) => ({...profile})),
-  comparisonOriginal: null, comparison: null, compareChangeIndex: -1,
-  compareView: "code", compareGraphicsLayout: "split", comparisonGeometry: null,
+  comparisonOriginal: null, comparison: null, compareChangeIndex: -1, comparisonOriginalRevision: 0, comparisonPickerRevision: null,
+  compareView: "code", compareGraphicsLayout: "overlay", comparisonGeometry: null,
   viewMode: "2d", camera3d: {yaw: -Math.PI / 4, pitch: Math.asin(1 / Math.sqrt(3)), zoom: 1, panX: 0, panY: 0},
   viewCubeRegions: [], viewCubeHover: null,
   stockProfileCache: null, stockSamplingError: null,
@@ -1245,6 +1245,7 @@ function loadProgram(name, content, {bundledSample = false, machineMode = null} 
   elements.input.value = content;
   elements.codeInspector.hidden = true;
   elements.fileName.textContent = name || "program.nc";
+  clearComparison();
   elements.programSearchPanel.hidden = true;
   elements.programReplaceRow.hidden = true;
   programSearch.matches = [];
@@ -2994,7 +2995,34 @@ async function saveProgram() {
   setTimeout(() => URL.revokeObjectURL(link.href), 0);
 }
 
+function clearComparison() {
+  state.comparisonOriginalRevision += 1;
+  state.comparisonOriginal = null;
+  state.comparison = null;
+  state.comparisonGeometry = null;
+  elements.originalFileInput.value = "";
+  $("originalCompareName").textContent = "No original selected";
+  $("originalCompareMeta").textContent = "Open the approved program or snapshot the current editor before changing it.";
+  $("comparisonBlockers").replaceChildren();
+  $("comparisonBlockers").hidden = true;
+  for (const id of ["compareVerdict", "compareVerdictDetail", "graphicsVerdict", "originalGeometryCount", "revisedGeometryCount", "graphicsInfoDifferenceCount"]) $(id).textContent = "";
+  for (const id of ["compareChangedCount", "compareAddedCount", "compareRemovedCount", "compareUnchangedCount"]) $(id).textContent = "0";
+  for (const id of ["compareCoordinateWords", "compareCommandWords", "compareProcessWords", "compareReferenceWords"]) $(id).textContent = "";
+  $("compareVerdictBadge").textContent = "";
+  $("compareVerdictBadge").className = "compare-verdict-badge";
+  for (const canvas of [elements.originalCompareCanvas, elements.revisedCompareCanvas, elements.overlayCompareCanvas]) {
+    const context = canvas.getContext("2d");
+    context.save();
+    context.resetTransform();
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.restore();
+  }
+  renderComparisonRows();
+  renderComparison();
+}
+
 function setComparisonOriginal(name, content) {
+  state.comparisonOriginalRevision += 1;
   state.comparisonOriginal = {name: name || "original-program.nc", content: String(content ?? "")};
   $("originalCompareName").textContent = state.comparisonOriginal.name;
   $("originalCompareMeta").textContent = `${state.comparisonOriginal.content.replace(/\r/g, "").split("\n").length} lines · held in memory on this device`;
@@ -3003,11 +3031,18 @@ function setComparisonOriginal(name, content) {
 
 async function chooseComparisonOriginal() {
   if (window.pywebview?.api?.open_gcode) {
-    const selected = await window.pywebview.api.open_gcode();
-    if (selected?.error) { elements.status.textContent = selected.error; return; }
-    if (selected?.content) setComparisonOriginal(selected.name, selected.content);
+    const revision = ++state.comparisonOriginalRevision;
+    try {
+      const selected = await window.pywebview.api.open_gcode();
+      if (revision !== state.comparisonOriginalRevision) return;
+      if (selected?.error) { elements.status.textContent = selected.error; return; }
+      if (typeof selected?.content === "string") setComparisonOriginal(selected.name, selected.content);
+    } catch {
+      if (revision === state.comparisonOriginalRevision) elements.status.textContent = "Could not read the original program.";
+    }
     return;
   }
+  state.comparisonPickerRevision = ++state.comparisonOriginalRevision;
   elements.originalFileInput.click();
 }
 
@@ -3175,7 +3210,7 @@ function drawComparisonGrid(surface, bounds, scale) {
 
 function strokeComparisonGeometry(surface, items, bounds, scale, changedColor) {
   const toScreen = drawComparisonGrid(surface, bounds, scale);
-  strokeComparisonItems(surface, items.filter((item) => !item.different), toScreen, "rgba(112, 135, 141, .68)", 1.25, 0);
+  strokeComparisonItems(surface, items.filter((item) => !item.different), toScreen, COMPARISON_COLORS.matching, 1.35, 0);
   strokeComparisonItems(surface, items.filter((item) => item.different), toScreen, changedColor, 2.4, 7);
 }
 
@@ -3184,25 +3219,17 @@ function strokeComparisonItems(surface, items, toScreen, color, lineWidth, shado
   for (const item of items) {
     const points = (item.segment.points?.length ? item.segment.points : [item.segment.start, item.segment.end]).filter(Boolean).map(geometryDisplayPoint);
     if (points.length < 2) continue;
-    const blocked = Boolean(
-      item.segment.verificationBlocked
-      || item.segment.liveToolBlocked
-      || item.segment.pathPreviewOnly
-      || item.segment.cAxisMotion?.blocked
-    );
-    const controllerPreview = isUnsupportedControllerPathPreview(item.segment);
-    const hardBlocked = blocked && !controllerPreview;
-    const strokeColor = hardBlocked ? "#fb7185" : (controllerPreview ? "#fbbf24" : color);
+    const blocked = segmentVerificationBlocked(item.segment);
     context.beginPath();
     points.forEach((point, index) => {
       const screen = toScreen(point);
       if (index) context.lineTo(screen.x, screen.y); else context.moveTo(screen.x, screen.y);
     });
-    context.strokeStyle = strokeColor;
-    context.lineWidth = hardBlocked ? Math.max(2.8, lineWidth) : lineWidth;
+    context.strokeStyle = color;
+    context.lineWidth = lineWidth;
     context.setLineDash(blocked ? [2, 2] : (item.segment.type === "rapid" ? [6, 4] : []));
-    context.shadowColor = blocked || shadowBlur ? strokeColor : "transparent";
-    context.shadowBlur = hardBlocked ? Math.max(6, shadowBlur) : shadowBlur;
+    context.shadowColor = shadowBlur ? color : "transparent";
+    context.shadowBlur = shadowBlur;
     context.stroke();
   }
   context.setLineDash([]);
@@ -3212,10 +3239,10 @@ function strokeComparisonItems(surface, items, toScreen, color, lineWidth, shado
 function strokeComparisonOverlay(surface, geometry, bounds, scale) {
   const layers = overlayGeometryLayers(geometry);
   const toScreen = drawComparisonGrid(surface, bounds, scale);
-  strokeComparisonItems(surface, layers.common, toScreen, "rgba(142, 163, 168, .72)", 1.35, 0);
-  strokeComparisonItems(surface, layers.blockedCommon, toScreen, "#fb7185", 2.8, 6);
-  strokeComparisonItems(surface, layers.originalOnly, toScreen, "#f59e0b", 4.6, 8);
-  strokeComparisonItems(surface, layers.revisedOnly, toScreen, "#fb4f68", 2.25, 8);
+  strokeComparisonItems(surface, layers.common, toScreen, COMPARISON_COLORS.matching, 1.35, 0);
+  strokeComparisonItems(surface, layers.blockedCommon, toScreen, COMPARISON_COLORS.matching, 1.35, 0);
+  strokeComparisonItems(surface, layers.originalOnly, toScreen, COMPARISON_COLORS.original, 4.6, 8);
+  strokeComparisonItems(surface, layers.revisedOnly, toScreen, COMPARISON_COLORS.revised, 2.25, 8);
 }
 
 function renderComparisonGraphics() {
@@ -3233,6 +3260,16 @@ function renderComparisonGraphics() {
     revisedParserWarnings: revisedParsed.warnings,
   });
   state.comparisonGeometry = geometry;
+  const blockers = $("comparisonBlockers");
+  blockers.replaceChildren();
+  for (const [side, parsed] of [["Original", originalParsed], ["Revised", revisedParsed]]) {
+    const issue = firstComparisonBlocker(parsed);
+    if (!issue) continue;
+    const item = document.createElement("li");
+    item.textContent = `${side} · ${issue.line === null ? "whole program" : `line ${issue.line}`} · ${issue.reason}`;
+    blockers.append(item);
+  }
+  blockers.hidden = !blockers.children.length;
   const originalLabel = `${geometry.originalOnly} original-only move${geometry.originalOnly === 1 ? "" : "s"}`;
   const revisedLabel = `${geometry.revisedOnly} new or altered move${geometry.revisedOnly === 1 ? "" : "s"}`;
   $("originalGeometryCount").textContent = originalLabel;
@@ -3261,8 +3298,8 @@ function renderComparisonGraphics() {
     (Math.min(originalSurface.width, revisedSurface.width) - 28) / spanZ,
     (Math.min(originalSurface.height, revisedSurface.height) - 28) / spanX,
   );
-  strokeComparisonGeometry(originalSurface, geometry.original, bounds, scale, "#f59e0b");
-  strokeComparisonGeometry(revisedSurface, geometry.revised, bounds, scale, "#fb4f68");
+  strokeComparisonGeometry(originalSurface, geometry.original, bounds, scale, COMPARISON_COLORS.original);
+  strokeComparisonGeometry(revisedSurface, geometry.revised, bounds, scale, COMPARISON_COLORS.revised);
 }
 
 function setComparisonGraphicsLayout(layout) {
@@ -7432,9 +7469,20 @@ elements.profilePenetrationJump.addEventListener("click", () => {
 elements.removeGeometry.addEventListener("click", removeReferenceGeometry);
 elements.originalFileInput.addEventListener("change", async () => {
   const file = elements.originalFileInput.files[0];
-  if (file) setComparisonOriginal(file.name, await file.text());
   elements.originalFileInput.value = "";
+  const pickerRevision = state.comparisonPickerRevision;
+  state.comparisonPickerRevision = null;
+  if (pickerRevision !== null && pickerRevision !== state.comparisonOriginalRevision) return;
+  if (!file) return;
+  const revision = ++state.comparisonOriginalRevision;
+  try {
+    const content = await file.text();
+    if (revision === state.comparisonOriginalRevision) setComparisonOriginal(file.name, content);
+  } catch {
+    if (revision === state.comparisonOriginalRevision) elements.status.textContent = "Could not read the original program.";
+  }
 });
+elements.originalFileInput.addEventListener("cancel", () => { state.comparisonPickerRevision = null; });
 $("chooseOriginalButton").addEventListener("click", chooseComparisonOriginal);
 $("chooseOriginalEmptyButton").addEventListener("click", chooseComparisonOriginal);
 $("snapshotOriginalButton").addEventListener("click", () => setComparisonOriginal(`${elements.fileName.textContent || "program.nc"} · snapshot`, elements.input.value));

@@ -223,13 +223,38 @@ export function comparePrograms(originalSource, revisedSource, {ignoreFormatting
   return {rows, summary, words: summarizeWords(rows)};
 }
 
-function segmentVerificationBlocked(segment) {
+export function segmentVerificationBlocked(segment) {
   return Boolean(
     segment?.verificationBlocked
     || segment?.liveToolBlocked
     || segment?.pathPreviewOnly
     || segment?.cAxisMotion?.blocked
   );
+}
+
+// Comparison identity owns the palette; uncertainty is a separate dash/status.
+export const COMPARISON_COLORS = Object.freeze({
+  original: "#f59e0b", revised: "#fb4f68", matching: "#8ea3a8",
+});
+
+export function firstComparisonBlocker(parsed) {
+  const warnings = (parsed?.warnings || []).filter((warning) => warning?.verificationBlocked === true);
+  const candidates = [
+    ...warnings,
+    ...(parsed?.segments || []).filter(segmentVerificationBlocked),
+    ...(parsed?.cAxisMotions || []).filter((motion) => motion?.blocked),
+    ...(parsed?.liveToolAttempts || []).filter((operation) => operation?.blocked),
+  ];
+  const first = candidates.reduce((earliest, issue) => {
+    const order = (value) => Number.isInteger(value?.line) && value.line > 0 ? value.line : 0;
+    return !earliest || order(issue) < order(earliest) ? issue : earliest;
+  }, null);
+  if (!first) return null;
+  return {
+    line: Number.isInteger(first.line) && first.line > 0 ? first.line : null,
+    reason: first.message || first.reason || first.cAxisMotion?.reason
+      || first.verificationIssues?.join(", ") || first.code || first.motion || "Unresolved program behavior",
+  };
 }
 
 function geometrySignature(segment, tolerance) {
