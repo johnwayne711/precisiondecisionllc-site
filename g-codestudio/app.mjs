@@ -1,4 +1,4 @@
-import {parseGcode, programBounds, segmentLength, spindleStateAtLine} from "./gcode.mjs";
+import {parseGcode, programBounds, segmentLength} from "./gcode.mjs";
 import {nominalCutterEdges, nominalNoseCircle} from "./lathe-cutter-edges.mjs";
 import {latheControllerSettings} from "./lathe-controller-settings.mjs";
 import {compensateLathePath, noseCompensationSetupIssues} from "./lathe-compensation.mjs";
@@ -66,8 +66,9 @@ import {
   sampleGeometryEntity,
 } from "./geometry-inspector.mjs";
 import {
-  advanceExecutionPosition, entryVisibleBlocksForSourceLine, executionLineForPosition, executionRangeForSourceLine,
-  graphicsHitAt, graphicsSelectionEnabled, programCursorNavigationKey, sourceLineAtOffset,
+  advanceExecutionPosition, blockedPathPreviewAtPosition, entryVisibleBlocksForSourceLine, executionLineForPosition, executionRangeForSourceLine,
+  graphicsHitAt, graphicsSelectionEnabled, latestMachineEventAtPosition, machineRunningState,
+  programCursorNavigationKey, programEndAtPosition, programStopAtPosition, sourceEndAtPosition, sourceLineAtOffset,
 } from "./interaction.mjs";
 import {
   nextProgramSearchIndex, programSearchIndexFromAnchor, programSearchMatches, replaceAllProgramSearchMatches,
@@ -5666,7 +5667,13 @@ function drawToolAssembly2d() {
     physicalReference.z += nose.tipDirection.z * nose.radiusMm;
     physicalReference.x += nose.tipDirection.x * nose.radiusMm;
   }
-  const spindle = spindleStateAtLine(state.parsed.spindleEvents, state.programLine);
+  const spindleEvent = latestMachineEventAtPosition(state.parsed.spindleEvents, state.parsed.segments, state);
+  const spindle = {
+    direction: spindleEvent?.direction === "m3" || spindleEvent?.direction === "m4"
+      ? spindleEvent.direction
+      : "unknown",
+    running: typeof spindleEvent?.running === "boolean" ? spindleEvent.running : null,
+  };
   const badgeStatus = elements.toolVerificationBadge.querySelector("strong");
   elements.toolVerificationBadge.hidden = false;
   if (!toolKey || !configured) {
@@ -5676,9 +5683,7 @@ function drawToolAssembly2d() {
   }
   const liveCutter = configured.geometryKind === "axial-milling-cutter";
   const boringDisplay = configured.mountingAxis === "program-z";
-  const liveSpindle = (state.parsed.liveToolEvents || [])
-    .filter((event) => Number(event.line) <= state.programLine)
-    .at(-1) || null;
+  const liveSpindle = latestMachineEventAtPosition(state.parsed.liveToolEvents, state.parsed.segments, state);
   const model = buildToolAssemblyDisplay2d(configured, physicalReference, {
     spindleDirection: spindle.direction,
     spindleRunning: spindle.running,
@@ -5688,12 +5693,16 @@ function drawToolAssembly2d() {
     badgeStatus.textContent = `${toolKey} · OUTLINE UNAVAILABLE`;
     return;
   }
-  const stoppedLabel = spindle.running === false ? " · STOPPED" : "";
+  const mainSpindleState = machineRunningState(spindle.running);
+  const mainSpindleStateLabel = mainSpindleState === "stopped"
+    ? " · SPINDLE STOPPED"
+    : (mainSpindleState === "unknown" ? " · SPINDLE STATE UNKNOWN" : "");
+  const liveSpindleState = machineRunningState(liveSpindle?.running);
   const spindleLabel = liveCutter
-    ? liveSpindle?.running === true
+    ? liveSpindleState === "running"
       ? `${String(liveSpindle.command || liveSpindle.direction || "LIVE").toUpperCase()} · ${Number(liveSpindle.speed).toLocaleString("en-US")} RPM`
-      : "LIVE SPINDLE STOPPED"
-    : `${configured.mountingOrientation === "standard" ? (boringDisplay ? "UPPER ID" : "STANDARD · INSERT DOWN") : configured.mountingOrientation === "flipped" ? (boringDisplay ? "LOWER ID · Z ROLL 180°" : "FLIPPED · INSERT UP") : "MOUNTING UNSET · NOMINAL OUTLINE"} · ${spindle.direction === "m3" || spindle.direction === "m4" ? spindle.direction.toUpperCase() : "ROTATION UNKNOWN"}${stoppedLabel}`;
+      : (liveSpindleState === "stopped" ? "LIVE SPINDLE STOPPED" : "LIVE SPINDLE STATE UNKNOWN")
+    : `${configured.mountingOrientation === "standard" ? (boringDisplay ? "UPPER ID" : "STANDARD · INSERT DOWN") : configured.mountingOrientation === "flipped" ? (boringDisplay ? "LOWER ID · Z ROLL 180°" : "FLIPPED · INSERT UP") : "MOUNTING UNSET · NOMINAL OUTLINE"} · ${spindle.direction === "m3" || spindle.direction === "m4" ? spindle.direction.toUpperCase() : "ROTATION UNKNOWN"}${mainSpindleStateLabel}`;
   const rotationMismatch = !liveCutter && spindle.running === true
     && ["m3", "m4"].includes(spindle.direction)
     && ["m3", "m4"].includes(configured.requiredSpindleDirection)
@@ -6551,7 +6560,7 @@ function updateStats() {
       ? `Estimated motion and dwell time: ${formatCycleTime(cycleTime.seconds)} (cut ${formatCycleTime(cycleTime.cuttingSeconds)}, rapid ${formatCycleTime(cycleTime.rapidSeconds)}, dwell ${formatCycleTime(cycleTime.dwellSeconds)}).`
       : "Cycle time cannot be estimated from the available program and machine data.",
     ...cycleTime.limitations,
-    "Excludes operator stops, tool-change duration, and spindle acceleration.",
+    "Excludes tool-change duration and spindle acceleration.",
   ];
   for (const element of [$("cycleTimeHeader"), $("cycleTimeStat")]) {
     element.textContent = timeText;
@@ -6670,11 +6679,31 @@ function updateTransport({scrollProgram = false} = {}) {
   const cycle = range.count > 1 ? state.parsed.segments[range.start]?.cycle : null;
   elements.timeline.max = String(Math.max(1, totalLines));
   elements.timeline.value = String(state.programLine);
-  elements.blockReadout.textContent = range.count > 1
+  const blockText = range.count > 1
     ? `Line ${state.programLine} / ${totalLines} · ${cycle ? `${cycle} cycle` : "Move"} ${substep} / ${range.count}`
     : `Line ${state.programLine} / ${totalLines} · Block ${state.visibleBlocks} / ${totalBlocks}`;
+  const atProgramStop = programStopAtPosition(state.parsed.timingEvents, state.parsed.segments, state);
+  const atProgramEnd = programEndAtPosition(state.parsed.programEndLine, state.parsed.segments, state);
+  const atBlockedPathPreview = blockedPathPreviewAtPosition(
+    state.parsed.machineState?.blockedPathPreviewLine,
+    state.parsed.segments,
+    state,
+  );
+  const atSourceEnd = sourceEndAtPosition(state.parsed.segments, totalLines, state);
+  const boundaryText = !state.playing && atProgramStop
+    ? (atSourceEnd ? " · M00 PROGRAM STOP AT SOURCE END — Play replays from start" : " · M00 PROGRAM STOP — Play resumes")
+    : (!state.playing && atProgramEnd
+      ? " · M02/M30 PROGRAM END — Play restarts"
+      : (!state.playing && atBlockedPathPreview ? " · PATH ONLY BOUNDARY — Play replays verified path; Step inspects preview" : ""));
+  elements.blockReadout.textContent = `${blockText}${boundaryText}`;
   elements.play.dataset.transportState = state.playing ? "pause" : "play";
-  elements.play.setAttribute("aria-label", state.playing ? "Pause" : "Play");
+  elements.play.setAttribute("aria-label", state.playing
+    ? "Pause"
+    : (atProgramStop
+      ? (atSourceEnd ? "Replay from start after final M00 program stop" : "Resume after M00 program stop")
+      : (atProgramEnd
+        ? "Restart after M02 or M30 program end"
+        : (atBlockedPathPreview ? "Replay verified path before PATH ONLY boundary" : "Play"))));
   elements.timeline.disabled = state.programDirty;
   elements.play.disabled = state.programDirty;
   elements.stepBack.disabled = state.programDirty || state.programLine <= 0;
@@ -6928,7 +6957,14 @@ function animate(timestamp) {
     state.visibleBlocks = next.visibleBlocks;
     begin3dInteractivePreview();
     const activeRange = executionRangeForSourceLine(state.parsed.segments, state.programLine);
-    if (state.programLine >= totalLines && state.visibleBlocks >= activeRange.end) {
+    if (programStopAtPosition(state.parsed.timingEvents, state.parsed.segments, state)
+      || programEndAtPosition(state.parsed.programEndLine, state.parsed.segments, state)
+      || blockedPathPreviewAtPosition(
+        state.parsed.machineState?.blockedPathPreviewLine,
+        state.parsed.segments,
+        state,
+      )
+      || (state.programLine >= totalLines && state.visibleBlocks >= activeRange.end)) {
       state.playing = false;
     }
     updateTransport({scrollProgram: true}); draw();
@@ -7172,6 +7208,9 @@ $("loadSampleButton").addEventListener("click", () => loadProgram("sample-g71-ro
 $("loadLiveBoreSampleButton").addEventListener("click", loadLiveBoreSample);
 $("loadMillSampleButton").addEventListener("click", loadMillSample);
 $("loadStepSampleButton").addEventListener("click", loadStepSample);
+for (const id of ["loadSampleButton", "loadLiveBoreSampleButton", "loadMillSampleButton", "loadStepSampleButton"]) {
+  $(id).addEventListener("click", () => $("sampleProgramMenu").removeAttribute("open"));
+}
 elements.loadDxfReferenceDemo.addEventListener("click", loadDxfSample);
 elements.loadStepReferenceDemo.addEventListener("click", loadStepSample);
 $("openButton").addEventListener("click", openProgram);
@@ -7523,9 +7562,15 @@ elements.play.addEventListener("click", () => {
   if (state.programDirty) return;
   const totalLines = state.parsed.sourceLines || programLineCount();
   if (!totalLines) return;
+  const atProgramEnd = programEndAtPosition(state.parsed.programEndLine, state.parsed.segments, state);
+  const atBlockedPathPreview = blockedPathPreviewAtPosition(
+    state.parsed.machineState?.blockedPathPreviewLine,
+    state.parsed.segments,
+    state,
+  );
+  const atSourceEnd = sourceEndAtPosition(state.parsed.segments, totalLines, state);
   state.playing = !state.playing;
-  const range = executionRangeForSourceLine(state.parsed.segments, state.programLine);
-  if (state.playing && state.programLine >= totalLines && state.visibleBlocks >= range.end) {
+  if (state.playing && (atProgramEnd || atBlockedPathPreview || atSourceEnd)) {
     state.programLine = 0;
     state.visibleBlocks = 0;
   }

@@ -122,6 +122,60 @@ export function advanceExecutionPosition(segments, totalLines, position, directi
   return {line, visibleBlocks};
 }
 
+export function programStopAtPosition(timingEvents, segments, position) {
+  const line = Number(position?.line ?? position?.programLine);
+  if (!Number.isInteger(line) || line <= 0 || !Array.isArray(timingEvents)) return false;
+  if (!timingEvents.some((event) => event?.type === "program-stop" && Number(event.line) === line)) return false;
+  const visibleBlocks = Math.max(0, Math.min(segments?.length || 0, Number(position?.visibleBlocks) || 0));
+  return visibleBlocks >= executionRangeForSourceLine(segments, line).end;
+}
+
+export function programEndAtPosition(programEndLine, segments, position) {
+  const line = Number(position?.line ?? position?.programLine);
+  const endLine = Number(programEndLine);
+  if (!Number.isInteger(line) || !Number.isInteger(endLine) || line !== endLine || endLine <= 0) return false;
+  const visibleBlocks = Math.max(0, Math.min(segments?.length || 0, Number(position?.visibleBlocks) || 0));
+  return visibleBlocks >= executionRangeForSourceLine(segments, endLine).end;
+}
+
+export function blockedPathPreviewAtPosition(blockedPathPreviewLine, segments, position) {
+  const line = Number(position?.line ?? position?.programLine);
+  const boundaryLine = Number(blockedPathPreviewLine);
+  if (!Number.isInteger(line) || !Number.isInteger(boundaryLine) || boundaryLine <= 0 || line < boundaryLine) return false;
+  if (line > boundaryLine) return true;
+  const visibleBlocks = Math.max(0, Math.min(segments?.length || 0, Number(position?.visibleBlocks) || 0));
+  return visibleBlocks >= executionRangeForSourceLine(segments, boundaryLine).end;
+}
+
+export function sourceEndAtPosition(segments, totalLines, position) {
+  const line = Number(position?.line ?? position?.programLine);
+  const endLine = Math.max(0, Math.trunc(Number(totalLines) || 0));
+  if (!Number.isInteger(line) || endLine <= 0 || line < endLine) return false;
+  const visibleBlocks = Math.max(0, Math.min(segments?.length || 0, Number(position?.visibleBlocks) || 0));
+  return visibleBlocks >= executionRangeForSourceLine(segments, endLine).end;
+}
+
+export function latestMachineEventAtPosition(events, segments, position) {
+  if (!Array.isArray(events)) return null;
+  const line = Number(position?.line ?? position?.programLine);
+  if (!Number.isInteger(line) || line <= 0) return null;
+  const visibleBlocks = Math.max(0, Math.min(segments?.length || 0, Number(position?.visibleBlocks) || 0));
+  const currentBlockComplete = visibleBlocks >= executionRangeForSourceLine(segments, line).end;
+  let latest = null;
+  for (const event of events) {
+    const eventLine = Number(event?.line);
+    if (!Number.isInteger(eventLine) || eventLine <= 0 || eventLine > line) continue;
+    if (eventLine < line || event?.phase === "before-block" || currentBlockComplete) latest = event;
+  }
+  return latest;
+}
+
+export function machineRunningState(value) {
+  if (value === true) return "running";
+  if (value === false) return "stopped";
+  return "unknown";
+}
+
 export function executionLineForPosition(segments, visibleBlocks) {
   if (!Array.isArray(segments) || visibleBlocks <= 0) return null;
   return segmentExecutionLine(segments[Math.min(visibleBlocks, segments.length) - 1]);

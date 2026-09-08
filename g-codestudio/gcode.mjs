@@ -8,7 +8,7 @@ import {
 
 const MOTION_CODES = new Map([[0, "rapid"], [1, "linear"], [2, "arc-cw"], [3, "arc-ccw"]]);
 const CONTROL_FLOW_M_CODES = new Set([96, 97, 98, 99]);
-const COMMON_MODELED_M_CODES = new Set([2, 3, 4, 5, 8, 9, 30, ...CONTROL_FLOW_M_CODES]);
+const COMMON_MODELED_M_CODES = new Set([0, 2, 3, 4, 5, 8, 9, 30, ...CONTROL_FLOW_M_CODES]);
 const GENERIC_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 133, 134, 135, 154, 155]);
 const HAAS_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 23, 24, 133, 134, 135, 154, 155]);
 const HAAS_UNSUPPORTED_GROUP_01_MOTIONS = new Set([90, 92, 94]);
@@ -610,6 +610,20 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
     return false;
   }
   const mCodes = record.byLetter.get("M") || [];
+  const mLexemes = record.lexemesByLetter?.get("M") || [];
+  const invalidProgramStopLexeme = mCodes.findIndex((code, index) => (
+    code === 0 && !/^\+?0+$/.test(mLexemes[index] || "")
+  ));
+  if (invalidProgramStopLexeme >= 0) {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "non-integer-m-code",
+      verificationBlocked: true,
+      message: `M${mLexemes[invalidProgramStopLexeme]} is not an exact unsigned-integer M00 spelling and was not executed by the model.`,
+    });
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
   const nonIntegerMCode = mCodes.find((code) => !Number.isInteger(code));
   if (nonIntegerMCode !== undefined) {
     warningOnce(warnings, {
@@ -617,6 +631,16 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
       code: "non-integer-m-code",
       verificationBlocked: true,
       message: `M${nonIntegerMCode} is not an exact supported M code and was not executed by the model.`,
+    });
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
+  if (mCodes.includes(0) && mCodes.length > 1) {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "multiple-m-codes-unsupported",
+      verificationBlocked: true,
+      message: "M00 cannot share a block with another M word in the bounded reader; execution is blocked instead of guessing end-of-block precedence.",
     });
     if (stopExecution) invalidateExecutionState(state);
     return false;
@@ -806,8 +830,16 @@ function beginBlockedPathPreview(state, record) {
   // blocked command-path preview; it cannot support time, stock, comparison,
   // or clearance results.
   state.spindleRunning = null;
+  state.spindleDirection = "unknown";
   state.liveToolRunning = null;
+  state.liveToolDirection = "unknown";
+  state.liveToolSpeed = null;
   state.cAxisEngaged = null;
+  state.cAxisEngagementSource = "unknown";
+  state.cAxisPosition = null;
+  state.cAxisPositionUncertaintyDegrees = null;
+  state.turningMode = "unknown";
+  state.programEnded = false;
 }
 
 function noteLiveToolAttempt(record, state, motion = state.motion) {
@@ -851,6 +883,7 @@ function invalidateUnsupportedPosition(record, state) {
 }
 
 function applyRecordToolCall(record, state, liveToolEvents = null) {
+  if (state.blockedPathPreview) return;
   const call = record.toolCalls?.at(-1);
   if (!call || state.activeToolCallLine === call.line) return;
   // This Fanuc-style parser applies a T word before any motion in the same
@@ -1300,8 +1333,9 @@ function validateG32ModalRecord(record, state, warnings) {
   return false;
 }
 
-function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEvents) {
+function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEvents, timingEvents) {
   const mCodes = record.byLetter.get("M") || [];
+  const programStopCode = mCodes.find((code) => code === 0);
   const programEndCode = mCodes.find((code) => code === 2 || code === 30);
   if (state.liveToolDialect === "haas-lathe-ngc" && mCodes.length > 1) {
     invalidateExecutionState(state);
@@ -1317,6 +1351,7 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
     || state.liveToolRunning === true
     || state.cAxisEngaged === true
     || mCodes.some((code) => [133, 134, 154].includes(code));
+  let programStopRecorded = false;
   for (const code of mCodes) {
     if (code === 2 || code === 30) continue;
     if (!Number.isInteger(code)) {
@@ -1340,7 +1375,20 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
       continue;
     }
     let handled = false;
-    if (code === 3) {
+    if (code === 0) {
+      handled = true;
+      if (!programStopRecorded) {
+        timingEvents.push({
+          type: "program-stop",
+          line: record.line,
+          command: "M00",
+          seconds: null,
+          untimed: true,
+          phase: "end-of-block",
+        });
+        programStopRecorded = true;
+      }
+    } else if (code === 3) {
       state.spindleRunning = true;
       state.spindleDirection = "m3";
       handled = true;
@@ -1477,6 +1525,26 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
       });
     }
   }
+  if (programStopCode !== undefined) {
+    // M00 always pauses the local reader, but physical stop/restart side
+    // effects are controller-specific. The explicit Haas contract documents
+    // a main-spindle stop; generic state becomes unknown instead of guessed.
+    state.spindleRunning = state.liveToolDialect === "haas-lathe-ngc"
+      ? false
+      : (state.spindleRunning === false ? false : null);
+    if (state.liveToolDialect === "haas-lathe-ngc" && state.liveToolRunning === true) {
+      state.liveToolRunning = null;
+      liveToolEvents.push({
+        line: record.line,
+        direction: state.liveToolDirection,
+        running: null,
+        speed: state.liveToolSpeed,
+        phase: "end-of-block",
+        command: "M00",
+        reason: "program-stop-live-tool-effect-unresolved",
+      });
+    }
+  }
   if (programEndCode !== undefined) {
     state.spindleRunning = false;
     state.liveToolRunning = false;
@@ -1497,7 +1565,7 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
   }
 }
 
-function programSpindleEvents(records, definitionIndexes, liveToolDialect, semanticExecutionStopIndex = -1) {
+function programSpindleEvents(records, definitionIndexes, liveToolDialect, semanticExecutionStopIndex = -1, rejectedEndOfBlockMIndexes = new Set()) {
   const events = [];
   let direction = "unknown";
   let running = null;
@@ -1507,12 +1575,16 @@ function programSpindleEvents(records, definitionIndexes, liveToolDialect, seman
       events.push({line: record.line, direction, running: null, reason: "execution-blocked"});
       break;
     }
-    const mCodes = record.byLetter.get("M") || [];
+    const rawMCodes = record.byLetter.get("M") || [];
+    const mCodes = rejectedEndOfBlockMIndexes.has(record.index)
+      ? rawMCodes.filter((code) => code !== 0)
+      : rawMCodes;
     if (hasExecutionBoundary(record, liveToolDialect)) {
       running = null;
       events.push({line: record.line, direction, running});
       break;
     }
+    const hasProgramStop = mCodes.some((code) => code === 0);
     const hasProgramEnd = mCodes.some((code) => code === 2 || code === 30);
     const beforeDirection = direction;
     const beforeRunning = running;
@@ -1527,13 +1599,23 @@ function programSpindleEvents(records, definitionIndexes, liveToolDialect, seman
         running = false;
       }
     }
+    if (hasProgramStop) {
+      running = liveToolDialect === "haas-lathe-ngc" || running === false ? false : null;
+    }
     if (hasProgramEnd) running = false;
-    if (direction !== beforeDirection || running !== beforeRunning || hasProgramEnd) {
+    if (direction !== beforeDirection || running !== beforeRunning || hasProgramStop || hasProgramEnd) {
       events.push({
         line: record.line,
         direction,
         running,
-        ...(hasProgramEnd ? {
+        ...(hasProgramStop ? {
+          command: "M00",
+          reason: liveToolDialect === "haas-lathe-ngc"
+            ? "program-stop"
+            : (beforeRunning === false
+              ? "program-stop-already-stopped"
+              : "program-stop-controller-effect-unresolved"),
+        } : hasProgramEnd ? {
           command: `M${mCodes.find((code) => code === 2 || code === 30).toString().padStart(2, "0")}`,
           reason: "program-end",
         } : {}),
@@ -3432,6 +3514,7 @@ export function parseGcode(source, {
   const liveToolEvents = [];
   const cAxisEvents = [];
   const cAxisMotions = [];
+  const rejectedEndOfBlockMIndexes = new Set();
   const definitionIndexes = new Set();
   const rawProgramEndIndex = records.findIndex(hasProgramEnd);
   const rawExecutionStopIndex = records.findIndex((record) => hasProgramEnd(record)
@@ -3512,7 +3595,7 @@ export function parseGcode(source, {
     }
     if (hasExecutionBoundary(record, state.liveToolDialect)) {
       if (hasG(record, 65)) updateModalState(record, state, warnings);
-      else applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEvents);
+      else applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEvents, timingEvents);
       if (state.executionBlocked && semanticExecutionStopIndex < 0) semanticExecutionStopIndex = record.index;
       continue;
     }
@@ -3761,7 +3844,13 @@ export function parseGcode(source, {
       const segment = parseBasicRecord(record, state, xMode, warnings, {liveToolEvents, cAxisMotions});
       if (segment) segments.push(segment);
     } finally {
-      applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEvents);
+      const hardStoppedBeforeEndOfBlock = state.executionBlocked;
+      if (hardStoppedBeforeEndOfBlock && (record.byLetter.get("M") || []).includes(0)) {
+        rejectedEndOfBlockMIndexes.add(record.index);
+      }
+      if (!hardStoppedBeforeEndOfBlock && !state.blockedPathPreview) {
+        applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEvents, timingEvents);
+      }
       if (state.executionBlocked && semanticExecutionStopIndex < 0) semanticExecutionStopIndex = record.index;
     }
   }
@@ -3787,11 +3876,17 @@ export function parseGcode(source, {
   }
 
   if (semanticExecutionStopIndex >= 0) {
+    const previewStopIndex = Number.isFinite(state.blockedPathPreviewLine)
+      ? state.blockedPathPreviewLine - 1
+      : -1;
+    const rawProgramEndIsPreviewOnly = previewStopIndex >= 0
+      && rawProgramEndIndex >= previewStopIndex;
     toolCalls = toolCalls.map((call) => {
       if (call.line - 1 < semanticExecutionStopIndex) return call;
       return {
         ...call,
         executable: false,
+        afterProgramEnd: rawProgramEndIsPreviewOnly ? false : call.afterProgramEnd,
         afterExecutionStop: true,
         executionContext: "after-blocked-execution",
       };
@@ -3799,6 +3894,20 @@ export function parseGcode(source, {
     executableToolCalls = toolCalls.filter((call) => call.executable);
   }
   if (state.blockedPathPreview && Number.isFinite(state.blockedPathPreviewLine)) {
+    // Everything after the unsupported command is lexical command-path
+    // preview, not executed machine state. Reassert the sticky uncertainty in
+    // case later modal words were needed to project that visible geometry.
+    state.spindleRunning = null;
+    state.spindleDirection = "unknown";
+    state.liveToolRunning = null;
+    state.liveToolDirection = "unknown";
+    state.liveToolSpeed = null;
+    state.cAxisEngaged = null;
+    state.cAxisEngagementSource = "unknown";
+    state.cAxisPosition = null;
+    state.cAxisPositionUncertaintyDegrees = null;
+    state.turningMode = "unknown";
+    state.programEnded = false;
     for (const segment of segments) {
       const executionLine = Number.isFinite(segment.executionLine) ? segment.executionLine : segment.line;
       if (!Number.isFinite(executionLine) || executionLine < state.blockedPathPreviewLine) continue;
@@ -3815,7 +3924,13 @@ export function parseGcode(source, {
       }
     }
   }
-  const spindleEvents = programSpindleEvents(records, definitionIndexes, state.liveToolDialect, semanticExecutionStopIndex);
+  const spindleEvents = programSpindleEvents(
+    records,
+    definitionIndexes,
+    state.liveToolDialect,
+    semanticExecutionStopIndex,
+    rejectedEndOfBlockMIndexes,
+  );
 
   if (pending && state.liveToolDialect !== "haas-lathe-ngc") {
     warnings.push({line: pending.record.line, message: `${pending.code} first block has no matching P/Q cycle block.`});
@@ -3837,7 +3952,10 @@ export function parseGcode(source, {
   });
   return {
     segments, warnings, cycles, toolCalls, executableToolCalls, units: state.units, sourceLines: lines.length,
-    timingEvents, spindleEvents, dwellSeconds: timingEvents.reduce((sum, event) => sum + event.seconds, 0),
+    programEndLine: state.programEnded && programEndIndex >= 0 ? records[programEndIndex]?.line ?? null : null,
+    timingEvents, spindleEvents, dwellSeconds: timingEvents.reduce((sum, event) => (
+      sum + (event.type === "dwell" ? Math.max(0, Number(event.seconds) || 0) : 0)
+    ), 0),
     unitsSource: state.assumedUnitsUsed ? "assumed" : "program",
     liveToolEvents,
     liveToolAttempts,

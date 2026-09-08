@@ -72,7 +72,18 @@
       <aside id="programPanel" class="editor-panel panel">
         <div class="panel-heading">
           <div><span class="eyebrow">PROGRAM</span><strong id="fileName">sample-g71-rough.nc</strong></div>
-          <span id="lineCount" class="chip">0 lines</span>
+          <div class="program-heading-actions">
+            <span id="lineCount" class="chip">0 lines</span>
+            <details id="sampleProgramMenu" class="sample-program-menu">
+              <summary>Samples</summary>
+              <nav class="sample-program-actions" aria-label="Built-in sample programs">
+                <button id="loadMillSampleButton" type="button">Mill sample</button>
+                <button id="loadLiveBoreSampleButton" type="button">Live bore sample</button>
+                <button id="loadStepSampleButton" type="button">G71 + STEP demo</button>
+                <button id="loadSampleButton" type="button">Reset turning sample</button>
+              </nav>
+            </details>
+          </div>
         </div>
         <section id="programSearchPanel" class="program-search" aria-label="Find and replace" hidden>
           <div class="program-search-row">
@@ -116,15 +127,6 @@
           <p id="gcodeCodeInspectorDescription"></p>
           <small id="gcodeCodeInspectorScope"></small>
         </aside>
-        <div class="editor-footer">
-          <span>Click a code to identify it · Graphics selection follows the source line</span>
-          <span class="editor-sample-actions">
-            <button id="loadMillSampleButton" class="text-button">Mill sample</button>
-            <button id="loadLiveBoreSampleButton" class="text-button">Live bore sample</button>
-            <button id="loadStepSampleButton" class="text-button">G71 + STEP demo</button>
-            <button id="loadSampleButton" class="text-button">Reset turning sample</button>
-          </span>
-        </div>
       </aside>
 
       <div id="programPaneSplitter" class="pane-splitter" role="separator" tabindex="0" aria-label="Resize program and graphics panes" aria-controls="programPanel graphicsPanel" aria-orientation="vertical" title="Drag to resize · Arrow keys adjust · Double-click resets"><span aria-hidden="true"></span></div>

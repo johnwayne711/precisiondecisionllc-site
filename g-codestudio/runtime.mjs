@@ -122,6 +122,28 @@ function qualityFor(untimedSegments, assumedSegments) {
   return "calculated";
 }
 
+function programStopTimingBoundaries(events, segments) {
+  const stopLines = [...new Set(events
+    .filter((event) => event?.type === "program-stop" && Number.isInteger(Number(event.line)))
+    .map((event) => Number(event.line)))]
+    .sort((before, after) => before - after);
+  if (!stopLines.length) return events;
+  const visibleBlockEnds = new Map();
+  let segmentIndex = 0;
+  for (const line of stopLines) {
+    while (segmentIndex < segments.length) {
+      const segment = segments[segmentIndex];
+      const executionLine = Number(segment?.executionLine ?? segment?.line ?? segment?.sourceLine);
+      if (!Number.isInteger(executionLine) || executionLine > line) break;
+      segmentIndex += 1;
+    }
+    visibleBlockEnds.set(line, segmentIndex);
+  }
+  return events.map((event) => event?.type === "program-stop"
+    ? {...event, afterVisibleBlocks: visibleBlockEnds.get(Number(event.line)) || 0}
+    : event);
+}
+
 export function estimateCycleTime(parsed, {
   xScale = 1,
   rapidXMax = null,
@@ -181,7 +203,10 @@ export function estimateCycleTime(parsed, {
     cumulativeBlockedSegments.push(cumulativeBlockedSegments.at(-1) + (blocked ? 1 : 0));
   }
 
-  const sourceTimingEvents = Array.isArray(parsed?.timingEvents) ? parsed.timingEvents : [];
+  const sourceTimingEvents = programStopTimingBoundaries(
+    Array.isArray(parsed?.timingEvents) ? parsed.timingEvents : [],
+    segments,
+  );
   const cAxisTimingEvents = [];
   let untimedCAxisMotions = 0;
   let unknownStartCAxisMotions = 0;
@@ -226,6 +251,8 @@ export function estimateCycleTime(parsed, {
   const timingEvents = [...sourceTimingEvents, ...cAxisTimingEvents]
     .sort((before, after) => (Number(before?.line) || 0) - (Number(after?.line) || 0));
   const dwell = sourceTimingEvents.reduce((sum, event) => sum + (event.type === "dwell" ? Math.max(0, Number(event.seconds) || 0) : 0), 0);
+  const untimedTimingEvents = sourceTimingEvents.filter((event) => event?.untimed === true).length;
+  const programStops = sourceTimingEvents.filter((event) => event?.type === "program-stop").length;
   if (fallbackRapidXUsed || fallbackRapidZUsed) {
     const axes = fallbackRapidXUsed && fallbackRapidZUsed ? "X and Z" : (fallbackRapidXUsed ? "X" : "Z");
     limitations.add(`${axes} rapid timing assumes ${LEGACY_RAPID_RATE_IPM} IPM (${LEGACY_RAPID_RATE_MM_PER_MINUTE.toLocaleString("en-US")} mm/min), a conservative older-machine fallback.`);
@@ -238,6 +265,9 @@ export function estimateCycleTime(parsed, {
   }
   if (untimedCAxisMotions > unknownStartCAxisMotions + blockedCAxisMotions && !(rapidCMax > 0)) {
     limitations.add("C-axis rapid timing needs a confirmed machine C rapid rate.");
+  }
+  if (programStops) {
+    limitations.add(`${programStops} M00 program stop${programStops === 1 ? " has" : "s have"} unknown operator-response duration and ${programStops === 1 ? "is" : "are"} excluded from cycle-time totals.`);
   }
   if (untimedSegments) limitations.add(`${untimedSegments} motion block${untimedSegments === 1 ? " is" : "s are"} missing feed, spindle, or rapid-rate data; a starting position may also be unresolved.`);
   if (blockedSegments) limitations.add(`${blockedSegments} verification-blocked motion block${blockedSegments === 1 ? " is" : "s are"} excluded from cycle-time claims.`);
@@ -270,7 +300,9 @@ export function estimateCycleTime(parsed, {
     limitations.add(`${blockedParserWarnings.length} verification-blocking parser warning${blockedParserWarnings.length === 1 ? " marks" : "s mark"} omitted or unresolved program behavior that is excluded from cycle-time claims.`);
   }
   const seconds = rapid + cutting + dwell;
-  const quality = blockedParserWarnings.length || blockedSegments ? "partial" : qualityFor(untimedSegments, assumedSegments);
+  const quality = blockedParserWarnings.length || blockedSegments
+    ? "partial"
+    : qualityFor(untimedSegments + untimedTimingEvents, assumedSegments);
   return {
     seconds,
     rapidSeconds: rapid,
@@ -278,6 +310,7 @@ export function estimateCycleTime(parsed, {
     dwellSeconds: dwell,
     timedSegments,
     untimedSegments,
+    untimedTimingEvents,
     blockedSegments,
     assumedSegments,
     quality,
@@ -310,10 +343,21 @@ export function cycleTimeAtPosition(estimate, {visibleBlocks = 0, sourceLine = 0
   ), 0);
   const elapsed = Math.min(Number(estimate?.seconds) || 0, (estimate?.cumulativeSeconds?.[block] || 0) + eventSecondsElapsed);
   const remaining = Math.max(0, (Number(estimate?.seconds) || 0) - elapsed);
-  const totalUntimed = Number(estimate?.untimedSegments) || 0;
-  const elapsedUntimedEvents = (estimate?.timingEvents || []).filter((event) => (
-    event.type === "c-axis-index" && event.untimed && Number(event.line) <= line
-  )).length;
+  const totalUntimed = (Number(estimate?.untimedSegments) || 0) + (Number(estimate?.untimedTimingEvents) || 0);
+  const timingEventPosition = (event) => {
+    const eventLine = Math.max(0, Math.trunc(Number(event?.line) || 0));
+    if (event?.type === "program-stop") {
+      const afterVisibleBlocks = Math.max(0, Math.trunc(Number(event?.afterVisibleBlocks) || 0));
+      if (line < eventLine || (line === eventLine && block < afterVisibleBlocks)) return "future";
+      return line === eventLine ? "pending" : "past";
+    }
+    return eventLine <= line ? "past" : "future";
+  };
+  const untimedEventPositions = (estimate?.timingEvents || [])
+    .filter((event) => event?.untimed === true)
+    .map(timingEventPosition);
+  const elapsedUntimedEvents = untimedEventPositions.filter((position) => position !== "future").length;
+  const pendingUntimedEvents = untimedEventPositions.filter((position) => position === "pending").length;
   const elapsedUntimed = (estimate?.cumulativeUntimedSegments?.[block] || 0) + elapsedUntimedEvents;
   const totalAssumed = Number(estimate?.assumedSegments) || 0;
   const elapsedAssumed = estimate?.cumulativeAssumedSegments?.[block] || 0;
@@ -327,7 +371,7 @@ export function cycleTimeAtPosition(estimate, {visibleBlocks = 0, sourceLine = 0
     : qualityFor(elapsedUntimed, elapsedAssumed);
   const remainingQuality = parserProofUnresolved || totalBlocked > elapsedBlocked
     ? "partial"
-    : qualityFor(Math.max(0, totalUntimed - elapsedUntimed), Math.max(0, totalAssumed - elapsedAssumed));
+    : qualityFor(Math.max(0, totalUntimed - elapsedUntimed) + pendingUntimedEvents, Math.max(0, totalAssumed - elapsedAssumed));
   return {
     elapsedSeconds: elapsed,
     remainingSeconds: remaining,

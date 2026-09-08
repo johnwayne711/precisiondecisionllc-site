@@ -22,7 +22,7 @@ const SUPPORTED_G_CODES = new Set([
   40, 43, 49, 54, 80,
   90, 91, 90.1, 91.1, 94,
 ]);
-const SUPPORTED_M_CODES = new Set([2, 3, 4, 5, 6, 7, 8, 9, 30]);
+const SUPPORTED_M_CODES = new Set([0, 2, 3, 4, 5, 6, 7, 8, 9, 30]);
 const ALLOWED_ADDRESSES = new Set([
   "N", "O", "G", "M", "T", "S", "F",
   "X", "Y", "Z", "I", "J", "R", "H", "P",
@@ -767,10 +767,15 @@ function validateRecord(record) {
   if (record.error) return [record.errorCode || "malformed-program-address", record.error];
   const duplicate = [...record.byLetter.entries()].find(([letter, entries]) => !["G", "M"].includes(letter) && entries.length > 1);
   if (duplicate) return ["duplicate-program-address", `The block contains more than one ${duplicate[0]} address.`];
+  const invalidProgramStop = words(record, "M").find((entry) => (
+    entry.value === 0 && !/^\+?0+$/.test(entry.lexeme)
+  ));
+  if (invalidProgramStop) return ["non-integer-m-code", `M${invalidProgramStop.lexeme} is not an exact unsigned-integer M00 spelling.`];
   const nonIntegerM = words(record, "M").find((entry) => !exactIntegerCodeWord(entry));
   if (nonIntegerM) return ["non-integer-m-code", `M${nonIntegerM.lexeme} is not an exact supported M code.`];
-  const mCodes = [...new Set(words(record, "M").map((entry) => entry.value))];
-  if (mCodes.length > 1) return ["multiple-m-codes", "More than one M code in a block is outside this bounded Fanuc-style contract."];
+  const mWords = words(record, "M");
+  const mCodes = [...new Set(mWords.map((entry) => entry.value))];
+  if (mWords.length > 1) return ["multiple-m-codes", "More than one M word in a block is outside this bounded Fanuc-style contract."];
   const unsupportedM = mCodes.find((code) => !SUPPORTED_M_CODES.has(code));
   if (unsupportedM !== undefined) return classifyUnsupportedM(unsupportedM);
   const nonCanonicalG = words(record, "G").find((entry) => !exactIntegerCodeWord(entry) && !exactArcCenterModeWord(entry));
@@ -1202,7 +1207,16 @@ export function parseMillGcode(source, {
     }
 
     const mCode = word(record, "M")?.value;
-    if (mCode === 6) {
+    if (mCode === 0) {
+      timingEvents.push({
+        type: "program-stop",
+        line: record.line,
+        command: "M00",
+        seconds: null,
+        untimed: true,
+        phase: "end-of-block",
+      });
+    } else if (mCode === 6) {
       if (!state.pendingToolKey) {
         stopAt(record, "tool-change-selection-required", "M06 requires an executable T selection in or before the block.");
         break;
@@ -1476,6 +1490,27 @@ export function parseMillGcode(source, {
       }
     }
 
+    if (mCode === 0) {
+      state.spindleRunning = state.spindleRunning === false ? false : null;
+      state.coolant = state.coolant === "off" ? "off" : "unknown";
+      spindleEvents.push({
+        line: record.line,
+        direction: state.spindleDirection,
+        running: state.spindleRunning,
+        command: "M00",
+        reason: state.spindleRunning === false
+          ? "program-stop-already-stopped"
+          : "program-stop-controller-effect-unresolved",
+      });
+      coolantEvents.push({
+        line: record.line,
+        command: "M00",
+        mode: state.coolant,
+        reason: state.coolant === "off"
+          ? "program-stop-already-off"
+          : "program-stop-controller-effect-unresolved",
+      });
+    }
     if (mCode === 2 || mCode === 30) {
       if (state.spindleRunning !== false) {
         state.spindleRunning = false;
@@ -1539,6 +1574,7 @@ export function parseMillGcode(source, {
     warnings,
     cycles: [],
     sourceLines,
+    programEndLine,
     toolCalls,
     executableToolCalls: toolCalls.filter((call) => call.executable),
     toolChangeEvents,
@@ -1550,7 +1586,9 @@ export function parseMillGcode(source, {
     liveToolAttempts: [],
     cAxisEvents: [],
     cAxisMotions: [],
-    dwellSeconds: timingEvents.reduce((sum, event) => sum + Math.max(0, Number(event.seconds) || 0), 0),
+    dwellSeconds: timingEvents.reduce((sum, event) => (
+      sum + (event.type === "dwell" ? Math.max(0, Number(event.seconds) || 0) : 0)
+    ), 0),
     units: state.units,
     unitsSource: state.assumedUnitsUsed || !state.sawUnits ? "configured-default" : "program",
     machineState: {

@@ -88,6 +88,9 @@ const CODE_HELP = new Map([
   ["G113", entry("XY-to-XC interpolation off", "Leaves the bounded Haas lathe face-interpolation mode.", "Modeled only with the explicit Haas lathe NGC live-tool contract.", HAAS_LATHE_CONTEXT)],
   ["G390", entry("Absolute positioning", "Selects absolute linear positioning for the configured Haas lathe.", "Modeled only for the explicit Haas lathe NGC dialect.", HAAS_LATHE_CONTEXT)],
   ["G391", entry("Incremental positioning", "Selects incremental linear positioning for the configured Haas lathe.", "Modeled only for the explicit Haas lathe NGC dialect.", HAAS_LATHE_CONTEXT)],
+  ["M0", entry("Program stop", "Pauses the local program reader at the end of this block until the user resumes it.", "Modeled as an unconditional resumable reader event for bounded lathe and mill paths. Downstream commanded geometry remains parseable. Operator-wait duration and controller-specific spindle, coolant, axis, look-ahead, or auxiliary-state effects are not inferred or included in the motion-and-dwell estimate.", ALL_PATH_CONTEXTS, {
+    "lathe:haas-lathe-ngc": {title: "Unconditional program stop", description: "Pauses the local program reader at the end of this block until the user resumes it; the documented Haas contract also stops the main spindle and coolant.", scope: "The reader resumes at the following block and the modeled main-spindle state becomes stopped. Downstream commanded geometry remains parseable. Operator-wait duration, coolant state, live-tool behavior, and other machine-specific restart effects are not inferred or included in the motion-and-dwell estimate."},
+  })],
   ["M2", entry("Program end", "Ends executable program flow.", "Modeled as an execution boundary by the lathe and mill engines.", ALL_PATH_CONTEXTS)],
   ["M3", entry("Spindle forward", "Starts the modeled main spindle in the M3 direction.", "Modeled for the bounded lathe and mill spindle-state contracts; physical direction still depends on machine setup.", ALL_PATH_CONTEXTS)],
   ["M4", entry("Spindle reverse", "Starts the modeled main spindle in the M4 direction.", "Modeled for the bounded lathe and mill spindle-state contracts; physical direction still depends on machine setup.", ALL_PATH_CONTEXTS)],
@@ -502,6 +505,13 @@ export function identifyGcodeToken(tokenOrText, context = {}) {
     });
   }
   const family = match[1];
+  if (family === "M" && Number(match[2]) === 0 && !/^\+?0+$/.test(match[2])) {
+    return baseIdentification("malformed", {
+      family,
+      title: "Malformed M00 program stop",
+      description: "M00 must use an unsigned integer spelling such as M0 or M00.",
+    });
+  }
   const code = normalizeCode(family, match[2]);
   if (!code) {
     return baseIdentification("malformed", {
