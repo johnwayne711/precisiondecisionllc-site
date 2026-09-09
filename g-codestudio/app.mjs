@@ -83,8 +83,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.0";
-const APP_BUILD = 102;
+const APP_VERSION = "v0.3.1";
+const APP_BUILD = 103;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -529,10 +529,6 @@ function programLanguageContext() {
 function updateOptionalStopControl() {
   const enabled = elements.optionalStop.checked;
   elements.optionalStopStatus.textContent = enabled ? "ON" : "OFF";
-  elements.optionalStop.setAttribute(
-    "aria-label",
-    enabled ? "M01 optional stop enabled; activate to turn off" : "M01 optional stop disabled; activate to turn on",
-  );
   elements.optionalStopControl.title = enabled
     ? "M01 pauses the local reader; Play resumes at the following block"
     : "M01 is recognized and the local reader continues without pausing";
@@ -6820,7 +6816,7 @@ function updateTransport({scrollProgram = false} = {}) {
   const stopCommand = programStopEvent?.command === "M01" ? "M01" : "M00";
   const stopKind = stopCommand === "M01" ? "OPTIONAL STOP" : "PROGRAM STOP";
   const boundaryText = !state.playing && atProgramStop
-    ? (atSourceEnd ? ` · ${stopCommand} ${stopKind} AT SOURCE END — Play replays from start` : ` · ${stopCommand} ${stopKind} — Play resumes`)
+    ? (atSourceEnd ? ` · ${stopCommand} ${stopKind} AT SOURCE END — no following program lines` : ` · ${stopCommand} ${stopKind} — Play resumes`)
     : (!state.playing && atProgramEnd
       ? " · M02/M30 PROGRAM END — Play restarts"
       : (!state.playing && atBlockedPathPreview ? " · PATH ONLY BOUNDARY — Play replays verified path; Step inspects preview" : ""));
@@ -6829,12 +6825,12 @@ function updateTransport({scrollProgram = false} = {}) {
   elements.play.setAttribute("aria-label", state.playing
     ? "Pause"
     : (atProgramStop
-      ? (atSourceEnd ? `Replay from start after final ${stopCommand} ${stopKind.toLowerCase()}` : `Resume after ${stopCommand} ${stopKind.toLowerCase()}`)
+      ? (atSourceEnd ? `No following program lines after ${stopCommand} ${stopKind.toLowerCase()}` : `Resume after ${stopCommand} ${stopKind.toLowerCase()}`)
       : (atProgramEnd
         ? "Restart after M02 or M30 program end"
         : (atBlockedPathPreview ? "Replay verified path before PATH ONLY boundary" : "Play"))));
   elements.timeline.disabled = state.programDirty;
-  elements.play.disabled = state.programDirty;
+  elements.play.disabled = state.programDirty || (atProgramStop && atSourceEnd);
   elements.stepBack.disabled = state.programDirty || state.programLine <= 0;
   elements.stepForward.disabled = state.programDirty || (state.programLine >= totalLines && state.visibleBlocks >= range.end);
   updateReaderTime();
@@ -7735,6 +7731,7 @@ elements.play.addEventListener("click", () => {
     state,
   );
   const atSourceEnd = sourceEndAtPosition(state.parsed.segments, totalLines, state);
+  if (atSourceEnd && programStopAtPosition(state.parsed.timingEvents, state.parsed.segments, state)) return;
   state.playing = !state.playing;
   if (state.playing && (atProgramEnd || atBlockedPathPreview || atSourceEnd)) {
     state.programLine = 0;
@@ -7752,10 +7749,22 @@ elements.play.addEventListener("click", () => {
 });
 
 elements.optionalStop.addEventListener("change", () => {
+  const position = state.programDirty ? null : {
+    line: state.programLine,
+    visibleBlocks: state.visibleBlocks,
+    range: executionRangeForSourceLine(state.parsed.segments, state.programLine),
+  };
   state.playing = false;
   state.lastFrame = 0;
   updateOptionalStopControl();
   plotProgram({fit: false, clearDimensions: false});
+  if (position) {
+    const range = executionRangeForSourceLine(state.parsed.segments, position.line);
+    const visibleBlocks = position.visibleBlocks >= position.range.end
+      ? range.end
+      : Math.min(range.end, range.start + Math.max(0, position.visibleBlocks - position.range.start));
+    setProgramLine(position.line, {visibleBlocks});
+  }
   if (!elements.codeInspector.hidden) inspectProgramTokenAtCaret({hideWhenNone: true});
 });
 
@@ -7997,6 +8006,7 @@ function scheduleProgramCursorSync() {
   if (programCursorFrame !== null) return;
   programCursorFrame = requestAnimationFrame(() => {
     programCursorFrame = null;
+    if (document.activeElement !== elements.input || state.playing) return;
     syncProgramLineToCursor();
     if (!elements.codeInspector.hidden) inspectProgramTokenAtCaret({hideWhenNone: true});
   });

@@ -355,12 +355,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .transport span { color: var(--muted); font: 10px "Cascadia Code", Consolas, monospace; white-space: nowrap; }
 .transport select { padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px; background: #0d1728; font-size: 10px; }
 .transport-options { grid-column: 4; grid-row: 1; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
-.optional-stop-control { display: inline-flex; min-height: 28px; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid #356955; border-radius: 999px; background: #10291f; cursor: pointer; user-select: none; }
+.optional-stop-control { display: inline-flex; min-height: 32px; align-items: center; gap: 6px; padding: 4px 2px; cursor: pointer; user-select: none; }
 .optional-stop-control[hidden] { display: none; }
-.optional-stop-control input { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
-.optional-stop-control span { color: #b6ccc7; font-size: 8px; text-transform: uppercase; letter-spacing: .04em; }
-.optional-stop-control strong { color: var(--accent); font: 850 8px "Cascadia Code", Consolas, monospace; }
-.optional-stop-control:has(input:not(:checked)) { border-color: #4a5963; background: #111b25; }
+.optional-stop-control input { appearance: none; position: relative; flex: none; width: 32px; height: 18px; margin: 0; border: 1px solid #657482; border-radius: 999px; background: #263544; cursor: pointer; }
+.optional-stop-control input::before { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #f3f7f8; }
+.optional-stop-control input:checked { border-color: var(--accent); background: #287453; }
+.optional-stop-control input:checked::before { transform: translateX(14px); }
+.optional-stop-control input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.optional-stop-control span { color: #b6ccc7; font-size: 12px; }
+.optional-stop-control strong { min-width: 3ch; color: var(--accent); font: 850 10px "Cascadia Code", Consolas, monospace; }
 .optional-stop-control:has(input:not(:checked)) strong { color: #aebbc1; }
 .transport-readouts { grid-column: 2 / 5; grid-row: 2; display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; }
 .reader-time { display: flex; align-items: center; gap: 12px; }
@@ -970,6 +973,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 
 @media (forced-colors: active) {
+  .optional-stop-control input::before { border: 1px solid CanvasText; }
   .gcode-syntax-layer { display: none; }
   .gcode-editor.syntax-ready #gcodeInput { color: CanvasText; -webkit-text-fill-color: CanvasText; }
 }
