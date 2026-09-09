@@ -83,8 +83,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.2";
-const APP_BUILD = 104;
+const APP_VERSION = "v0.3.3";
+const APP_BUILD = 105;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -192,6 +192,8 @@ function isExactBundledTurningSample(source, bundledOrigin = false) {
     || isExactBundledProgram(source, dxfSampleProgram, bundledOrigin);
 }
 
+// Match only the untouched prior template notes when upgrading saved profiles.
+const SL75_REVISION_1_NOTES = "DRAFT — owner-requested SL-75 turning environment. Initial plane is X/Z (G18); an explicit program plane command overrides it. Inch and diameter inputs match the owner's current setup. Exact controller, machine travels, home, rapid rates, spindle limits, turret and installed options are unconfirmed. Mori SL-series programming manual PM-NLTMSC518-I1EN lists the SL-75 and shows ordinary X/Z radius programming without G18 (B-12/B-13); its edition/control applicability to this older machine is unconfirmed. Source: https://www.remontservo.ru/arys/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf";
 const DEFAULT_MACHINE_PROFILES = [
   {
     id: "hardinge-conquest-t42", name: "Hardinge Conquest T42 · Fanuc 18-T", manufacturer: "Hardinge",
@@ -209,13 +211,14 @@ const DEFAULT_MACHINE_PROFILES = [
   {
     id: "mori-seiki-sl75", name: "Mori-Seiki SL-75", manufacturer: "Mori Seiki",
     model: "SL-75", serialNumber: "", controlMake: "", controlModel: "",
-    status: "draft", templateRevision: 1, units: "inch", xProgramming: "diameter", orientation: "left",
+    status: "draft", templateRevision: 2, units: "inch", xProgramming: "diameter", orientation: "left",
     initialPlane: "G18", startMode: "unknown", rapidBehavior: "unknown",
-    rapidXMax: null, rapidYMax: null, rapidZMax: null, rapidCMax: null,
+    xAxisStroke: 400 / 25.4, zAxisStroke: 1550 / 25.4, turretStations: 12,
+    rapidXMax: 5000 / 25.4, rapidYMax: null, rapidZMax: 8000 / 25.4, rapidCMax: null,
     liveToolDialect: "unconfigured", liveToolCapability: "unknown", cAxisCapability: "unknown",
     yAxisCapability: "unknown", cAxisEngagement: "unknown", liveToolMaxRpm: null,
     haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown", liveToolEvidence: "",
-    notes: "DRAFT — owner-requested SL-75 turning environment. Initial plane is X/Z (G18); an explicit program plane command overrides it. Inch and diameter inputs match the owner's current setup. Exact controller, machine travels, home, rapid rates, spindle limits, turret and installed options are unconfirmed. Mori SL-series programming manual PM-NLTMSC518-I1EN lists the SL-75 and shows ordinary X/Z radius programming without G18 (B-12/B-13); its edition/control applicability to this older machine is unconfirmed. Source: https://www.remontservo.ru/arys/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf",
+    notes: "DRAFT — factory specifications, pending confirmation on this machine. Mori Seiki SL-75 brochure, specification table (PDF page 4): 12 turret stations; physical X slide stroke 20 + 380 = 400 mm; Z stroke 1550 mm; X rapid 5000 mm/min; Z rapid 8000 mm/min. Inch fields are converted from these published metric values. Source: https://t-mt.com/kousaku/img/25809/25809.pdf\nThe brochure distinguishes SL-75A/B/C and several controls. Exact variant/control, spindle limits, installed options, machine-coordinate limits, home, tool-change positions and rapid interpolation remain unconfirmed. Stroke lengths do not establish coordinate limits or part zero.\nInitial plane is X/Z (G18); programmed plane changes override it. Inch/diameter inputs match the owner's setup. Ordinary X/Z radius programming is shown without G18 in Mori manual PM-NLTMSC518-I1EN, B-12/B-13; edition/control applicability remains unconfirmed. Source: https://www.remontservo.ru/arys/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf",
     updatedAt: null,
   },
   {
@@ -243,12 +246,14 @@ const DEFAULT_MACHINE_PROFILES = [
 const MACHINE_PROFILE_FIELDS = [
   "name", "manufacturer", "model", "serialNumber", "controlMake", "controlModel", "status", "units",
   "xProgramming", "orientation", "initialPlane", "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ",
+  "xAxisStroke", "zAxisStroke",
   "startMode", "startX", "startZ", "rapidBehavior", "rapidXMax", "rapidZMax", "toolChangeX", "toolChangeZ",
   "safeIndexX", "safeIndexZ", "turretStations", "liveToolDialect", "liveToolCapability", "cAxisCapability",
   "yAxisCapability", "cAxisEngagement", "rapidYMax", "rapidCMax", "liveToolMaxRpm", "haasDefaultToFloat",
   "haasIntegerFeedScale", "liveToolEvidence", "notes",
 ];
 const NUMERIC_MACHINE_FIELDS = new Set([
+  "xAxisStroke", "zAxisStroke",
   "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ", "startX", "startZ",
   "rapidXMax", "rapidYMax", "rapidZMax", "rapidCMax", "liveToolMaxRpm", "toolChangeX", "toolChangeZ",
   "safeIndexX", "safeIndexZ", "turretStations",
@@ -1066,8 +1071,13 @@ function restoreSession(saved) {
 }
 
 function normalizeMachineProfile(profile) {
-  const fallback = DEFAULT_MACHINE_PROFILES.find((item) => item.id === profile?.id)
+  const template = DEFAULT_MACHINE_PROFILES.find((item) => item.id === profile?.id)
     || DEFAULT_MACHINE_PROFILES.find((item) => item.id === "generic-lathe");
+  const fallback = {...template};
+  // A saved metric profile must receive metric factory values, not inch numbers.
+  if (template.id === "mori-seiki-sl75" && profile?.units === "mm") {
+    for (const field of ["xAxisStroke", "zAxisStroke", "rapidXMax", "rapidZMax"]) fallback[field] *= 25.4;
+  }
   const needsTemplateUpgrade = Number(profile?.templateRevision || 0) < Number(fallback.templateRevision || 0);
   const upgraded = {...profile};
   if (needsTemplateUpgrade) {
@@ -1077,6 +1087,7 @@ function normalizeMachineProfile(profile) {
       if (existing === null || existing === undefined || existing === "" || existing === "unknown") upgraded[field] = estimate;
     }
     if (!upgraded.notes || upgraded.notes === "Control model is provisional. Confirm against the machine control panel.") upgraded.notes = fallback.notes;
+    if (template.id === "mori-seiki-sl75" && upgraded.notes === SL75_REVISION_1_NOTES) upgraded.notes = fallback.notes;
     upgraded.templateRevision = fallback.templateRevision;
   }
   const normalized = {...fallback, ...upgraded};

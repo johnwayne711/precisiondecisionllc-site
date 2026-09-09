@@ -551,8 +551,10 @@
           </section>
 
           <section class="machine-form-section">
-            <div class="machine-section-heading"><span>02</span><div><h3>Travel & reference</h3><p>Machine-coordinate limits and the reference-return position.</p></div></div>
+            <div class="machine-section-heading"><span>02</span><div><h3>Travel & reference</h3><p>Strokes are physical slide travel in machine units; X stroke is not diameter-scaled. Coordinate limits and home require separate machine setup.</p></div></div>
             <div class="machine-form-grid numeric-grid">
+              <label>X axis stroke<input name="xAxisStroke" type="number" min="0" step="any" placeholder="Unknown"></label>
+              <label>Z axis stroke<input name="zAxisStroke" type="number" min="0" step="any" placeholder="Unknown"></label>
               <label>X travel minimum<input name="xTravelMin" type="number" step="any" placeholder="Unknown"></label>
               <label>X travel maximum<input name="xTravelMax" type="number" step="any" placeholder="Unknown"></label>
               <label>Z travel minimum<input name="zTravelMin" type="number" step="any" placeholder="Unknown"></label>
