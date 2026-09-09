@@ -83,8 +83,12 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.2.0";
-const APP_BUILD = 101;
+const APP_VERSION = "v0.3.0";
+const APP_BUILD = 102;
+
+// Pairing acknowledgements belong only to this exact in-memory job and setup.
+let toolOffsetConfirmationScope = null;
+const confirmedToolOffsetPairings = new Set();
 
 const sampleProgram = `%
 O1071 (G-CODE STUDIO SAMPLE - G71 ROUGH TURN)
@@ -872,6 +876,7 @@ function invalidateReferenceComparison(label, message) {
 
 function markProgramChanged() {
   state.programRevision += 1;
+  clearToolOffsetConfirmations();
   state.playing = false;
   state.lastFrame = 0;
   state.programEditOrigin = "editor";
@@ -879,6 +884,7 @@ function markProgramChanged() {
   state.bundledSample = false;
   state.bundledStepReference = false;
   state.programDirty = true;
+  updateToolOffsetAlert();
   updateToolRotationAlert();
   state.highlightedSourceLine = null;
   positionProgramLineHighlight();
@@ -1228,6 +1234,7 @@ function saveMachineEditor(event) {
 }
 
 function clearToolAssignmentContext() {
+  clearToolOffsetConfirmations();
   state.toolAssignments = {};
   state.toolAssignmentScope = null;
   state.toolAssignmentDocumentIdentity = null;
@@ -2979,12 +2986,11 @@ async function saveProgram() {
         clearToolAssignmentContext();
         state.bundledSample = false;
         state.bundledStepReference = false;
+        markProgramChanged();
         renderProgramToolAssignments();
-        updateStats();
-        draw();
       }
       elements.status.textContent = renamed
-        ? `Saved ${saved.name} · confirm tools for the renamed program`
+        ? `Saved ${saved.name} · plot to review tools for the renamed program`
         : `Saved ${saved.name}`;
       persistSession();
     }
@@ -3024,9 +3030,14 @@ function clearComparison() {
   renderComparison();
 }
 
-function setComparisonOriginal(name, content) {
+function setComparisonOriginal(name, content, {snapshot = false} = {}) {
   state.comparisonOriginalRevision += 1;
   state.comparisonOriginal = {name: name || "original-program.nc", content: String(content ?? "")};
+  if (snapshot) {
+    state.comparisonOriginal.sourceFileName = elements.fileName.textContent;
+    state.comparisonOriginal.confirmedToolOffsetPairings = toolOffsetPairingsForSource(content);
+    state.comparisonOriginal.toolOffsetConfirmationScope = toolOffsetScopeFor(content, elements.fileName.textContent);
+  }
   $("originalCompareName").textContent = state.comparisonOriginal.name;
   $("originalCompareMeta").textContent = `${state.comparisonOriginal.content.replace(/\r/g, "").split("\n").length} lines · held in memory on this device`;
   renderComparison();
@@ -3252,8 +3263,13 @@ function renderComparisonGraphics() {
   if (!state.comparisonOriginal || elements.compareGraphicsAudit.hidden) return;
   const machine = currentMachineProfile();
   const options = {xMode: elements.xMode.value, arcChordTolerance: graphicsQuality().arcChordTolerance, ...machinePlotOptions(machine)};
-  const originalParsed = parseGcode(state.comparisonOriginal.content, options);
-  const revisedParsed = parseGcode(elements.input.value, options);
+  const originalPairings = state.comparisonOriginal.toolOffsetConfirmationScope
+    === toolOffsetScopeFor(state.comparisonOriginal.content, state.comparisonOriginal.sourceFileName)
+    ? state.comparisonOriginal.confirmedToolOffsetPairings : [];
+  const originalParsed = parseGcode(state.comparisonOriginal.content, {...options,
+    confirmedToolOffsetPairings: originalPairings});
+  const revisedParsed = parseGcode(elements.input.value, {...options,
+    confirmedToolOffsetPairings: toolOffsetPairingsForSource(elements.input.value)});
   const geometry = compareSegmentGeometry(originalParsed.segments, revisedParsed.segments, {
     originalCAxisMotions: originalParsed.cAxisMotions,
     revisedCAxisMotions: revisedParsed.cAxisMotions,
@@ -6475,6 +6491,52 @@ function updateBoundsReadout(bounds) {
     : "Drawable program Z × X bounds.";
 }
 
+function clearToolOffsetConfirmations() {
+  toolOffsetConfirmationScope = null;
+  confirmedToolOffsetPairings.clear();
+}
+
+function toolOffsetScopeFor(source, fileName) {
+  return JSON.stringify([source, fileName,
+    currentMachineProfile(), state.latheControllerSettings, elements.machineMode.value, elements.xMode.value, elements.programUnits.value]);
+}
+
+function toolOffsetPairingsForSource(source) {
+  const scope = toolOffsetScopeFor(elements.input.value, elements.fileName.textContent);
+  if (scope !== toolOffsetConfirmationScope) {
+    confirmedToolOffsetPairings.clear();
+    toolOffsetConfirmationScope = scope;
+  }
+  return source === elements.input.value ? [...confirmedToolOffsetPairings] : [];
+}
+
+function currentToolOffsetReview() {
+  const reviews = state.parsed.toolOffsetReviews || [];
+  return reviews.find(review => !review.confirmed) || reviews[0] || null;
+}
+
+function updateToolOffsetAlert() {
+  const alert = $("toolOffsetAlert");
+  const review = isMillMode() ? null : currentToolOffsetReview();
+  alert.hidden = !review;
+  if (!review) return;
+  const confirmed = !state.programDirty && review.confirmed;
+  alert.dataset.confirmed = String(confirmed);
+  $("toolOffsetAlertTitle").textContent = state.programDirty
+    ? "TOOL / OFFSET REVIEW INVALIDATED"
+    : confirmed ? "TOOL / OFFSET PAIRING CONFIRMED" : "TOOL / OFFSET REVIEW REQUIRED";
+  $("toolOffsetAlertMessage").textContent = state.programDirty
+    ? "Program changed. Plot again to review its tool/offset pairings."
+    : confirmed
+      ? `Line ${review.line}: ${review.key} — Tool ${review.station} / offset ${review.offset} confirmed as intentional for this program and machine setup. Actual machine offset values are not verified.`
+      : `Line ${review.line}: ${review.key} — Tool ${review.station} uses offset ${review.offset}. A wrong offset can misposition the tool. Verify the controller's two-digit tool / two-digit offset format and this pairing before proceeding. Downstream verification is blocked.`;
+  const button = $("toolOffsetConfirm");
+  button.textContent = confirmed ? "Require review again"
+    : `Confirm tool ${review.station} / offset ${review.offset} is intentional`;
+  button.disabled = state.programDirty;
+  $("toolOffsetJump").disabled = state.programDirty;
+}
+
 function renderProgramNotes(notes) {
   $("warningCount").textContent = String(notes.length);
   const list = $("warningList");
@@ -6486,7 +6548,8 @@ function renderProgramNotes(notes) {
     list.append(item);
     return;
   }
-  notes.slice(0, 12).forEach((warning) => {
+  [...notes].sort((a, b) => Number(b.code === "tool-offset-pairing-unconfirmed")
+    - Number(a.code === "tool-offset-pairing-unconfirmed")).slice(0, 12).forEach((warning) => {
     const item = document.createElement("li");
     const controllerPreview = warning.code === "unsupported-m-code"
       && state.parsed.machineState?.blockedPathPreview === true;
@@ -6630,12 +6693,18 @@ function updateStats() {
   const pathOnlyCollisions = collisionEvaluation.warnings.length > 0
     || liveToolOperations().length > 0
     || (state.parsed.cAxisMotions || []).length > 0
-    || state.parsed.machineState?.blockedPathPreview === true;
+    || state.parsed.machineState?.blockedPathPreview === true
+    || state.parsed.machineState?.executionBlocked === true
+    || state.parsed.toolOffsetReviews?.some(review => !review.confirmed);
   collisionStatus.textContent = collisions.length
     ? `${collisions.length} HIT${collisions.length === 1 ? "" : "S"}${pathOnlyCollisions ? " · PATH ONLY" : ""}`
     : pathOnlyCollisions ? "PATH ONLY" : "CLEAR";
   collisionStatus.className = collisions.length ? "danger-value" : (pathOnlyCollisions ? "warning-value" : "safe-value");
-  collisionStatus.title = pathOnlyCollisions
+  collisionStatus.title = state.parsed.toolOffsetReviews?.some(review => !review.confirmed)
+    ? "Tool/offset pairing review is unresolved. Command paths only; no complete machine clearance result."
+    : state.parsed.machineState?.executionBlocked === true
+    ? "Program verification is blocked. Only the supported command-path prefix was evaluated; see Program notes."
+    : pathOnlyCollisions
     ? "The configured 2D chuck keep-out was evaluated for turning paths only. Live-tool 3D cutter/holder sweeps are not modeled."
     : "Configured 2D chuck keep-out status for supported turning paths.";
   const primaryProgramBlockers = state.parsed.warnings.filter((warning) => warning.verificationBlocked === true);
@@ -6870,6 +6939,7 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
       xMode: elements.xMode.value,
       arcChordTolerance: graphicsQuality().arcChordTolerance,
       ...plotOptions,
+      confirmedToolOffsetPairings: toolOffsetPairingsForSource(elements.input.value),
     });
   if (!mill) {
     const nextDocumentIdentity = programToolDocumentIdentity(elements.input.value, {
@@ -6981,7 +7051,7 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
         ? `No drawable live-tool path · ${liveSummary.blocked.length} blocked · ${liveSummary.notDisplayed.length} not drawn`
         : "No motion found";
   }
-  updateStats(); updateTransport();
+  updateStats(); updateTransport(); updateToolOffsetAlert();
   if (fit) fitView(); else draw();
 }
 
@@ -7437,6 +7507,31 @@ elements.toolRotationSetup.addEventListener("click", () => {
   const label = first.code === "tool-mounting-unset" ? "Mounting orientation" : "Required spindle direction";
   card?.querySelector(`[aria-label="${label} for ${first.toolKey}"]`)?.focus({preventScroll: true});
 });
+$("toolOffsetConfirm").addEventListener("click", () => {
+  if (state.programDirty || isMillMode()) return;
+  const review = currentToolOffsetReview();
+  if (!review) return;
+  toolOffsetPairingsForSource(elements.input.value);
+  if (review.confirmed) confirmedToolOffsetPairings.delete(review.key);
+  else confirmedToolOffsetPairings.add(review.key);
+  plotProgram({fit: false, clearDimensions: false});
+  if (elements.compareDialog.open && state.comparisonOriginal) renderComparison();
+});
+$("toolOffsetJump").addEventListener("click", () => {
+  if (state.programDirty) return;
+  const review = currentToolOffsetReview();
+  if (!review) return;
+  const lines = elements.input.value.split("\n");
+  const offset = lines.slice(0, review.line - 1).reduce((total, line) => total + line.length + 1, 0);
+  elements.input.setSelectionRange(offset, offset);
+  setProgramLine(review.line);
+  state.highlightedSourceLine = review.line;
+  scrollProgramLineIntoView(review.line);
+  positionProgramLineHighlight();
+  renderProgramRiskHighlights();
+  elements.editor.scrollIntoView({block: "nearest", inline: "nearest"});
+  elements.input.focus({preventScroll: true});
+});
 elements.toolRotationJump.addEventListener("click", () => {
   const first = toolRotationReport().first || state.stockCuttingWarning;
   if (!first) return;
@@ -7488,7 +7583,7 @@ elements.originalFileInput.addEventListener("change", async () => {
 elements.originalFileInput.addEventListener("cancel", () => { state.comparisonPickerRevision = null; });
 $("chooseOriginalButton").addEventListener("click", chooseComparisonOriginal);
 $("chooseOriginalEmptyButton").addEventListener("click", chooseComparisonOriginal);
-$("snapshotOriginalButton").addEventListener("click", () => setComparisonOriginal(`${elements.fileName.textContent || "program.nc"} · snapshot`, elements.input.value));
+$("snapshotOriginalButton").addEventListener("click", () => setComparisonOriginal(`${elements.fileName.textContent || "program.nc"} · snapshot`, elements.input.value, {snapshot: true}));
 $("closeCompareButton").addEventListener("click", () => elements.compareDialog.close());
 elements.compareDialog.addEventListener("click", (event) => {
   if (event.target === elements.compareDialog) elements.compareDialog.close();

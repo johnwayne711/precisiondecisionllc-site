@@ -1,4 +1,4 @@
-import {extractProgramToolCalls} from "./program-tools.mjs";
+import {extractProgramToolCalls, reviewToolOffsetPairings} from "./program-tools.mjs";
 import {
   axisCapability as normalizeAxisCapability,
   cAxisEngagement as normalizeCAxisEngagement,
@@ -843,10 +843,11 @@ function invalidateExecutionState(state) {
   state.executionBlocked = true;
 }
 
-function beginBlockedPathPreview(state, record) {
+function beginBlockedPathPreview(state, record, issue = "unsupported-controller-command-preview") {
   state.blockedPathPreview = true;
   if (!Number.isFinite(state.blockedPathPreviewLine)) {
     state.blockedPathPreviewLine = record.line;
+    state.blockedPathPreviewIssue = issue;
   }
   // Unknown machine commands may change spindle/live-tool state, so none of
   // that state remains authoritative. X/Z is retained only to draw a visibly
@@ -2351,7 +2352,9 @@ function parseBasicRecord(record, state, xMode, warnings, {
       code,
       verificationBlocked: true,
       message: state.turningMode === "unknown"
-        ? "X/Z motion is blocked because a prior live-tool/C-axis command left the machining mode unresolved."
+        ? (state.blockedPathPreviewIssue === "tool-offset-pairing-unconfirmed"
+          ? "X/Z motion is PATH ONLY because the earlier tool/offset pairing has not been confirmed intentional."
+          : "X/Z motion is blocked because a prior live-tool/C-axis command left the machining mode unresolved.")
         : "X/Z turning motion is blocked while live-tool/C-axis mode is active; stop the live drive and select turning mode with M155.",
     });
     noteLiveToolAttempt(record, state, state.motion);
@@ -3547,6 +3550,7 @@ export function parseGcode(source, {
   cutterCompensationContract = null,
   retainBlockedPathAfterUnsupportedM = false,
   optionalStopEnabled = null,
+  confirmedToolOffsetPairings = [],
 } = {}) {
   const lines = source.replace(/\r/g, "").split("\n");
   const records = lines.map(recordFor);
@@ -3623,6 +3627,7 @@ export function parseGcode(source, {
     retainBlockedPathAfterUnsupportedM: retainBlockedPathAfterUnsupportedM === true,
     blockedPathPreview: false,
     blockedPathPreviewLine: null,
+    blockedPathPreviewIssue: null,
     liveToolAttempts: new Map(),
   };
   const segments = [];
@@ -3632,6 +3637,7 @@ export function parseGcode(source, {
   const liveToolEvents = [];
   const cAxisEvents = [];
   const cAxisMotions = [];
+  const toolOffsetReviews = [];
   const rejectedEndOfBlockMIndexes = new Set();
   const definitionIndexes = new Set();
   const definitionToolIndexes = new Set();
@@ -3704,6 +3710,12 @@ export function parseGcode(source, {
     };
   });
   let executableToolCalls = toolCalls.filter((call) => call.executable);
+  toolOffsetReviews.push(...reviewToolOffsetPairings(toolCalls, confirmedToolOffsetPairings));
+  const toolOffsetReviewsByLine = new Map();
+  for (const review of toolOffsetReviews) {
+    if (!toolOffsetReviewsByLine.has(review.line)) toolOffsetReviewsByLine.set(review.line, []);
+    toolOffsetReviewsByLine.get(review.line).push(review);
+  }
   const toolCallsByLine = new Map();
   for (const call of toolCalls) {
     if (!toolCallsByLine.has(call.line)) toolCallsByLine.set(call.line, []);
@@ -3762,6 +3774,13 @@ export function parseGcode(source, {
       else applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEvents, timingEvents);
       if (state.executionBlocked && semanticExecutionStopIndex < 0) semanticExecutionStopIndex = record.index;
       continue;
+    }
+    if (!state.blockedPathPreview) {
+      const reviews = toolOffsetReviewsByLine.get(record.line) || [];
+      for (const review of reviews.filter(candidate => !candidate.confirmed)) {
+        warningOnce(warnings, {...review, verificationBlocked: true});
+        beginBlockedPathPreview(state, record, review.code);
+      }
     }
     applyRecordToolCall(record, state, liveToolEvents);
     try {
@@ -4067,13 +4086,21 @@ export function parseGcode(source, {
       segment.pathPreviewOnly = true;
       segment.verificationIssues = [...new Set([
         ...(segment.verificationIssues || []),
-        "unsupported-controller-command-preview",
+        state.blockedPathPreviewIssue || "unsupported-controller-command-preview",
       ])];
     }
     for (let index = timingEvents.length - 1; index >= 0; index -= 1) {
       if (Number(timingEvents[index]?.line) >= state.blockedPathPreviewLine) {
         timingEvents.splice(index, 1);
       }
+    }
+    for (const motion of cAxisMotions) {
+      if (Number(motion.line) < state.blockedPathPreviewLine) continue;
+      motion.blocked = true;
+      motion.verificationBlocked = true;
+      motion.verificationIssues = [...new Set([
+        ...(motion.verificationIssues || []), state.blockedPathPreviewIssue,
+      ].filter(Boolean))];
     }
   }
   const spindleEvents = programSpindleEvents(
@@ -4084,6 +4111,15 @@ export function parseGcode(source, {
     semanticExecutionStopIndex,
     rejectedEndOfBlockMIndexes,
   );
+  const finalToolCallExecutability = new Map(toolCalls.map(call => [`${call.line}:${call.column}`, call.executable]));
+  for (const review of toolOffsetReviews) {
+    review.executable = finalToolCallExecutability.get(`${review.line}:${review.column}`) === true;
+    if (!review.confirmed) {
+      const existing = warnings.find(warning => warning.line === review.line && warning.code === review.code);
+      if (existing) Object.assign(existing, review);
+      else warningOnce(warnings, {...review, verificationBlocked: true});
+    }
+  }
 
   if (warnOnAssumedUnits && state.assumedUnitsUsed) {
     const label = normalizedDefaultUnits === "in" ? "inches" : "millimeters";
@@ -4097,11 +4133,12 @@ export function parseGcode(source, {
     return {
       ...attempt,
       displayed: sameLine.length > 0,
-      blocked: blockedBySegment || blockedByWarning,
+      blocked: blockedBySegment || blockedByWarning
+        || (state.blockedPathPreview && attempt.line >= state.blockedPathPreviewLine),
     };
   });
   return {
-    segments, warnings, cycles, toolCalls, executableToolCalls, units: state.units, sourceLines: lines.length,
+    segments, warnings, cycles, toolCalls, executableToolCalls, toolOffsetReviews, units: state.units, sourceLines: lines.length,
     programEndLine: state.programEnded && programEndIndex >= 0 ? records[programEndIndex]?.line ?? null : null,
     timingEvents, spindleEvents, dwellSeconds: timingEvents.reduce((sum, event) => (
       sum + (event.type === "dwell" ? Math.max(0, Number(event.seconds) || 0) : 0)
@@ -4139,6 +4176,7 @@ export function parseGcode(source, {
       executionBlocked: state.executionBlocked || state.blockedPathPreview,
       blockedPathPreview: state.blockedPathPreview,
       blockedPathPreviewLine: state.blockedPathPreviewLine,
+      blockedPathPreviewIssue: state.blockedPathPreviewIssue,
     },
   };
 }

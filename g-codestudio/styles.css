@@ -278,6 +278,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .legend .arc { background: var(--arc); }
 .legend .live { height: 3px; background: repeating-linear-gradient(90deg, #f472b6 0 5px, transparent 5px 8px); }
 .legend .reference { height: 3px; background: repeating-linear-gradient(90deg, #fbbf24 0 7px, transparent 7px 10px); }
+.tool-offset-alert { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; background: #490e1d; border-bottom: 2px solid #fb4f68; color: #fff1f2; }
+.tool-offset-alert[hidden] { display: none; }
+.tool-offset-alert > div { flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 5px; overflow-wrap: anywhere; }
+.tool-offset-alert strong { font-size: 12px; letter-spacing: .04em; }
+.tool-offset-alert span { font-size: 12px; line-height: 1.4; }
+.tool-offset-alert button { flex: 0 1 auto; min-height: 38px; max-width: 100%; padding: 7px 9px; border: 1px solid #ff9aae; border-radius: 6px; background: #702039; color: #fff1f2; font-size: 11px; line-height: 1.3; }
+.tool-offset-alert button:focus-visible { outline: 2px solid white; outline-offset: 2px; }
+.tool-offset-alert[data-confirmed="true"] { background: #3b2a0b; border-color: #fbbf24; color: #fef3c7; }
+.tool-offset-alert[data-confirmed="true"] button { background: #5a3d08; border-color: #fbbf24; color: #fef3c7; }
 .tool-rotation-alert { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; background: #3b2a0b; border-bottom: 2px solid #fbbf24; color: #fef3c7; }
 .tool-rotation-alert[hidden] { display: none; }
 .tool-rotation-alert > div { flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }

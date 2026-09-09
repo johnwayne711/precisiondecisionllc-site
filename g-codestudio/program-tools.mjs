@@ -5,6 +5,36 @@ const TOOL_WORD = /T\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))/gi;
 const AXIS_MOTION_WORD = /[XZ]\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)/i;
 const PROGRAM_WORD = /^\s*%?\s*(?:\/\s*)?(?:N\s*[+-]?\d+(?:\.\d*)?\s*)?O\s*(\d+)\b/i;
 
+/**
+ * Review an explicitly chosen four-digit 2+2 convention without changing the
+ * exact T key or inferring the controller's actual offset-table contents.
+ * Potential calls beyond parser-unknown commands remain review candidates;
+ * known cycle definitions and post-program-end calls do not. 00 is not a mismatch.
+ */
+export function reviewToolOffsetPairings(toolCalls, confirmedToolOffsetPairings = []) {
+  const confirmed = new Set(Array.isArray(confirmedToolOffsetPairings)
+    ? confirmedToolOffsetPairings.filter(key => typeof key === "string") : []);
+  return (Array.isArray(toolCalls) ? toolCalls : []).flatMap(call => {
+    if (call?.definitionOnly || call?.afterProgramEnd || !/^\d{4}$/.test(call?.valueLexeme || "")) return [];
+    const stationLexeme = call.valueLexeme.slice(0, 2);
+    const offsetLexeme = call.valueLexeme.slice(2);
+    const station = Number(stationLexeme);
+    const offset = Number(offsetLexeme);
+    if (!station || !offset || station === offset) return [];
+    const intentional = confirmed.has(call.key);
+    return [{
+      key: call.key, toolKey: call.key, sourceLexeme: call.sourceLexeme,
+      line: call.line, column: call.column, station, offset, stationLexeme, offsetLexeme,
+      convention: "lathe-four-digit-2-plus-2-review", confirmed: intentional,
+      executable: call.executable === true, reviewCandidate: true,
+      code: intentional ? "tool-offset-pairing-confirmed" : "tool-offset-pairing-unconfirmed",
+      message: `TOOL/OFFSET REVIEW: ${call.key} pairs tool ${station} with offset ${offset} under the four-digit 2+2 review convention. ${intentional
+        ? "This pairing was explicitly confirmed intentional for this parse; controller and offset-table values are not inferred."
+        : "Verify the controller convention and confirm this pairing is intentional. Execution, timing, stock, comparison and clearance remain blocked for this pairing until confirmed; any retained command path is PATH ONLY. Other blockers remain after confirmation."}`,
+    }];
+  });
+}
+
 function uniqueText(items) {
   const seen = new Set();
   return items.filter((item) => {
