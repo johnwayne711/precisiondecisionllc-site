@@ -7,6 +7,7 @@
   <title>Mori-Seiki SL-75 reference · G-Code Studio</title>
   <link rel="stylesheet" href="./reference.css">
   <script type="module" src="./reference.mjs"></script>
+  <script type="module" src="./local-documents.mjs"></script>
 </head>
 <body>
   <main>
@@ -16,10 +17,27 @@
       <p>Machine facts, modeled commands and source documents in one place.</p>
     </header>
     <nav aria-label="Source documents" class="documents">
+      <a href="./sl75-english-reference.pdf" target="_blank" rel="noopener noreferrer">English technical reference (PDF) ↗</a>
       <a href="https://www.remontservo.ru/tash-kumyr/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf" target="_blank" rel="noopener noreferrer">Open programming manual (PDF) ↗</a>
       <a href="https://t-mt.com/kousaku/img/25809/25809.pdf" target="_blank" rel="noopener noreferrer">Open SL-75 factory brochure (PDF) ↗</a>
     </nav>
-    <p class="secondary">The full documents open at their source. Use the PDF viewer’s Find command to search the manual. Ctrl+F / ⌘F also works on this reference page.</p>
+    <p class="secondary">The English PDF is an original, unofficial summary of factory specifications. The source manual and Japanese brochure open at their hosts. Use the PDF viewer’s Find command for searchable PDFs; the Japanese brochure is scanned. Ctrl+F / ⌘F also works on this page.</p>
+    <section class="local-documents" aria-labelledby="savedDocumentsHeading">
+      <h2 id="savedDocumentsHeading">Keep your PDFs on this device</h2>
+      <p>Choose your downloaded manual or brochure below. Each PDF stays in this browser, is never uploaded, and remains available when the source site is offline. Up to 20 MB each. Keep a downloaded backup: clearing browser data can remove these copies.</p>
+      <div class="local-document" data-document="manual">
+        <label for="manualPdf">Save or replace programming manual PDF</label>
+        <input id="manualPdf" type="file" accept=".pdf,application/pdf">
+        <p role="status" aria-live="polite">Reading saved manual…</p>
+        <div data-actions hidden><a data-open target="_blank" rel="noopener noreferrer">Open saved manual ↗</a><a data-download>Download backup</a><button type="button">Remove saved manual</button></div>
+      </div>
+      <div class="local-document" data-document="brochure">
+        <label for="brochurePdf">Save or replace Japanese brochure PDF</label>
+        <input id="brochurePdf" type="file" accept=".pdf,application/pdf">
+        <p role="status" aria-live="polite">Reading saved brochure…</p>
+        <div data-actions hidden><a data-open target="_blank" rel="noopener noreferrer">Open saved brochure ↗</a><a data-download>Download backup</a><button type="button">Remove saved brochure</button></div>
+      </div>
+    </section>
     <div class="search">
       <label for="referenceSearch">Search this reference</label>
       <div class="search-row"><input id="referenceSearch" type="search" placeholder="M41, stroke, G18…" autocomplete="off"><button id="clearReferenceSearch" type="button">Clear</button></div>
@@ -33,7 +51,7 @@
         <tbody>
           <tr><th scope="row">M41</th><td>First / low</td><td>Continues playback</td></tr>
           <tr><th scope="row">M42</th><td>Second</td><td>Continues playback</td></tr>
-          <tr><th scope="row">M43</th><td>Third</td><td>Continues playback</td></tr>
+          <tr><th scope="row">M43</th><td>Third, where equipped</td><td>Reader models the command; confirm the installed variant</td></tr>
         </tbody>
       </table>
       <p>These meanings apply to the selected SL-75 environment. They do not enable these commands for other machine profiles or a conflicting Haas dialect.</p>
@@ -55,6 +73,7 @@
         </tbody>
       </table>
       <p>The inch-profile fields use these metric values divided by 25.4. Physical X stroke is slide movement; diameter programming does not double it. Stroke lengths do not locate machine home, work zero or travel endpoints.</p>
+      <p>The brochure lists three spindle ranges for SL-75A and two for SL-75B/C. Do not assume a third range exists on every SL-75. The English reference separates these variants; opening it does not configure your machine.</p>
       <p class="source">Source: <a href="https://t-mt.com/kousaku/img/25809/25809.pdf#page=4" target="_blank" rel="noopener noreferrer">Mori-Seiki SL-75 factory brochure, PDF page 4 ↗</a>. The brochure distinguishes SL-75A/B/C variants and several controls.</p>
     </section>
 

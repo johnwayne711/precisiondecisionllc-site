@@ -1,4 +1,5 @@
 import {millSegmentLengthMm} from "./mill-gcode.mjs";
+import {programmedSpindleRpm} from "./spindle-feed.mjs";
 
 const EPSILON = 1e-9;
 export const LEGACY_RAPID_RATE_IPM = 400;
@@ -59,16 +60,14 @@ function rapidTiming(segment, {xScale, rapidXMax, rapidYMax, rapidZMax, rapidCMa
 }
 
 function cssRpm(segment, point, xScale) {
-  const diameterMm = Math.abs(point.x) * (xScale === 0.5 ? 1 : 2);
-  if (!(diameterMm > EPSILON) || !(segment.spindleSpeed > 0)) return null;
-  const rpm = segment.programUnits === "in"
-    ? segment.spindleSpeed * 12 / (Math.PI * (diameterMm / 25.4))
-    : segment.spindleSpeed * 1000 / (Math.PI * diameterMm);
-  return segment.spindleLimit > 0 ? Math.min(rpm, segment.spindleLimit) : rpm;
+  return programmedSpindleRpm(segment, point, xScale).rpm;
 }
 
 function cuttingTiming(segment, xScale) {
   if (segment.verificationBlocked || segment.liveToolBlocked) return null;
+  // Compensated motion length and programmed CSS diameter are different
+  // curves. Their time integral is not modeled by the legacy point estimator.
+  if (segment.programmedGeometry && segment.spindleMode === "css" && segment.feedMode === "per-revolution") return null;
   // A commanded gear can clamp RPM below G50/S. Its actual range limits have
   // not been configured; retain geometry without inventing spindle-driven time.
   if (segment.commandedSpindleGear != null && segment.feedMode === "per-revolution") return null;
@@ -87,10 +86,12 @@ function cuttingTiming(segment, xScale) {
     // Haas F is the larger axis lead, not feed along the diagonal line.
     // This is nominal constant-RPM feed time, excluding encoder acquisition,
     // acceleration, lead-in/runout and physical phase behavior.
-    const seconds = Math.max(axial, radial) / thread.leadMmPerRev / segment.spindleSpeed * 60;
+    const rpm = programmedSpindleRpm(segment, segment.start, xScale).rpm;
+    if (!(rpm > 0)) return null;
+    const seconds = Math.max(axial, radial) / thread.leadMmPerRev / rpm * 60;
     return Number.isFinite(seconds) && axial > 0 ? {seconds, assumed: false} : null;
   }
-  if (!(segment.feed > 0)) return null;
+  if (!(segment.feed > 0) || segment.feedIssue) return null;
   const unitScale = segment.unitScale > 0 ? segment.unitScale : (segment.programUnits === "in" ? 25.4 : 1);
   if (segment.machiningMode === "mill" && segment.feedMode === "per-minute") {
     const length = millSegmentLengthMm(segment);
@@ -107,7 +108,7 @@ function cuttingTiming(segment, xScale) {
     }
     if (segment.feedMode !== "per-revolution" || segment.spindleRunning !== true) return null;
     let rpm = null;
-    if (segment.spindleMode === "rpm") rpm = segment.spindleSpeed;
+    if (segment.spindleMode === "rpm") rpm = programmedSpindleRpm(segment, segment.start, xScale).rpm;
     else if (segment.spindleMode === "css") {
       const midpoint = {x: (piece.before.x + piece.after.x) / 2, z: (piece.before.z + piece.after.z) / 2};
       rpm = cssRpm(segment, midpoint, xScale);
@@ -198,6 +199,9 @@ export function estimateCycleTime(parsed, {
       if (assumed) assumedSegments += 1;
     } else if (!blocked) {
       untimedSegments += 1;
+      if (segment.programmedGeometry && segment.spindleMode === "css" && segment.feedMode === "per-revolution") {
+        limitations.add("G96/G99 timing with tool-nose compensation is unqualified; compensated display coordinates cannot replace the programmed CSS diameter.");
+      }
     }
     if (blocked) blockedSegments += 1;
     cumulativeSeconds.push(cumulativeSeconds.at(-1) + (Number.isFinite(seconds) ? seconds : 0));

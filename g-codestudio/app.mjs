@@ -7,6 +7,7 @@ import {
   millSourceRecordSummary, parseMillGcode,
 } from "./mill-gcode.mjs";
 import {cycleTimeAtPosition, estimateCycleTime, formatCycleTime} from "./runtime.mjs";
+import {spindleFeedAtPosition} from "./spindle-feed.mjs";
 import {
   buildStockProfile, collisionPointForSegment, evaluateCollisions, extendStockProfile, isLiveToolSegment,
   stockContourPoints, stockMaterialIntervals, stockPlacement, stockVerificationColumns,
@@ -83,8 +84,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.5";
-const APP_BUILD = 107;
+const APP_VERSION = "v0.3.6";
+const APP_BUILD = 108;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -245,7 +246,7 @@ const DEFAULT_MACHINE_PROFILES = [
 ];
 const MACHINE_PROFILE_FIELDS = [
   "name", "manufacturer", "model", "serialNumber", "controlMake", "controlModel", "status", "units",
-  "xProgramming", "orientation", "initialPlane", "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ",
+  "xProgramming", "orientation", "initialPlane", "cssUnits", "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ",
   "xAxisStroke", "zAxisStroke",
   "startMode", "startX", "startZ", "rapidBehavior", "rapidXMax", "rapidZMax", "toolChangeX", "toolChangeZ",
   "safeIndexX", "safeIndexZ", "turretStations", "liveToolDialect", "liveToolCapability", "cAxisCapability",
@@ -356,6 +357,7 @@ const elements = {
 
 const state = {
   parsed: {segments: [], warnings: []}, cycleTime: null, programLine: 0, visibleBlocks: 0, playing: false, lastFrame: 0,
+  feedReadoutMode: "per-minute",
   camera: {scale: 1, offsetX: 0, offsetY: 0, fitted: false}, drag: null, cursor: null,
   machineProfiles: DEFAULT_MACHINE_PROFILES.map((profile) => ({...profile})),
   comparisonOriginal: null, comparison: null, compareChangeIndex: -1, comparisonOriginalRevision: 0, comparisonPickerRevision: null,
@@ -1097,6 +1099,7 @@ function normalizeMachineProfile(profile) {
   }
   const normalized = {...fallback, ...upgraded};
   normalized.initialPlane = normalized.initialPlane === "G18" ? "G18" : "unknown";
+  normalized.cssUnits = ["sfm", "m/min", "program"].includes(normalized.cssUnits) ? normalized.cssUnits : "unknown";
   for (const field of NUMERIC_MACHINE_FIELDS) {
     const value = normalized[field];
     normalized[field] = value === "" || value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
@@ -1183,6 +1186,7 @@ function machinePlotOptions(profile) {
     initialPosition,
     referencePosition,
     initialPlane: profile.initialPlane === "G18" ? "G18" : null,
+    cssUnits: profile.cssUnits || "unknown",
     spindleGearContract: sl75SpindleGearContract(profile),
     initialPositionMode: configuredStart.mode,
     initialPositionIssue: configuredStart.reason,
@@ -6882,6 +6886,41 @@ function updateReaderTime() {
   }
 }
 
+function updateSpindleFeedReadout() {
+  $("spindleFeedReadout").hidden = isMillMode();
+  if (isMillMode()) return;
+  const result = state.programDirty ? {reasons: ["PLOT REQUIRED — source has changed."]}
+    : spindleFeedAtPosition(state.parsed, {sourceLine: state.programLine, visibleBlocks: state.visibleBlocks, xScale: xScale()});
+  const number = value => new Intl.NumberFormat("en-US", {maximumSignificantDigits: 7}).format(value);
+  const units = elements.displayUnits.value === "inch" ? "in" : "mm";
+  $("spindleRpmReadout").textContent = Number.isFinite(result.rpm) ? `${number(result.rpm)} RPM` : "Unknown";
+  const perMinute = state.feedReadoutMode !== "per-revolution";
+  const formatFeed = (value, basis) => Number.isFinite(value)
+    ? `${number(value / (units === "in" ? 25.4 : 1))} ${units}/${basis}` : "Unknown";
+  $("cuttingFeedReadout").textContent = result.rapid ? "RAPID"
+    : formatFeed(perMinute ? result.feed : result.feedPerRevolution, perMinute ? "min" : "rev");
+  $("cuttingFeedSecondaryReadout").hidden = state.feedReadoutMode !== "both" || Boolean(result.rapid);
+  $("cuttingFeedSecondaryReadout").textContent = formatFeed(result.feedPerRevolution, "rev")
+    + (Number.isFinite(result.feedPerRevolution) ? "" : ` ${units}/rev`);
+  for (const button of $("feedDisplayToggle").querySelectorAll("button")) {
+    const mode = button.dataset.feedDisplay;
+    button.textContent = mode === "both" ? "Both" : `${units}/${mode === "per-minute" ? "min" : "rev"}`;
+    button.setAttribute("aria-pressed", String(mode === state.feedReadoutMode));
+  }
+  const cssUnits = result.cssUnits === "program" ? (result.programUnits === "in" ? "sfm" : "m/min") : result.cssUnits;
+  const speedMode = result.spindleMode === "css" ? "G96" : result.spindleMode === "rpm" ? "G97" : "Mode unknown";
+  const speedUnits = result.spindleMode === "css" ? (cssUnits === "sfm" ? "SFM" : cssUnits === "m/min" ? "m/min" : "units unknown") : "RPM";
+  $("spindleModeReadout").textContent = `${speedMode}${Number.isFinite(result.spindleSpeed) ? ` · S${number(result.spindleSpeed)} ${speedUnits}` : ""}${result.spindleRunning === false ? " · stopped" : ["m3", "m4"].includes(result.spindleDirection) ? ` · ${result.spindleDirection.toUpperCase()}` : ""}`;
+  $("feedModeReadout").textContent = result.feedMode === "per-minute" ? "G98" : result.feedMode === "per-revolution" ? "G99" : "Mode unknown";
+  if (Number.isFinite(result.commandedFeed)) $("feedModeReadout").textContent += ` · F${number(result.commandedFeed)} ${result.programUnits === "in" ? "in" : "mm"}/${result.feedMode === "per-revolution" ? "rev" : "min"}`;
+  if (Number.isFinite(result.threadLeadMmPerRev)) $("feedModeReadout").textContent += " · thread lead";
+  $("spindleLimitReadout").textContent = Number.isFinite(result.spindleLimit)
+    ? `G50 S${number(result.spindleLimit)} · ${result.spindleRpmLimitMode === "css-only" ? "G96 only" : result.spindleRpmLimitMode === "both" ? "G96/G97" : "G97 effect unconfigured"}` : "G50 cap not set";
+  const reasons = [...(result.reasons || [])];
+  if (state.feedReadoutMode !== "per-minute" && result.feedPerRevolutionReason) reasons.push(result.feedPerRevolutionReason);
+  $("spindleFeedStatus").textContent = reasons.join(" ") || "At the selected block/substep end. Acceleration, overrides and machine limits are not included.";
+}
+
 function updateTransport({scrollProgram = false} = {}) {
   const totalBlocks = state.parsed.segments.length;
   const totalLines = state.parsed.sourceLines || programLineCount();
@@ -6923,6 +6962,7 @@ function updateTransport({scrollProgram = false} = {}) {
   elements.stepBack.disabled = state.programDirty || state.programLine <= 0;
   elements.stepForward.disabled = state.programDirty || (state.programLine >= totalLines && state.visibleBlocks >= range.end);
   updateReaderTime();
+  updateSpindleFeedReadout();
   if (isMillMode()) {
     const point = millPositionAt(state.parsed, {sourceLine: state.programLine, visibleCount: state.visibleBlocks});
     const places = millDisplayDecimals();
@@ -7319,6 +7359,12 @@ function applyDisplayUnits(value) {
 }
 
 elements.displayUnits.addEventListener("change", () => applyDisplayUnits(elements.displayUnits.value));
+$("feedDisplayToggle").addEventListener("click", event => {
+  const mode = event.target.closest("button[data-feed-display]")?.dataset.feedDisplay;
+  if (!["per-minute", "per-revolution", "both"].includes(mode)) return;
+  state.feedReadoutMode = mode;
+  updateSpindleFeedReadout();
+});
 
 elements.programUnits.addEventListener("change", () => {
   updateProgramUnitsHint();

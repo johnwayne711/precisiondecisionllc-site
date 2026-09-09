@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "verify-app-";
-const CACHE_NAME = "verify-app-v107";
+const CACHE_NAME = "verify-app-v108";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -9,6 +9,9 @@ const APP_ASSETS = [
   "./references/sl75.html",
   "./references/reference.css",
   "./references/reference.mjs",
+  "./references/document-store.mjs",
+  "./references/local-documents.mjs",
+  "./references/sl75-english-reference.pdf",
   "./session-storage.mjs",
   "./stock-setup.mjs",
   "./stock-section-view.mjs",
@@ -70,6 +73,7 @@ const APP_ASSETS = [
   "./live-view.mjs",
   "./live-stock.mjs",
   "./runtime.mjs",
+  "./spindle-feed.mjs",
   "./simulation.mjs",
   "./units.mjs",
   "./manifest.webmanifest",

@@ -228,6 +228,18 @@
           <div id="toolVerificationBadge" class="tool-verification-badge" aria-live="polite" hidden><span>2D TOOL OUTLINE</span><strong>NO ACTIVE TOOL</strong></div>
           <div id="emptyState" class="empty-state" hidden>No motion blocks found</div>
         </div>
+        <section id="spindleFeedReadout" class="spindle-feed-readout" aria-label="Programmed spindle and feed targets">
+          <div><span>SPINDLE TARGET</span><strong id="spindleRpmReadout">Unknown</strong><small id="spindleModeReadout">Mode unknown</small></div>
+          <div><span>CUTTING FEED TARGET</span>
+            <div id="feedDisplayToggle" class="feed-display-toggle" role="group" aria-label="Feed display units">
+              <button type="button" data-feed-display="per-minute" aria-pressed="true">in/min</button>
+              <button type="button" data-feed-display="per-revolution" aria-pressed="false">in/rev</button>
+              <button type="button" data-feed-display="both" aria-pressed="false">Both</button>
+            </div>
+            <strong id="cuttingFeedReadout">Unknown</strong><strong id="cuttingFeedSecondaryReadout" hidden></strong><small id="feedModeReadout">Mode unknown</small>
+          </div>
+          <div class="spindle-feed-context"><span>CALCULATED · NO MACHINE FEEDBACK</span><small id="spindleLimitReadout">G50 cap not set</small><small id="spindleFeedStatus">No spindle/feed state established.</small></div>
+        </section>
         <div class="transport">
           <button id="playButton" class="play-button" data-transport-state="play" aria-label="Play"></button>
           <div class="transport-steps" role="group" aria-label="Program line stepping">
@@ -549,6 +561,7 @@
               <label>Machine units<select name="units"><option value="inch">Inches</option><option value="mm">Millimeters</option></select></label>
               <label>X programming<select name="xProgramming"><option value="diameter">Diameter</option><option value="radius">Radius</option></select></label>
               <label>Starting plane<select id="mf-initialPlane" name="initialPlane"><option value="unknown">Unknown — require program declaration</option><option value="G18">X/Z turning (G18)</option></select></label>
+              <label>G96 surface-speed units<select name="cssUnits"><option value="unknown">Unknown — leave CSS RPM unresolved</option><option value="sfm">Surface feet per minute (SFM)</option><option value="m/min">Metres per minute (m/min)</option><option value="program">G20 = SFM / G21 = m/min (confirmed)</option></select></label>
               <label>Chuck orientation<select name="orientation"><option value="left">Chuck left</option><option value="right">Chuck right</option></select></label>
               <label>Turret stations<input name="turretStations" type="number" min="1" max="100" step="1" placeholder="Unknown"></label>
             </div>

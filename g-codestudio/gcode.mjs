@@ -1,8 +1,10 @@
 import {extractProgramToolCalls, reviewToolOffsetPairings} from "./program-tools.mjs";
+import {programmedSpindleRpm} from "./spindle-feed.mjs";
 import {
   axisCapability as normalizeAxisCapability,
   cAxisEngagement as normalizeCAxisEngagement,
   commandedSpindleGear,
+  SL75_SPINDLE_GEAR_CONTRACT,
   liveToolCapability as normalizeLiveToolCapability,
   liveToolDialect as resolveLiveToolDialect,
 } from "./machine-semantics.mjs";
@@ -25,7 +27,7 @@ const GENERIC_MODAL_GROUPS = Object.freeze([
   {name: "motion", codes: new Set([0, 1, 2, 3, 70, 71, 72])},
   {name: "plane", codes: new Set([17, 18, 19])},
   {name: "positioning", codes: new Set([90, 91])},
-  {name: "feed", codes: new Set([94, 95])},
+  {name: "feed", codes: new Set([94, 95, 98, 99])},
   {name: "units", codes: new Set([20, 21])},
   {name: "cutter compensation", codes: new Set([40, 41, 42])},
   {name: "spindle speed", codes: new Set([96, 97])},
@@ -974,6 +976,11 @@ function timingSnapshot(state) {
     spindleMode: state.spindleMode ?? "unknown",
     spindleSpeed: state.spindleSpeed ?? null,
     spindleLimit: state.spindleLimit ?? null,
+    cssUnits: state.cssUnits ?? "unknown",
+    spindleRpmLimitMode: state.spindleRpmLimitMode ?? "unknown",
+    spindleSpeedIssue: state.spindleSpeedIssue ?? null,
+    spindleLimitIssue: state.spindleLimitIssue ?? null,
+    feedIssue: state.feedIssue ?? null,
     commandedSpindleGear: state.commandedSpindleGear ?? null,
     spindleRunning: state.spindleRunning ?? null,
     spindleDirection: state.spindleDirection ?? "unknown",
@@ -1079,6 +1086,10 @@ function updateG112Mode(record, state) {
 }
 
 function updateModalState(record, state, warnings) {
+  const previousSpeedMode = state.spindleMode;
+  const previousFeedMode = state.feedMode;
+  const previousUnits = state.units;
+  const priorSpindle = {...timingSnapshot(state)};
   const previousCompMode = state.cutterCompMode;
   const previousCompOffEstablished = state.sawCutterCompOff;
   state.compensationEvent = null;
@@ -1298,10 +1309,39 @@ function updateModalState(record, state, warnings) {
     });
   }
 
-  if (record.byLetter.has("F")) state.feed = interpretedHaasFeedValue(record, state);
+  if (previousUnits !== state.units || previousFeedMode !== state.feedMode) {
+    state.feed = null;
+    state.feedIssue = "Re-enter F after changing feed mode or program units.";
+  }
+  if (record.byLetter.has("F")) {
+    state.feed = interpretedHaasFeedValue(record, state);
+    state.feedIssue = Number.isFinite(state.feed) && state.feed > 0 ? null : "F must be a positive finite value.";
+  }
+  const hasSpeed = record.byLetter.has("S") && !hasG(record, 50);
+  if (previousSpeedMode !== state.spindleMode && !hasSpeed) {
+    state.spindleSpeed = null;
+    state.spindleSpeedIssue = "Re-enter S after changing spindle mode; its value cannot be reinterpreted between RPM and surface speed.";
+    if (previousSpeedMode === "css" && state.spindleMode === "rpm"
+      && state.spindleRpmLimitMode === "css-only") {
+      const prior = programmedSpindleRpm(priorSpindle, state, state.xMode === "diameter" ? 0.5 : 1);
+      if (prior.rpm !== null && priorSpindle.spindleRunning === true && priorSpindle.commandedSpindleGear === null) {
+        state.spindleSpeed = prior.rpm;
+        state.spindleSpeedIssue = null;
+      } else state.spindleSpeedIssue = "G97 without S retains the preceding RPM, which is unresolved here. Specify S explicitly.";
+    }
+  }
+  if (previousUnits !== state.units && state.spindleMode === "css" && state.cssUnits === "program" && !hasSpeed) {
+    state.spindleSpeed = null;
+    state.spindleSpeedIssue = "Re-enter G96 S after changing its surface-speed units.";
+  }
   if (record.byLetter.has("S")) {
-    if (hasG(record, 50)) state.spindleLimit = lastWord(record, "S");
-    else state.spindleSpeed = lastWord(record, "S");
+    if (hasG(record, 50)) {
+      state.spindleLimit = lastWord(record, "S");
+      state.spindleLimitIssue = Number.isFinite(state.spindleLimit) && state.spindleLimit > 0 ? null : "G50 RPM limit must be a positive finite value.";
+    } else {
+      state.spindleSpeed = lastWord(record, "S");
+      state.spindleSpeedIssue = Number.isFinite(state.spindleSpeed) && state.spindleSpeed >= 0 ? null : "S must be a nonnegative finite value.";
+    }
   }
   updateG112Mode(record, state);
   if (state.cutterCompensationContract && (state.cutterCompMode || state.compensationEvent)) {
@@ -3585,6 +3625,7 @@ export function parseGcode(source, {
   defaultUnits = "mm", warnOnAssumedUnits = false,
   initialPlane: requestedInitialPlane = null,
   spindleGearContract = null,
+  cssUnits = "unknown",
   liveToolDialect: requestedLiveToolDialect = "unconfigured",
   liveToolCapability: requestedLiveToolCapability = "unknown",
   cAxisCapability: requestedCAxisCapability = "unknown",
@@ -3631,6 +3672,9 @@ export function parseGcode(source, {
       && cutterCompensationContract === "haas-lathe-ngc-nose-v1" ? cutterCompensationContract : null,
     compensationEvent: null, compensationMetadata: null,
     spindleLimit: null, spindleRunning: null, spindleDirection: "unknown",
+    cssUnits: ["sfm", "m/min", "program"].includes(cssUnits) ? cssUnits : "unknown",
+    spindleRpmLimitMode: liveToolDialectDefinition.id === "haas-lathe-ngc" ? "both"
+      : spindleGearContract === SL75_SPINDLE_GEAR_CONTRACT ? "css-only" : "unknown",
     spindleGearContract, commandedSpindleGear: null,
     // A selected machine environment may establish ordinary X/Z arc startup.
     // Keep sawPlane source-only: special Haas threading/compensation contracts
@@ -3687,6 +3731,32 @@ export function parseGcode(source, {
   const warnings = [];
   const cycles = [];
   const timingEvents = [];
+  const spindleFeedEvents = [];
+  const spindleFeedWarnings = new Map();
+  let spindleFeedWarningIndex = 0;
+  let spindleFeedBlockReason = null;
+  function captureSpindleFeed(record) {
+    while (spindleFeedWarningIndex < warnings.length) {
+      const warning = warnings[spindleFeedWarningIndex++];
+      // The compensation stage can clear only its own pending marker later.
+      if (warning.verificationBlocked && warning.code !== "tool-nose-compensation-pending"
+        && !spindleFeedWarnings.has(warning.line)) spindleFeedWarnings.set(warning.line, warning);
+    }
+    const blockedByState = state.executionBlocked || state.blockedPathPreview || state.blockCurrentMotionLine === record.line
+      || Boolean(activeMotionBlocker(state)) || state.turningPathTainted || state.unconfiguredG112Active
+      || state.g112Active || spindleFeedWarnings.has(record.line);
+    const line = state.blockedPathPreviewLine ?? record.line;
+    const warning = blockedByState ? spindleFeedWarnings.get(line) : null;
+    const resynchronized = !blockedByState && hasG(record, 0) && state.absolute
+      && record.byLetter.has("X") && record.byLetter.has("Z") && isKnownPoint(state);
+    if (resynchronized) spindleFeedBlockReason = null;
+    if (warning) spindleFeedBlockReason ||= `Line ${warning.line}: ${warning.message}`;
+    const blocked = Boolean(blockedByState || spindleFeedBlockReason);
+    const rapidBlock = state.motion === "rapid" && ["X", "Z", "U", "W"].some(letter => record.byLetter.has(letter))
+      && !hasG(record, 4) && !hasG(record, 50);
+    spindleFeedEvents.push({...timingSnapshot(state), line: record.line, x: state.x, z: state.z,
+      rapidBlock, blocked, blockReason: spindleFeedBlockReason});
+  }
   const liveToolEvents = [];
   const cAxisEvents = [];
   const cAxisMotions = [];
@@ -3778,10 +3848,13 @@ export function parseGcode(source, {
 
   let pending = null;
   let semanticExecutionStopIndex = -1;
+  let previousSpindleFeedRecord = null;
   for (const record of records) {
+    if (previousSpindleFeedRecord) { captureSpindleFeed(previousSpindleFeedRecord); previousSpindleFeedRecord = null; }
     if (state.programEnded || state.executionBlocked) break;
     if (boundaryDollarIndexes.has(record.index)) continue;
     if (definitionIndexes.has(record.index)) continue;
+    previousSpindleFeedRecord = record;
     if (!validateHaasRecordAddresses(record, state, warnings, {stopExecution: true})) {
       if (state.g112Active || state.unconfiguredG112Active) noteLiveToolAttempt(record, state, null);
       if (semanticExecutionStopIndex < 0) semanticExecutionStopIndex = record.index;
@@ -4156,6 +4229,7 @@ export function parseGcode(source, {
       ].filter(Boolean))];
     }
   }
+  if (previousSpindleFeedRecord) captureSpindleFeed(previousSpindleFeedRecord);
   const spindleEvents = programSpindleEvents(
     records,
     definitionIndexes,
@@ -4190,10 +4264,19 @@ export function parseGcode(source, {
         || (state.blockedPathPreview && attempt.line >= state.blockedPathPreviewLine),
     };
   });
+  if (semanticExecutionStopIndex >= 0) {
+    const stopLine = records[semanticExecutionStopIndex].line;
+    const warning = warnings.find(item => item.verificationBlocked && item.line === stopLine);
+    for (const event of spindleFeedEvents) {
+      if (event.line < stopLine) continue;
+      event.blocked = true;
+      event.blockReason = warning ? `Line ${stopLine}: ${warning.message}` : `Execution is unresolved from line ${stopLine}.`;
+    }
+  }
   return {
     segments, warnings, cycles, toolCalls, executableToolCalls, toolOffsetReviews, units: state.units, sourceLines: lines.length,
     programEndLine: state.programEnded && programEndIndex >= 0 ? records[programEndIndex]?.line ?? null : null,
-    timingEvents, spindleEvents, dwellSeconds: timingEvents.reduce((sum, event) => (
+    timingEvents, spindleEvents, spindleFeedEvents, dwellSeconds: timingEvents.reduce((sum, event) => (
       sum + (event.type === "dwell" ? Math.max(0, Number(event.seconds) || 0) : 0)
     ), 0),
     unitsSource: state.assumedUnitsUsed ? "assumed" : "program",
