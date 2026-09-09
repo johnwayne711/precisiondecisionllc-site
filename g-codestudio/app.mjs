@@ -55,7 +55,7 @@ import {
   MILLING_TOOL_LIBRARY_CATALOG, listMillingToolLibraryRecords, millingToolLibraryRecordById,
 } from "./milling-tool-library.mjs";
 import {millingToolPreviewClaimLabels, millingToolPreviewViewModel} from "./milling-tool-preview.mjs";
-import {plottedProgramStart} from "./machine-semantics.mjs";
+import {plottedProgramStart, sl75SpindleGearContract} from "./machine-semantics.mjs";
 import {
   activeToolKeyAtLine, createVersionedToolAssignment, isExactBundledProgram, normalizeVersionedToolAssignment,
   programAssignmentScope, programToolDocumentIdentity, reconcileToolAssignments,
@@ -83,8 +83,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.4";
-const APP_BUILD = 106;
+const APP_VERSION = "v0.3.5";
+const APP_BUILD = 107;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -543,6 +543,7 @@ function programLanguageContext() {
   return {
     machineType: isMillMode() ? "mill" : "lathe",
     dialect: profile?.liveToolDialect === "haas-lathe-ngc" ? "haas-lathe-ngc" : "generic",
+    spindleGearContract: sl75SpindleGearContract(profile),
     optionalStopEnabled: elements.optionalStop.checked,
   };
 }
@@ -1157,6 +1158,7 @@ function selectedProgramUnits(profile = currentMachineProfile()) {
 }
 
 function updateProgramUnitsHint(profile = currentMachineProfile()) {
+  $("machineReferenceLink").hidden = profile?.id !== "mori-seiki-sl75";
   const selected = selectedProgramUnits(profile);
   const label = selected === "inch" ? "Inches" : "Millimeters";
   const source = elements.programUnits.value === "machine"
@@ -1181,6 +1183,7 @@ function machinePlotOptions(profile) {
     initialPosition,
     referencePosition,
     initialPlane: profile.initialPlane === "G18" ? "G18" : null,
+    spindleGearContract: sl75SpindleGearContract(profile),
     initialPositionMode: configuredStart.mode,
     initialPositionIssue: configuredStart.reason,
     defaultUnits: selectedProgramUnits(profile),
@@ -1215,6 +1218,7 @@ function openMachineEditor() {
   const profile = currentMachineProfile();
   if (!profile) return;
   elements.machineDialogTitle.textContent = profile.name;
+  $("sl75MachineReference").hidden = profile.id !== "mori-seiki-sl75";
   elements.machineSaveStatus.textContent = "";
   elements.machineSaveStatus.className = "";
   for (const field of MACHINE_PROFILE_FIELDS) {
@@ -6904,7 +6908,7 @@ function updateTransport({scrollProgram = false} = {}) {
     ? (atSourceEnd ? ` · ${stopCommand} ${stopKind} AT SOURCE END — no following program lines` : ` · ${stopCommand} ${stopKind} — Play resumes`)
     : (!state.playing && atProgramEnd
       ? " · M02/M30 PROGRAM END — Play restarts"
-      : (!state.playing && atBlockedPathPreview ? " · PATH ONLY BOUNDARY — Play replays verified path; Step inspects preview" : ""));
+      : (!state.playing && atBlockedPathPreview ? " · PATH ONLY BOUNDARY — Playback blocked; Step inspects preview" : ""));
   elements.blockReadout.textContent = `${blockText}${boundaryText}`;
   elements.play.dataset.transportState = state.playing ? "pause" : "play";
   elements.play.setAttribute("aria-label", state.playing
@@ -6913,9 +6917,9 @@ function updateTransport({scrollProgram = false} = {}) {
       ? (atSourceEnd ? `No following program lines after ${stopCommand} ${stopKind.toLowerCase()}` : `Resume after ${stopCommand} ${stopKind.toLowerCase()}`)
       : (atProgramEnd
         ? "Restart after M02 or M30 program end"
-        : (atBlockedPathPreview ? "Replay verified path before PATH ONLY boundary" : "Play"))));
+        : (atBlockedPathPreview ? "Playback blocked at unresolved command; use Step to inspect preview" : "Play"))));
   elements.timeline.disabled = state.programDirty;
-  elements.play.disabled = state.programDirty || (atProgramStop && atSourceEnd);
+  elements.play.disabled = state.programDirty || atBlockedPathPreview || (atProgramStop && atSourceEnd);
   elements.stepBack.disabled = state.programDirty || state.programLine <= 0;
   elements.stepForward.disabled = state.programDirty || (state.programLine >= totalLines && state.visibleBlocks >= range.end);
   updateReaderTime();
@@ -7854,9 +7858,10 @@ elements.play.addEventListener("click", () => {
     state,
   );
   const atSourceEnd = sourceEndAtPosition(state.parsed.segments, totalLines, state);
+  if (atBlockedPathPreview) return;
   if (atSourceEnd && programStopAtPosition(state.parsed.timingEvents, state.parsed.segments, state)) return;
   state.playing = !state.playing;
-  if (state.playing && (atProgramEnd || atBlockedPathPreview || atSourceEnd)) {
+  if (state.playing && (atProgramEnd || atSourceEnd)) {
     state.programLine = 0;
     state.visibleBlocks = 0;
   }

@@ -1,3 +1,5 @@
+import {commandedSpindleGear} from "./machine-semantics.mjs";
+
 export const GCODE_LANGUAGE_LIMITS = Object.freeze({
   maxSourceCharacters: 8 * 1024 * 1024,
   maxTokens: 500_000,
@@ -542,6 +544,21 @@ export function identifyGcodeToken(tokenOrText, context = {}) {
     });
   }
 
+  const selectedContext = normalizedContext(context);
+  const gear = family === "M" && selectedContext?.machineType === "lathe"
+    ? commandedSpindleGear(context.spindleGearContract, number, selectedContext.dialect) : null;
+  if (gear !== null) {
+    if (!/^\+?0*4[123]$/.test(match[2])) return baseIdentification("malformed", {
+      code, family, number, title: "Malformed spindle-gear code",
+      description: "Spindle-gear selection requires an exact integer M-code spelling.",
+    });
+    return baseIdentification("modeled", {
+      code, family, number, modeled: true, controllerSpecific: true,
+      title: `${code} · spindle gear range ${gear}${gear === 1 ? " (low)" : ""}`,
+      description: `Selects commanded spindle range ${gear} in the SL-75 environment. Playback continues after this block.`,
+      scope: "Mori SL-series manual C-1/C-3 and C-76/C-77. Gear engagement, range RPM limits and shift duration are not verified; spindle-dependent timing remains incomplete. Other M words or feed motion on this block need separate execution-order support.",
+    });
+  }
   const known = CODE_HELP.get(code);
   if (!known) {
     return baseIdentification("unresolved", {
@@ -555,7 +572,6 @@ export function identifyGcodeToken(tokenOrText, context = {}) {
     });
   }
 
-  const selectedContext = normalizedContext(context);
   let presentation = selectedContext && known.variants[selectedContext.key]
     ? {...known, ...known.variants[selectedContext.key]}
     : known;

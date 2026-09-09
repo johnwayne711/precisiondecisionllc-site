@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Mori-Seiki SL-75 reference · G-Code Studio</title>
+  <link rel="stylesheet" href="./reference.css">
+  <script type="module" src="./reference.mjs"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">G-Code Studio · Machine reference</p>
+      <h1>Mori-Seiki SL-75</h1>
+      <p>Machine facts, modeled commands and source documents in one place.</p>
+    </header>
+    <nav aria-label="Source documents" class="documents">
+      <a href="https://www.remontservo.ru/tash-kumyr/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf" target="_blank" rel="noopener noreferrer">Open programming manual (PDF) ↗</a>
+      <a href="https://t-mt.com/kousaku/img/25809/25809.pdf" target="_blank" rel="noopener noreferrer">Open SL-75 factory brochure (PDF) ↗</a>
+    </nav>
+    <p class="secondary">The full documents open at their source. Use the PDF viewer’s Find command to search the manual. Ctrl+F / ⌘F also works on this reference page.</p>
+    <div class="search">
+      <label for="referenceSearch">Search this reference</label>
+      <div class="search-row"><input id="referenceSearch" type="search" placeholder="M41, stroke, G18…" autocomplete="off"><button id="clearReferenceSearch" type="button">Clear</button></div>
+      <p id="referenceSearchStatus" role="status" aria-live="polite"></p>
+    </div>
+
+    <section class="reference-section" aria-labelledby="gearHeading">
+      <h2 id="gearHeading">Spindle gear selection</h2>
+      <table>
+        <thead><tr><th scope="col">Code</th><th scope="col">Commanded range</th><th scope="col">G-Code Studio</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">M41</th><td>First / low</td><td>Continues playback</td></tr>
+          <tr><th scope="row">M42</th><td>Second</td><td>Continues playback</td></tr>
+          <tr><th scope="row">M43</th><td>Third</td><td>Continues playback</td></tr>
+        </tbody>
+      </table>
+      <p>These meanings apply to the selected SL-75 environment. They do not enable these commands for other machine profiles or a conflicting Haas dialect.</p>
+      <p>The manufacturer prohibits gear changes under cutting load. Actual range speed limits belong to the machine’s spindle-output drawings. G-Code Studio does not know gear engagement, range RPM limits or shift duration, so gear-change time and later feed-per-revolution cutting time remain incomplete.</p>
+      <p>Use only one M word in a gear-selection block in this reader. A rapid/tool-selection block such as <code>G00 T0101 M41</code> is supported, as shown in the manual. Combined M-word or feed-motion execution order is unconfigured. M40 neutral and other machine-specific M codes remain outside this gear-selection subset.</p>
+      <p class="source">Source: Mori programming manual <a href="https://www.remontservo.ru/tash-kumyr/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf#page=175" target="_blank" rel="noopener noreferrer">C-1 / C-3: SL-75 applicability and M-code list ↗</a>; <a href="https://www.remontservo.ru/tash-kumyr/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf#page=250" target="_blank" rel="noopener noreferrer">C-76 / C-77: ranges and programming example ↗</a>.</p>
+    </section>
+
+    <section class="reference-section" aria-labelledby="specHeading">
+      <h2 id="specHeading">Factory specifications</h2>
+      <table>
+        <thead><tr><th scope="col">Item</th><th scope="col">Published value</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Turret</th><td>12 stations</td></tr>
+          <tr><th scope="row">Physical X slide stroke</th><td>400 mm (20 + 380 mm)</td></tr>
+          <tr><th scope="row">Z stroke</th><td>1550 mm</td></tr>
+          <tr><th scope="row">X rapid</th><td>5000 mm/min</td></tr>
+          <tr><th scope="row">Z rapid</th><td>8000 mm/min</td></tr>
+        </tbody>
+      </table>
+      <p>The inch-profile fields use these metric values divided by 25.4. Physical X stroke is slide movement; diameter programming does not double it. Stroke lengths do not locate machine home, work zero or travel endpoints.</p>
+      <p class="source">Source: <a href="https://t-mt.com/kousaku/img/25809/25809.pdf#page=4" target="_blank" rel="noopener noreferrer">Mori-Seiki SL-75 factory brochure, PDF page 4 ↗</a>. The brochure distinguishes SL-75A/B/C variants and several controls.</p>
+    </section>
+
+    <section class="reference-section" aria-labelledby="planeHeading">
+      <h2 id="planeHeading">Turning plane, units and X programming</h2>
+      <p>The SL-75 environment starts in the X/Z turning plane (G18), with inch units and diameter-programmed X. These are explicit application settings for this setup. A program’s G17/G18/G19 selection overrides the starting plane; G20/G21 overrides the unit default.</p>
+      <p>Ordinary radius programming does not require adding G18 when the environment already establishes it. An unknown plane, an incompatible programmed plane or invalid arc geometry still needs review.</p>
+      <p class="source">Reference: Mori programming manual B-12 / B-13 contains ordinary X/Z radius examples. Check the program and selected environment together.</p>
+    </section>
+
+    <section class="reference-section" aria-labelledby="playHeading">
+      <h2 id="playHeading">Playback and review</h2>
+      <p>M00 pauses the reader; Play resumes at the following block. M01 does so when Optional Stop is ON. M02/M30 ends the program and enables restart.</p>
+      <p>An unresolved command keeps playback at its blocking line. Play cannot silently rewind or execute beyond it. Step and the timeline can inspect any retained dashed PATH ONLY geometry; that preview does not restore timing, stock or clearance authority.</p>
+      <p>A T0302-style tool/offset pairing remains a separate review. Gear selection does not acknowledge a pairing or clear another warning.</p>
+    </section>
+
+    <section class="reference-section" aria-labelledby="limitsHeading">
+      <h2 id="limitsHeading">What remains machine-specific</h2>
+      <p>This environment remains a draft. The installed control, machine variant, gear speed limits, home and coordinate limits, offsets, installed options and actual machine qualification are not established by the documents here.</p>
+      <p>The linked programming manual is PM-NLTMSC518-I1EN, hosted by a third party. Its exact edition/control match to this older machine is unconfirmed. This reference distinguishes the implemented subset from the full manual; it does not claim full controller emulation.</p>
+      <p>Program text stays in G-Code Studio. Reference searches run locally, and source links contain no program data.</p>
+    </section>
+    <footer>Reference checked 9 September 2026 · G-Code Studio supports prove-out review; follow the machine/control manufacturer’s approved verification process.</footer>
+  </main>
+</body>
+</html>

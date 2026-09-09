@@ -1,3 +1,18 @@
+// Mori manual PM-NLTMSC518-I1EN, C-1/C-3 and C-76/C-77.
+// This is commanded range selection, not measured gear engagement or RPM authority.
+export const SL75_SPINDLE_GEAR_CONTRACT = "mori-sl75-spindle-gears-v1";
+
+export function sl75SpindleGearContract(profile) {
+  return profile?.id === "mori-seiki-sl75" && profile.liveToolDialect === "unconfigured"
+    ? SL75_SPINDLE_GEAR_CONTRACT : null;
+}
+
+export function commandedSpindleGear(contract, code, dialect = "unconfigured") {
+  return contract === SL75_SPINDLE_GEAR_CONTRACT
+    && ["unconfigured", "generic"].includes(dialect) && [41, 42, 43].includes(code)
+    ? code - 40 : null;
+}
+
 export const LIVE_TOOL_DIALECTS = Object.freeze({
   unconfigured: Object.freeze({
     id: "unconfigured",

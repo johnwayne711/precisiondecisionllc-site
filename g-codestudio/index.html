@@ -274,6 +274,7 @@
                 <option value="generic-lathe">Generic lathe</option>
               </select>
               <button id="editMachineButton" type="button" aria-label="View or edit selected machine">Edit</button>
+              <a id="machineReferenceLink" class="machine-reference-link" href="./references/sl75.html" target="_blank" rel="noopener noreferrer" hidden>SL-75 reference ↗</a>
             </span>
             <span id="millSetupIdentity" class="mill-setup-identity" hidden>Generic Fanuc-style 3-axis mill · bounded path subset</span>
           </div>
@@ -530,6 +531,9 @@
           <div class="machine-data-note">
             <span id="machineStatusBadge" class="status-badge draft">DRAFT</span>
             <p>Draft values may be best-effort estimates. The selected profile now affects reference-return and approach plotting; verify every value at the machine before relying on it.</p>
+          </div>
+          <div id="sl75MachineReference" class="machine-data-note" hidden>
+            <p><a href="./references/sl75.html" target="_blank" rel="noopener noreferrer">SL-75 reference — manual, specifications and search ↗</a><br>M41 / M42 / M43 select first (low), second and third spindle ranges in the SL-75 environment. Range RPM limits and gear-change time remain unconfigured.</p>
           </div>
 
           <section class="machine-form-section">

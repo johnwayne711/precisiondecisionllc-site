@@ -2,6 +2,7 @@ import {extractProgramToolCalls, reviewToolOffsetPairings} from "./program-tools
 import {
   axisCapability as normalizeAxisCapability,
   cAxisEngagement as normalizeCAxisEngagement,
+  commandedSpindleGear,
   liveToolCapability as normalizeLiveToolCapability,
   liveToolDialect as resolveLiveToolDialect,
 } from "./machine-semantics.mjs";
@@ -660,7 +661,38 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
   const modeledMCodes = state.liveToolDialect === "haas-lathe-ngc"
     ? HAAS_MODELED_M_CODES
     : GENERIC_MODELED_M_CODES;
-  const unsupportedMCode = mCodes.find((code) => !modeledMCodes.has(code));
+  const gearCodes = mCodes.filter(code => commandedSpindleGear(state.spindleGearContract, code, state.liveToolDialect) !== null);
+  const invalidGearLexeme = mCodes.findIndex((code, index) => gearCodes.includes(code)
+    && !/^\+?0*4[123]$/.test(mLexemes[index] || ""));
+  if (invalidGearLexeme >= 0) {
+    warningOnce(warnings, {
+      line: record.line, code: "non-integer-m-code", verificationBlocked: true,
+      message: `M${mLexemes[invalidGearLexeme]} is not an exact integer spindle-gear code; no gear selection was executed.`,
+    });
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
+  if (gearCodes.length && mCodes.length > 1) {
+    warningOnce(warnings, {
+      line: record.line, code: "multiple-m-codes-unsupported", verificationBlocked: true,
+      message: "SL-75 gear selection with another M word in the same block has unconfigured execution order. Put the gear selection on its own M-code block for this reader.",
+    });
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
+  const gearBlockMotion = (record.byLetter.get("G") || []).filter(code => MOTION_CODES.has(code)).at(-1);
+  const gearSharesFeed = gearCodes.length && ["X", "Y", "Z", "U", "V", "W", "C"].some(letter => record.byLetter.has(letter))
+    && (gearBlockMotion === undefined ? state.motion : MOTION_CODES.get(gearBlockMotion)) !== "rapid";
+  if (gearSharesFeed) {
+    warningOnce(warnings, {
+      line: record.line, code: "spindle-gear-motion-order-unresolved", verificationBlocked: true,
+      message: "SL-75 gear selection shares a feed-motion block. Gear/motion execution order is not modeled; the manufacturer also prohibits changing gear under cutting load.",
+    });
+    if (stopExecution) invalidateExecutionState(state);
+    return false;
+  }
+  const unsupportedMCode = mCodes.find((code) => !modeledMCodes.has(code)
+    && commandedSpindleGear(state.spindleGearContract, code, state.liveToolDialect) === null);
   if (unsupportedMCode !== undefined) {
     const retainBlockedPreview = state.retainBlockedPathAfterUnsupportedM
       && state.liveToolDialect !== "haas-lathe-ngc";
@@ -827,6 +859,7 @@ function conflictingGenericModalGroup(record) {
 }
 
 function invalidateExecutionState(state) {
+  state.commandedSpindleGear = null;
   state.spindleRunning = null;
   state.liveToolRunning = null;
   state.cAxisEngaged = null;
@@ -844,6 +877,7 @@ function invalidateExecutionState(state) {
 }
 
 function beginBlockedPathPreview(state, record, issue = "unsupported-controller-command-preview") {
+  state.commandedSpindleGear = null;
   state.blockedPathPreview = true;
   if (!Number.isFinite(state.blockedPathPreviewLine)) {
     state.blockedPathPreviewLine = record.line;
@@ -940,6 +974,7 @@ function timingSnapshot(state) {
     spindleMode: state.spindleMode ?? "unknown",
     spindleSpeed: state.spindleSpeed ?? null,
     spindleLimit: state.spindleLimit ?? null,
+    commandedSpindleGear: state.commandedSpindleGear ?? null,
     spindleRunning: state.spindleRunning ?? null,
     spindleDirection: state.spindleDirection ?? "unknown",
     liveToolRunning: state.liveToolRunning ?? null,
@@ -1399,7 +1434,15 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
       continue;
     }
     let handled = false;
-    if (code === 0 || code === 1) {
+    const gear = commandedSpindleGear(state.spindleGearContract, code, state.liveToolDialect);
+    if (gear !== null) {
+      state.commandedSpindleGear = gear;
+      timingEvents.push({type: "spindle-gear", line: record.line, command: `M${code}`,
+        range: gear, seconds: null, untimed: true, phase: "end-of-block"});
+      warningOnce(warnings, {line: record.line, code: "spindle-gear-timing-unresolved",
+        message: `M${code} selects SL-75 spindle gear range ${gear}${gear === 1 ? " (low)" : ""}. Gear-change time and range RPM limits are unconfigured; spindle-dependent timing remains incomplete.`});
+      handled = true;
+    } else if (code === 0 || code === 1) {
       handled = true;
       const stopIsActive = code === 0 || state.optionalStopEnabled === true;
       if (stopIsActive && !programStopRecorded) {
@@ -3541,6 +3584,7 @@ export function parseGcode(source, {
   rapidBehavior = "linear", rapidXMax = null, rapidZMax = null, arcChordTolerance = 0.0254,
   defaultUnits = "mm", warnOnAssumedUnits = false,
   initialPlane: requestedInitialPlane = null,
+  spindleGearContract = null,
   liveToolDialect: requestedLiveToolDialect = "unconfigured",
   liveToolCapability: requestedLiveToolCapability = "unknown",
   cAxisCapability: requestedCAxisCapability = "unknown",
@@ -3587,6 +3631,7 @@ export function parseGcode(source, {
       && cutterCompensationContract === "haas-lathe-ngc-nose-v1" ? cutterCompensationContract : null,
     compensationEvent: null, compensationMetadata: null,
     spindleLimit: null, spindleRunning: null, spindleDirection: "unknown",
+    spindleGearContract, commandedSpindleGear: null,
     // A selected machine environment may establish ordinary X/Z arc startup.
     // Keep sawPlane source-only: special Haas threading/compensation contracts
     // still require their explicit program startup words.
@@ -4182,6 +4227,7 @@ export function parseGcode(source, {
       spindleRunning: state.spindleRunning,
       spindleDirection: state.spindleDirection,
       optionalStopEnabled: state.optionalStopEnabled,
+      commandedSpindleGear: state.commandedSpindleGear,
       turningMode: state.turningMode,
       turningPathTainted: state.turningPathTainted,
       executionBlocked: state.executionBlocked || state.blockedPathPreview,

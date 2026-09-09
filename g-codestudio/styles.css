@@ -170,6 +170,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .machine-mode-control .eyebrow { white-space: nowrap; }
 .machine-mode-control select { color: var(--accent); font-size: 11px; font-weight: 850; }
 .machine-select-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
+.machine-reference-link { grid-column: 1 / -1; justify-self: start; color: var(--accent); font-size: 14px; padding: 4px 0; }
+.machine-reference-link[hidden], .machine-data-note[hidden] { display: none; }
+.machine-data-note a { color: var(--accent); }
 .mill-setup-identity { color: #9cd8ff; font-size: 10px; font-weight: 750; line-height: 1.35; }
 .machine-select-row[hidden], .mill-setup-identity[hidden], .readout[hidden], .toolbar-tool[hidden] { display: none; }
 .machine-heading select { width: 100%; min-width: 0; height: 28px; padding: 0 25px 0 0; overflow: hidden; color: var(--text); border: 0; outline: 0; background-color: transparent; font-size: 12px; font-weight: 750; text-overflow: ellipsis; cursor: pointer; }
