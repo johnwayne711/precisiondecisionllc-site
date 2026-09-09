@@ -84,8 +84,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.6";
-const APP_BUILD = 108;
+const APP_VERSION = "v0.3.7";
+const APP_BUILD = 109;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -212,7 +212,7 @@ const DEFAULT_MACHINE_PROFILES = [
   {
     id: "mori-seiki-sl75", name: "Mori-Seiki SL-75", manufacturer: "Mori Seiki",
     model: "SL-75", serialNumber: "", controlMake: "", controlModel: "",
-    status: "draft", templateRevision: 2, units: "inch", xProgramming: "diameter", orientation: "left",
+    status: "draft", templateRevision: 3, units: "inch", xProgramming: "diameter", orientation: "left", cssUnits: "program",
     initialPlane: "G18", startMode: "unknown", rapidBehavior: "unknown",
     xAxisStroke: 400 / 25.4, zAxisStroke: 1550 / 25.4, turretStations: 12,
     rapidXMax: 5000 / 25.4, rapidYMax: null, rapidZMax: 8000 / 25.4, rapidCMax: null,
@@ -1089,6 +1089,9 @@ function normalizeMachineProfile(profile) {
   const upgraded = {...profile};
   if (needsTemplateUpgrade) {
     for (const [field, estimate] of Object.entries(fallback)) {
+      // Revision 3 establishes the CSS program convention only. Do not refill
+      // machine measurements that a revision-2 owner deliberately left unknown.
+      if (template.id === "mori-seiki-sl75" && Number(profile?.templateRevision || 0) >= 2 && field !== "cssUnits") continue;
       if (field === "initialPlane" && Object.hasOwn(upgraded, field)) continue;
       const existing = upgraded[field];
       if (existing === null || existing === undefined || existing === "" || existing === "unknown") upgraded[field] = estimate;
@@ -6910,7 +6913,8 @@ function updateSpindleFeedReadout() {
   const cssUnits = result.cssUnits === "program" ? (result.programUnits === "in" ? "sfm" : "m/min") : result.cssUnits;
   const speedMode = result.spindleMode === "css" ? "G96" : result.spindleMode === "rpm" ? "G97" : "Mode unknown";
   const speedUnits = result.spindleMode === "css" ? (cssUnits === "sfm" ? "SFM" : cssUnits === "m/min" ? "m/min" : "units unknown") : "RPM";
-  $("spindleModeReadout").textContent = `${speedMode}${Number.isFinite(result.spindleSpeed) ? ` · S${number(result.spindleSpeed)} ${speedUnits}` : ""}${result.spindleRunning === false ? " · stopped" : ["m3", "m4"].includes(result.spindleDirection) ? ` · ${result.spindleDirection.toUpperCase()}` : ""}`;
+  const runningStatus = result.spindleRunning === false ? "stopped" : result.spindleRunning === true ? `${result.spindleDirection.toUpperCase()} commanded` : "running state unknown";
+  $("spindleModeReadout").textContent = `${speedMode}${Number.isFinite(result.spindleSpeed) ? ` · S${number(result.spindleSpeed)} ${speedUnits}` : ""} · ${runningStatus}${result.spindleMode === "css" && result.cssUnits === "program" ? " · program units convention" : ""}`;
   $("feedModeReadout").textContent = result.feedMode === "per-minute" ? "G98" : result.feedMode === "per-revolution" ? "G99" : "Mode unknown";
   if (Number.isFinite(result.commandedFeed)) $("feedModeReadout").textContent += ` · F${number(result.commandedFeed)} ${result.programUnits === "in" ? "in" : "mm"}/${result.feedMode === "per-revolution" ? "rev" : "min"}`;
   if (Number.isFinite(result.threadLeadMmPerRev)) $("feedModeReadout").textContent += " · thread lead";

@@ -1086,6 +1086,7 @@ function updateG112Mode(record, state) {
 }
 
 function updateModalState(record, state, warnings) {
+  state.spindleModalLine = record.line;
   const previousSpeedMode = state.spindleMode;
   const previousFeedMode = state.feedMode;
   const previousUnits = state.units;
@@ -1324,7 +1325,7 @@ function updateModalState(record, state, warnings) {
     if (previousSpeedMode === "css" && state.spindleMode === "rpm"
       && state.spindleRpmLimitMode === "css-only") {
       const prior = programmedSpindleRpm(priorSpindle, state, state.xMode === "diameter" ? 0.5 : 1);
-      if (prior.rpm !== null && priorSpindle.spindleRunning === true && priorSpindle.commandedSpindleGear === null) {
+      if (prior.rpm !== null) {
         state.spindleSpeed = prior.rpm;
         state.spindleSpeedIssue = null;
       } else state.spindleSpeedIssue = "G97 without S retains the preceding RPM, which is unresolved here. Specify S explicitly.";
@@ -3735,6 +3736,7 @@ export function parseGcode(source, {
   const spindleFeedWarnings = new Map();
   let spindleFeedWarningIndex = 0;
   let spindleFeedBlockReason = null;
+  let spindleReadoutIssue = null;
   function captureSpindleFeed(record) {
     while (spindleFeedWarningIndex < warnings.length) {
       const warning = warnings[spindleFeedWarningIndex++];
@@ -3754,8 +3756,16 @@ export function parseGcode(source, {
     const blocked = Boolean(blockedByState || spindleFeedBlockReason);
     const rapidBlock = state.motion === "rapid" && ["X", "Z", "U", "W"].some(letter => record.byLetter.has(letter))
       && !hasG(record, 4) && !hasG(record, 50);
+    const clean = stripComments(record.raw);
+    const spindleWords = /S|G\s*(?:20|21|50|96|97)(?![\d.])|G\s*[#[]/i.test(clean);
+    const gCodes = record.byLetter.get("G") || [];
+    const spindleConflict = gCodes.filter(code => [96, 97].includes(code)).length > 1
+      || gCodes.filter(code => [20, 21].includes(code)).length > 1;
+    if ((state.spindleModalLine !== record.line && spindleWords) || spindleConflict) {
+      spindleReadoutIssue = `Line ${record.line}: spindle command or units were not interpreted unambiguously; the previous target cannot be reused.`;
+    }
     spindleFeedEvents.push({...timingSnapshot(state), line: record.line, x: state.x, z: state.z,
-      rapidBlock, blocked, blockReason: spindleFeedBlockReason});
+      rapidBlock, blocked, blockReason: spindleFeedBlockReason, spindleReadoutIssue});
   }
   const liveToolEvents = [];
   const cAxisEvents = [];

@@ -63,16 +63,19 @@ export function spindleFeedAtPosition(parsed, {sourceLine = 0, visibleBlocks = 0
     state.commandedSpindleGear = event.commandedSpindleGear;
   }
   const blocked = event.blocked || (atMove && (segment.verificationBlocked || segment.liveToolBlocked));
-  if (blocked) return {...state, rpm: null, feed: null, feedPerRevolution: null, reasons: [event.blockReason || "This block has unresolved execution or geometry."]};
-  const reasons = [];
-  const spindle = programmedSpindleRpm(state, point, xScale);
-  let rpm = spindle.rpm;
-  if (state.spindleRunning === false) rpm = 0;
-  else if (state.spindleRunning !== true) { rpm = null; reasons.push("Spindle running state is unknown; an S word alone does not start it."); }
-  if (spindle.reason && state.spindleRunning !== false) reasons.push(spindle.reason);
-  if (spindle.capped && state.spindleRunning === true) reasons.push("G50 RPM cap reached.");
+  const reasons = blocked ? [event.blockReason || "This block has unresolved execution or geometry."] : [];
+  // A requested target does not become zero or unknown when the spindle stops.
+  // Rejected spindle commands and unresolved CSS coordinates remain distinct
+  // from unrelated execution blockers. Never reuse S from a rejected block.
+  const spindle = event.spindleReadoutIssue ? {rpm: null, reason: event.spindleReadoutIssue}
+    : programmedSpindleRpm(state, blocked && state.spindleMode === "css" ? null : point, xScale);
+  const rpm = spindle.rpm;
+  if (spindle.reason) reasons.push(spindle.reason);
+  if (spindle.capped) reasons.push("G50 RPM cap reached.");
   if (spindle.uncapped) reasons.push("No G50 cap is programmed; machine limits are not included.");
   if (state.commandedSpindleGear != null) reasons.push(`Gear ${state.commandedSpindleGear}: range limits and engagement are unknown; values are requested targets.`);
+  if (event.line < sourceLine && event.blocked) reasons.push(`Last interpreted spindle command state is from line ${event.line}; later blocks were not interpreted.`);
+  if (blocked) return {...state, commandedFeed: state.feed, rpm, feed: null, feedPerRevolution: null, reasons};
   const rapid = Boolean(atMove ? segment.type === "rapid" : event.line === sourceLine && event.rapidBlock);
   const feed = programmedFeedMmPerMinute(state, rpm);
   if (!rapid && feed.reason) reasons.push(feed.reason);
