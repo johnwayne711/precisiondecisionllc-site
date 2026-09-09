@@ -83,8 +83,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.1";
-const APP_BUILD = 103;
+const APP_VERSION = "v0.3.2";
+const APP_BUILD = 104;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -207,6 +207,18 @@ const DEFAULT_MACHINE_PROFILES = [
     updatedAt: null,
   },
   {
+    id: "mori-seiki-sl75", name: "Mori-Seiki SL-75", manufacturer: "Mori Seiki",
+    model: "SL-75", serialNumber: "", controlMake: "", controlModel: "",
+    status: "draft", templateRevision: 1, units: "inch", xProgramming: "diameter", orientation: "left",
+    initialPlane: "G18", startMode: "unknown", rapidBehavior: "unknown",
+    rapidXMax: null, rapidYMax: null, rapidZMax: null, rapidCMax: null,
+    liveToolDialect: "unconfigured", liveToolCapability: "unknown", cAxisCapability: "unknown",
+    yAxisCapability: "unknown", cAxisEngagement: "unknown", liveToolMaxRpm: null,
+    haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown", liveToolEvidence: "",
+    notes: "DRAFT — owner-requested SL-75 turning environment. Initial plane is X/Z (G18); an explicit program plane command overrides it. Inch and diameter inputs match the owner's current setup. Exact controller, machine travels, home, rapid rates, spindle limits, turret and installed options are unconfirmed. Mori SL-series programming manual PM-NLTMSC518-I1EN lists the SL-75 and shows ordinary X/Z radius programming without G18 (B-12/B-13); its edition/control applicability to this older machine is unconfirmed. Source: https://www.remontservo.ru/arys/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf",
+    updatedAt: null,
+  },
+  {
     id: "haas-ngc-live-tool-syntax", name: "Haas NGC lathe · live-tool syntax", manufacturer: "Haas Automation",
     model: "Lathe with live tooling", serialNumber: "", controlMake: "Haas", controlModel: "NGC",
     status: "draft", templateRevision: 1, units: "inch", xProgramming: "diameter", orientation: "left",
@@ -230,7 +242,7 @@ const DEFAULT_MACHINE_PROFILES = [
 ];
 const MACHINE_PROFILE_FIELDS = [
   "name", "manufacturer", "model", "serialNumber", "controlMake", "controlModel", "status", "units",
-  "xProgramming", "orientation", "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ",
+  "xProgramming", "orientation", "initialPlane", "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ",
   "startMode", "startX", "startZ", "rapidBehavior", "rapidXMax", "rapidZMax", "toolChangeX", "toolChangeZ",
   "safeIndexX", "safeIndexZ", "turretStations", "liveToolDialect", "liveToolCapability", "cAxisCapability",
   "yAxisCapability", "cAxisEngagement", "rapidYMax", "rapidCMax", "liveToolMaxRpm", "haasDefaultToFloat",
@@ -1054,11 +1066,13 @@ function restoreSession(saved) {
 }
 
 function normalizeMachineProfile(profile) {
-  const fallback = DEFAULT_MACHINE_PROFILES.find((item) => item.id === profile?.id) || DEFAULT_MACHINE_PROFILES[1];
+  const fallback = DEFAULT_MACHINE_PROFILES.find((item) => item.id === profile?.id)
+    || DEFAULT_MACHINE_PROFILES.find((item) => item.id === "generic-lathe");
   const needsTemplateUpgrade = Number(profile?.templateRevision || 0) < Number(fallback.templateRevision || 0);
   const upgraded = {...profile};
   if (needsTemplateUpgrade) {
     for (const [field, estimate] of Object.entries(fallback)) {
+      if (field === "initialPlane" && Object.hasOwn(upgraded, field)) continue;
       const existing = upgraded[field];
       if (existing === null || existing === undefined || existing === "" || existing === "unknown") upgraded[field] = estimate;
     }
@@ -1066,6 +1080,7 @@ function normalizeMachineProfile(profile) {
     upgraded.templateRevision = fallback.templateRevision;
   }
   const normalized = {...fallback, ...upgraded};
+  normalized.initialPlane = normalized.initialPlane === "G18" ? "G18" : "unknown";
   for (const field of NUMERIC_MACHINE_FIELDS) {
     const value = normalized[field];
     normalized[field] = value === "" || value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
@@ -1150,6 +1165,7 @@ function machinePlotOptions(profile) {
   return {
     initialPosition,
     referencePosition,
+    initialPlane: profile.initialPlane === "G18" ? "G18" : null,
     initialPositionMode: configuredStart.mode,
     initialPositionIssue: configuredStart.reason,
     defaultUnits: selectedProgramUnits(profile),
@@ -6938,6 +6954,10 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
       confirmedToolOffsetPairings: toolOffsetPairingsForSource(elements.input.value),
     });
   if (!mill) {
+    if (state.parsed.machineState?.initialPlaneUsed) {
+      state.parsed.warnings.unshift({line: null, info: true,
+        message: `Starting plane: X/Z (G18) from ${machine.name} setup. Programmed plane changes take precedence.`});
+    }
     const nextDocumentIdentity = programToolDocumentIdentity(elements.input.value, {
       fileName: elements.fileName.textContent,
     });

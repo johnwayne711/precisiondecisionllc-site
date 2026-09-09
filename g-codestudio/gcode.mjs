@@ -2272,13 +2272,14 @@ function parseBasicRecord(record, state, xMode, warnings, {
     if (state.liveToolDialect === "haas-lathe-ngc") invalidateExecutionState(state);
     return null;
   }
-  const implicitTurningArcPlane = arcMotion && !state.sawPlane;
+  const implicitTurningArcPlane = arcMotion && !state.sawPlane && state.initialPlane !== "G18";
+  if (arcMotion && !state.sawPlane && state.initialPlane === "G18") state.initialPlaneUsed = true;
   if (implicitTurningArcPlane) {
     warningOnce(warnings, {
       line: record.line,
       code: "turning-plane-required",
       verificationBlocked: true,
-      message: "G18 was not present before this arc; its assumed X/Z geometry is retained only as a blocked path.",
+      message: "The initial turning plane is unconfigured and G18 was not present before this arc; its assumed X/Z geometry is retained only as a blocked path.",
     });
   }
 
@@ -2780,6 +2781,7 @@ function contourFor(records, startIndex, endIndex, state, xMode, warnings) {
     if (segment) segments.push(segment);
   }
   warnings.push(...contourWarnings);
+  state.initialPlaneUsed ||= localState.initialPlaneUsed;
   const invalidSegment = segments.some((segment) => segment.liveTool
     || segment.coordinateMode && segment.coordinateMode !== "turning-xz"
     || segment.cAxisMotion
@@ -3538,6 +3540,7 @@ export function parseGcode(source, {
   xMode = "diameter", initialPosition = {x: 0, z: 0}, referencePosition = null,
   rapidBehavior = "linear", rapidXMax = null, rapidZMax = null, arcChordTolerance = 0.0254,
   defaultUnits = "mm", warnOnAssumedUnits = false,
+  initialPlane: requestedInitialPlane = null,
   liveToolDialect: requestedLiveToolDialect = "unconfigured",
   liveToolCapability: requestedLiveToolCapability = "unknown",
   cAxisCapability: requestedCAxisCapability = "unknown",
@@ -3584,6 +3587,11 @@ export function parseGcode(source, {
       && cutterCompensationContract === "haas-lathe-ngc-nose-v1" ? cutterCompensationContract : null,
     compensationEvent: null, compensationMetadata: null,
     spindleLimit: null, spindleRunning: null, spindleDirection: "unknown",
+    // A selected machine environment may establish ordinary X/Z arc startup.
+    // Keep sawPlane source-only: special Haas threading/compensation contracts
+    // still require their explicit program startup words.
+    initialPlane: requestedInitialPlane === "G18" ? "G18" : null,
+    initialPlaneUsed: false,
     plane: "G18", sawPlane: false, sawUnitMode: false, assumedUnitsUsed: false,
     activeToolKey: null, activeToolCallLine: null,
     liveToolDialectDefinition,
@@ -4166,6 +4174,9 @@ export function parseGcode(source, {
       cAxisPosition: state.cAxisPosition,
       cAxisPositionUncertaintyDegrees: state.cAxisPositionUncertaintyDegrees,
       plane: state.plane,
+      planeSource: state.sawPlane ? "program" : state.initialPlane === "G18" ? "machine" : "assumed",
+      initialPlane: state.initialPlane,
+      initialPlaneUsed: state.initialPlaneUsed,
       coordinateMode: state.g112Active ? "g112-face" : "turning-xz",
       feedMode: state.feedMode,
       spindleRunning: state.spindleRunning,
