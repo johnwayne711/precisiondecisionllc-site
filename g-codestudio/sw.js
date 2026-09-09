@@ -152,7 +152,9 @@ self.addEventListener("fetch", (event) => {
           }
           return response;
         })
-        .catch(() => caches.match(event.request)),
+        // A retired worker can recreate its cache after activation cleanup.
+        // Offline fallback must never recover an asset from another release.
+        .catch(() => caches.open(CACHE_NAME).then((cache) => cache.match(event.request))),
     );
     return;
   }
