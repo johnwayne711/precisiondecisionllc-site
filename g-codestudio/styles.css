@@ -102,7 +102,8 @@ button { cursor: pointer; }
 .brand-cut::before { content: ""; position: absolute; inset: 0; clip-path: polygon(0 0, 100% 0, 100% 30%, 78% 30%, 78% 55%, 64% 55%, 64% 100%, 36% 100%, 36% 55%, 22% 55%, 22% 30%, 0 30%); background: #e9e8dd; }
 .brand-cut::after { content: ""; position: absolute; left: 5px; bottom: -3px; width: 3px; height: 6px; background: #59a944; box-shadow: 0 0 3px rgba(89, 169, 68, .38); }
 .brand-lockup { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
-.brand-title-row { display: flex; min-width: 0; align-items: baseline; white-space: nowrap; }
+.brand-title-row { display: flex; min-width: 0; align-items: baseline; flex-wrap: wrap; gap: 5px 8px; white-space: nowrap; }
+.app-version { flex: 0 0 auto; padding: 3px 6px; border: 1px solid #466357; border-radius: 4px; color: #d8e9e0; background: #15271f; font: 600 12px/1.1 "Cascadia Code", Consolas, monospace; }
 .brand h1 { margin: 0; line-height: 1; }
 .brand-wordmark { display: inline-block; font-family: "Bahnschrift Condensed", "Bahnschrift SemiCondensed", "Arial Narrow", sans-serif; font-size: 23px; font-style: italic; font-weight: 900; letter-spacing: .035em; line-height: 1; transform: skewX(-4deg); }
 .brand-wordmark em { color: #ebeade; font-style: normal; text-shadow: 1px 1px 0 #44504b; }

@@ -83,6 +83,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
+const APP_VERSION = "v100";
+
 const sampleProgram = `%
 O1071 (G-CODE STUDIO SAMPLE - G71 ROUGH TURN)
 G18 G20 G40 G90 G95
@@ -8094,3 +8096,8 @@ updateOptionalStopControl();
 plotProgram();
 if (restoreBundledStepReference) void loadStepSample({reuseProgram: true});
 else if (requestedBundledStepReferenceRestore) persistSession();
+
+// Report this loaded application, never the version of a newer network asset.
+$("appVersion").textContent = APP_VERSION;
+$("appVersion").title = `Loaded application version ${APP_VERSION}`;
+$("appVersion").setAttribute("aria-label", `Application version ${APP_VERSION}`);
