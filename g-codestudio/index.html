@@ -776,11 +776,20 @@
                 </div>
                 <span id="graphicsViewportNote">Both programs share one machine setup, orientation, scale, and viewport.</span>
               </div>
-              <div class="graphics-legend" aria-label="Toolpath comparison legend">
-                <span><i class="geometry-common"></i>Matching</span>
-                <span><i class="geometry-original"></i>Original only</span>
-                <span><i class="geometry-revised"></i>New / altered</span>
+            </div>
+            <div class="compare-view-controls">
+              <div class="graphics-legend" role="group" aria-label="Show comparison paths">
+                <button id="compareOriginalToggle" type="button" aria-pressed="true" title="Show or hide original-only paths"><i class="geometry-original" aria-hidden="true"></i>Original</button>
+                <button id="compareRevisedToggle" type="button" aria-pressed="true" title="Show or hide new or altered paths"><i class="geometry-revised" aria-hidden="true"></i>Revised</button>
+                <button id="compareMatchingToggle" type="button" aria-pressed="true" title="Show or hide matching paths"><i class="geometry-common" aria-hidden="true"></i>Matching</button>
               </div>
+              <div class="compare-zoom-controls" role="group" aria-label="Comparison zoom">
+                <button id="compareFit" type="button" title="Reset zoom and pan to the selected fit">Fit</button>
+                <button id="compareZoomOut" type="button" aria-label="Zoom out comparison">−</button>
+                <output id="compareZoomLevel" aria-label="Comparison zoom level">100%</output>
+                <button id="compareZoomIn" type="button" aria-label="Zoom in comparison">+</button>
+              </div>
+              <span class="compare-pan-hint">Scroll to zoom · drag to pan</span>
             </div>
             <ul id="comparisonBlockers" class="comparison-blockers" aria-label="First comparison blocker on each side" hidden></ul>
             <aside id="graphicsInfoPanel" class="graphics-info-panel" role="note" aria-label="How to interpret the toolpath audit" hidden>

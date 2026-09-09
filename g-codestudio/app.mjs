@@ -83,8 +83,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.3";
-const APP_BUILD = 105;
+const APP_VERSION = "v0.3.4";
+const APP_BUILD = 106;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -299,6 +299,8 @@ const elements = {
   originalCompareCanvas: $("originalCompareCanvas"), revisedCompareCanvas: $("revisedCompareCanvas"),
   overlayCompareCanvas: $("overlayCompareCanvas"), compareSplitPlots: $("compareSplitPlots"), compareOverlayPlot: $("compareOverlayPlot"),
   compareSplitLayout: $("compareSplitLayout"), compareOverlayLayout: $("compareOverlayLayout"), graphicsViewportNote: $("graphicsViewportNote"),
+  compareOriginalToggle: $("compareOriginalToggle"), compareRevisedToggle: $("compareRevisedToggle"), compareMatchingToggle: $("compareMatchingToggle"),
+  compareZoomIn: $("compareZoomIn"), compareZoomOut: $("compareZoomOut"), compareFit: $("compareFit"), compareZoomLevel: $("compareZoomLevel"),
   fitGeometryDifferences: $("fitGeometryDifferences"), fitGeometryPart: $("fitGeometryPart"), compareNavigation: $("compareNavigation"),
   graphicsInfoButton: $("graphicsInfoButton"), graphicsInfoPanel: $("graphicsInfoPanel"),
   view2d: $("view2dButton"), viewFace: $("viewFaceButton"), view3d: $("view3dButton"), faceViewStatus: $("faceViewStatus"),
@@ -358,6 +360,8 @@ const state = {
   machineProfiles: DEFAULT_MACHINE_PROFILES.map((profile) => ({...profile})),
   comparisonOriginal: null, comparison: null, compareChangeIndex: -1, comparisonOriginalRevision: 0, comparisonPickerRevision: null,
   compareView: "code", compareGraphicsLayout: "overlay", comparisonGeometry: null,
+  compareLayers: {original: true, revised: true, matching: true},
+  compareCamera: {zoom: 1, offsetZ: 0, offsetX: 0}, compareViewport: null, compareDrag: null,
   viewMode: "2d", camera3d: {yaw: -Math.PI / 4, pitch: Math.asin(1 / Math.sqrt(3)), zoom: 1, panX: 0, panY: 0},
   viewCubeRegions: [], viewCubeHover: null,
   stockProfileCache: null, stockSamplingError: null,
@@ -3028,6 +3032,7 @@ async function saveProgram() {
 }
 
 function clearComparison() {
+  resetComparisonDisplay();
   state.comparisonOriginalRevision += 1;
   state.comparisonOriginal = null;
   state.comparison = null;
@@ -3054,6 +3059,7 @@ function clearComparison() {
 }
 
 function setComparisonOriginal(name, content, {snapshot = false} = {}) {
+  resetComparisonDisplay();
   state.comparisonOriginalRevision += 1;
   state.comparisonOriginal = {name: name || "original-program.nc", content: String(content ?? "")};
   if (snapshot) {
@@ -3212,8 +3218,11 @@ function comparisonGridStep(span) {
 
 function drawComparisonGrid(surface, bounds, scale) {
   const {context, width, height} = surface;
-  const centerZ = (bounds.minZ + bounds.maxZ) / 2;
-  const centerX = (bounds.minX + bounds.maxX) / 2;
+  const centerZ = (bounds.minZ + bounds.maxZ) / 2 + state.compareCamera.offsetZ;
+  const centerX = (bounds.minX + bounds.maxX) / 2 + state.compareCamera.offsetX;
+  state.compareViewport = {scale};
+  const visible = {minZ: centerZ - width / (2 * scale), maxZ: centerZ + width / (2 * scale),
+    minX: centerX - height / (2 * scale), maxX: centerX + height / (2 * scale)};
   const toScreen = (point) => ({
     x: width / 2 + (point.z - centerZ) * scale,
     y: height / 2 - (point.x - centerX) * scale,
@@ -3221,16 +3230,16 @@ function drawComparisonGrid(surface, bounds, scale) {
   context.clearRect(0, 0, width, height);
   context.fillStyle = "#061012";
   context.fillRect(0, 0, width, height);
-  const step = comparisonGridStep(Math.max(bounds.maxZ - bounds.minZ, bounds.maxX - bounds.minX));
+  const step = comparisonGridStep(Math.max(visible.maxZ - visible.minZ, visible.maxX - visible.minX));
   context.lineWidth = 1;
   context.strokeStyle = "rgba(38, 64, 69, .58)";
   context.beginPath();
-  for (let z = Math.ceil(bounds.minZ / step) * step; z <= bounds.maxZ; z += step) {
+  for (let z = Math.ceil(visible.minZ / step) * step; z <= visible.maxZ; z += step) {
     const screen = toScreen({z, x: 0});
     context.moveTo(Math.round(screen.x) + 0.5, 0);
     context.lineTo(Math.round(screen.x) + 0.5, height);
   }
-  for (let x = Math.ceil(bounds.minX / step) * step; x <= bounds.maxX; x += step) {
+  for (let x = Math.ceil(visible.minX / step) * step; x <= visible.maxX; x += step) {
     const screen = toScreen({z: 0, x});
     context.moveTo(0, Math.round(screen.y) + 0.5);
     context.lineTo(width, Math.round(screen.y) + 0.5);
@@ -3245,13 +3254,13 @@ function drawComparisonGrid(surface, bounds, scale) {
   return toScreen;
 }
 
-function strokeComparisonGeometry(surface, items, bounds, scale, changedColor) {
+function strokeComparisonGeometry(surface, items, bounds, scale, side) {
   const toScreen = drawComparisonGrid(surface, bounds, scale);
-  strokeComparisonItems(surface, items.filter((item) => !item.different), toScreen, COMPARISON_COLORS.matching, 1.35, 0);
-  strokeComparisonItems(surface, items.filter((item) => item.different), toScreen, changedColor, 2.4, 7);
+  if (state.compareLayers.matching) strokeComparisonItems(surface, items.filter((item) => !item.different), toScreen, COMPARISON_COLORS.matching, 1.1);
+  if (state.compareLayers[side]) strokeComparisonItems(surface, items.filter((item) => item.different), toScreen, COMPARISON_COLORS[side], 1.4);
 }
 
-function strokeComparisonItems(surface, items, toScreen, color, lineWidth, shadowBlur) {
+function strokeComparisonItems(surface, items, toScreen, color, lineWidth) {
   const {context} = surface;
   for (const item of items) {
     const points = (item.segment.points?.length ? item.segment.points : [item.segment.start, item.segment.end]).filter(Boolean).map(geometryDisplayPoint);
@@ -3265,8 +3274,8 @@ function strokeComparisonItems(surface, items, toScreen, color, lineWidth, shado
     context.strokeStyle = color;
     context.lineWidth = lineWidth;
     context.setLineDash(blocked ? [2, 2] : (item.segment.type === "rapid" ? [6, 4] : []));
-    context.shadowColor = shadowBlur ? color : "transparent";
-    context.shadowBlur = shadowBlur;
+    context.shadowColor = "transparent";
+    context.shadowBlur = 0;
     context.stroke();
   }
   context.setLineDash([]);
@@ -3276,10 +3285,12 @@ function strokeComparisonItems(surface, items, toScreen, color, lineWidth, shado
 function strokeComparisonOverlay(surface, geometry, bounds, scale) {
   const layers = overlayGeometryLayers(geometry);
   const toScreen = drawComparisonGrid(surface, bounds, scale);
-  strokeComparisonItems(surface, layers.common, toScreen, COMPARISON_COLORS.matching, 1.35, 0);
-  strokeComparisonItems(surface, layers.blockedCommon, toScreen, COMPARISON_COLORS.matching, 1.35, 0);
-  strokeComparisonItems(surface, layers.originalOnly, toScreen, COMPARISON_COLORS.original, 4.6, 8);
-  strokeComparisonItems(surface, layers.revisedOnly, toScreen, COMPARISON_COLORS.revised, 2.25, 8);
+  if (state.compareLayers.matching) {
+    strokeComparisonItems(surface, layers.common, toScreen, COMPARISON_COLORS.matching, 1.1);
+    strokeComparisonItems(surface, layers.blockedCommon, toScreen, COMPARISON_COLORS.matching, 1.1);
+  }
+  if (state.compareLayers.original) strokeComparisonItems(surface, layers.originalOnly, toScreen, COMPARISON_COLORS.original, 1.4);
+  if (state.compareLayers.revised) strokeComparisonItems(surface, layers.revisedOnly, toScreen, COMPARISON_COLORS.revised, 1.4);
 }
 
 function renderComparisonGraphics() {
@@ -3324,13 +3335,23 @@ function renderComparisonGraphics() {
       ? "No comparable motion was parsed"
       : (geometry.originalOnly || geometry.revisedOnly ? `${geometry.revisedOnly} revised toolpath difference${geometry.revisedOnly === 1 ? "" : "s"}` : "Toolpaths match geometrically"));
 
+  drawComparisonGraphics();
+}
+
+// View controls redraw the retained comparison; they never reparse or filter its results.
+function drawComparisonGraphics() {
+  const geometry = state.comparisonGeometry;
+  if (!geometry || !state.comparisonOriginal || elements.compareGraphicsAudit.hidden) return;
+  elements.compareZoomLevel.textContent = `${Math.round(state.compareCamera.zoom * 100)}%`;
+  elements.compareZoomIn.disabled = state.compareCamera.zoom >= 128;
+  elements.compareZoomOut.disabled = state.compareCamera.zoom <= 0.1;
   const fitMode = elements.fitGeometryPart.checked ? "part" : (elements.fitGeometryDifferences.checked ? "changed" : "all");
   const bounds = comparisonGeometryBounds(geometry, fitMode);
   const spanZ = Math.max(bounds.maxZ - bounds.minZ, 0.001);
   const spanX = Math.max(bounds.maxX - bounds.minX, 0.001);
   if (state.compareGraphicsLayout === "overlay") {
     const overlaySurface = prepareComparisonCanvas(elements.overlayCompareCanvas);
-    const scale = Math.min((overlaySurface.width - 28) / spanZ, (overlaySurface.height - 28) / spanX);
+    const scale = Math.min((overlaySurface.width - 28) / spanZ, (overlaySurface.height - 28) / spanX) * state.compareCamera.zoom;
     strokeComparisonOverlay(overlaySurface, geometry, bounds, scale);
     return;
   }
@@ -3339,9 +3360,46 @@ function renderComparisonGraphics() {
   const scale = Math.min(
     (Math.min(originalSurface.width, revisedSurface.width) - 28) / spanZ,
     (Math.min(originalSurface.height, revisedSurface.height) - 28) / spanX,
-  );
-  strokeComparisonGeometry(originalSurface, geometry.original, bounds, scale, COMPARISON_COLORS.original);
-  strokeComparisonGeometry(revisedSurface, geometry.revised, bounds, scale, COMPARISON_COLORS.revised);
+  ) * state.compareCamera.zoom;
+  strokeComparisonGeometry(originalSurface, geometry.original, bounds, scale, "original");
+  strokeComparisonGeometry(revisedSurface, geometry.revised, bounds, scale, "revised");
+}
+
+function resetComparisonDisplay() {
+  stopComparisonDrag();
+  state.compareLayers = {original: true, revised: true, matching: true};
+  for (const control of [elements.compareOriginalToggle, elements.compareRevisedToggle, elements.compareMatchingToggle]) control.setAttribute("aria-pressed", "true");
+  state.compareCamera = {zoom: 1, offsetZ: 0, offsetX: 0};
+  state.compareViewport = null;
+}
+
+function fitComparisonGraphics() {
+  stopComparisonDrag();
+  state.compareCamera = {zoom: 1, offsetZ: 0, offsetX: 0};
+  drawComparisonGraphics();
+}
+
+function stopComparisonDrag() {
+  const drag = state.compareDrag;
+  state.compareDrag = null;
+  if (!drag) return;
+  drag.canvas.classList.remove("is-panning");
+  if (drag.canvas.hasPointerCapture(drag.pointerId)) drag.canvas.releasePointerCapture(drag.pointerId);
+}
+
+function zoomComparisonGraphics(factor, canvas = null, event = null) {
+  if (!state.compareViewport) return;
+  stopComparisonDrag();
+  const camera = state.compareCamera;
+  const zoom = Math.max(0.1, Math.min(128, camera.zoom * factor));
+  if (canvas && event) {
+    const rect = canvas.getBoundingClientRect();
+    const adjustment = (1 - camera.zoom / zoom) / state.compareViewport.scale;
+    camera.offsetZ += (event.clientX - rect.left - rect.width / 2) * adjustment;
+    camera.offsetX += (rect.height / 2 - event.clientY + rect.top) * adjustment;
+  }
+  camera.zoom = zoom;
+  drawComparisonGraphics();
 }
 
 function setComparisonGraphicsLayout(layout) {
@@ -3356,7 +3414,7 @@ function setComparisonGraphicsLayout(layout) {
   elements.graphicsViewportNote.textContent = overlay
     ? "Both programs share one machine setup, orientation, scale, and viewport."
     : "Both windows use the same machine setup, orientation, scale, and viewport.";
-  if (state.compareView === "graphics") requestAnimationFrame(renderComparisonGraphics);
+  if (state.compareView === "graphics") requestAnimationFrame(drawComparisonGraphics);
 }
 
 function setComparisonView(view) {
@@ -3378,7 +3436,7 @@ function setGraphicsInfo(open) {
   elements.graphicsInfoPanel.hidden = !open;
   elements.graphicsInfoButton.setAttribute("aria-expanded", String(open));
   elements.graphicsInfoButton.classList.toggle("active", open);
-  if (open) requestAnimationFrame(renderComparisonGraphics);
+  requestAnimationFrame(drawComparisonGraphics);
 }
 
 function renderComparison() {
@@ -7621,13 +7679,47 @@ elements.compareCodeView.addEventListener("click", () => setComparisonView("code
 elements.compareGraphicsView.addEventListener("click", () => setComparisonView("graphics"));
 elements.compareSplitLayout.addEventListener("click", () => setComparisonGraphicsLayout("split"));
 elements.compareOverlayLayout.addEventListener("click", () => setComparisonGraphicsLayout("overlay"));
+for (const [layer, control] of [["original", elements.compareOriginalToggle], ["revised", elements.compareRevisedToggle], ["matching", elements.compareMatchingToggle]]) {
+  control.addEventListener("click", () => {
+    state.compareLayers[layer] = !state.compareLayers[layer];
+    control.setAttribute("aria-pressed", String(state.compareLayers[layer]));
+    drawComparisonGraphics();
+  });
+}
+elements.compareZoomIn.addEventListener("click", () => zoomComparisonGraphics(1.25));
+elements.compareZoomOut.addEventListener("click", () => zoomComparisonGraphics(0.8));
+elements.compareFit.addEventListener("click", fitComparisonGraphics);
+for (const canvas of [elements.originalCompareCanvas, elements.revisedCompareCanvas, elements.overlayCompareCanvas]) {
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    zoomComparisonGraphics(Math.exp(-Math.max(-100, Math.min(100, event.deltaY)) * 0.002), canvas, event);
+  }, {passive: false});
+  canvas.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || state.compareDrag || !state.compareViewport) return;
+    state.compareDrag = {canvas, pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      offsetZ: state.compareCamera.offsetZ, offsetX: state.compareCamera.offsetX, scale: state.compareViewport.scale};
+    canvas.setPointerCapture(event.pointerId);
+    canvas.classList.add("is-panning");
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    const drag = state.compareDrag;
+    if (!drag || drag.canvas !== canvas || drag.pointerId !== event.pointerId) return;
+    state.compareCamera.offsetZ = drag.offsetZ - (event.clientX - drag.x) / drag.scale;
+    state.compareCamera.offsetX = drag.offsetX + (event.clientY - drag.y) / drag.scale;
+    drawComparisonGraphics();
+  });
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) canvas.addEventListener(type, (event) => {
+    if (state.compareDrag?.canvas !== canvas || state.compareDrag.pointerId !== event.pointerId) return;
+    stopComparisonDrag();
+  });
+}
 elements.fitGeometryDifferences.addEventListener("change", () => {
   if (elements.fitGeometryDifferences.checked) elements.fitGeometryPart.checked = false;
-  renderComparisonGraphics();
+  fitComparisonGraphics();
 });
 elements.fitGeometryPart.addEventListener("change", () => {
   if (elements.fitGeometryPart.checked) elements.fitGeometryDifferences.checked = false;
-  renderComparisonGraphics();
+  fitComparisonGraphics();
 });
 elements.graphicsInfoButton.addEventListener("click", () => setGraphicsInfo(elements.graphicsInfoPanel.hidden));
 $("closeGraphicsInfoButton").addEventListener("click", () => setGraphicsInfo(false));
@@ -8184,7 +8276,7 @@ createPaneSplitter({
 
 new ResizeObserver(resizeCanvas).observe(elements.wrap);
 new ResizeObserver(() => {
-  if (elements.compareDialog.open && state.compareView === "graphics") requestAnimationFrame(renderComparisonGraphics);
+  if (elements.compareDialog.open && state.compareView === "graphics") requestAnimationFrame(drawComparisonGraphics);
 }).observe(elements.compareGraphicsAudit);
 const legacySessionMigration = migrateLegacySession(localStorage);
 const legacyMachineProfileMigration = quarantineLegacyMachineProfileCache(localStorage);
