@@ -9,11 +9,14 @@ The site is plain HTML and CSS. The company pages present Precision Decision LLC
 - `index.html`, `about.html`, and `contact.html` describe the company broadly. Do not add unannounced product names, technical details, or development plans without the owner's approval.
 - Keep the company name, `admin@precisiondecisionllc.com`, and `CNAME` consistent. The homepage's Product Information & Support section links to the options app's existing documents.
 - Preserve `/privacy.html`, `/terms.html`, `/licenses.html`, `/option-engines/`, and all existing `/option-engines/` policy, risk, subscription, and account-deletion routes. Applications or external reviewers may link directly to them.
-- `/privacy.html` is the newer Contract Terminal policy dated September 8, 2026. The legacy `/option-engines/privacy/` document and several other documents still use Options Terminal. Do not replace the newer root policy with the older one.
+- Contract Terminal is the official product name. Use it consistently in page copy, titles, metadata, and accessibility labels while preserving existing routes.
+- `/privacy.html` is the newer Contract Terminal policy dated September 8, 2026. `/option-engines/privacy/` is an older policy edition. Do not replace the newer root policy with the older one.
 - The older terms/subscription pages and newer privacy policy contain different descriptions of purchase support. Any reconciliation requires checking the options app's current behavior; company marketing edits must not guess or change those terms.
 - CNC application assets are maintained in a separate source repository. Do not change those files as part of company copy updates.
 
 The company copy revision presents the business as a software developer without naming the CNC application. Verification covered 12 HTML pages and 203 local links/assets, plus browser navigation to the current privacy policy, account-deletion instructions, and contact page. Product documents, shared styles, and domain configuration were preserved.
+
+The September 10, 2026 product-name correction standardizes Contract Terminal across nine affected HTML pages, including titles, metadata, accessibility labels, body copy, and footers. Verification checked all 12 HTML pages and 203 local links/assets; a comparison against the prior content confirmed that legal changes were limited to the product name and related article grammar. Browser preview confirmed the legal center and refreshed account-deletion page. Existing routes and policy dates remain intact.
 
 ## Preview Locally
 
