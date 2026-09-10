@@ -85,8 +85,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.9";
-const APP_BUILD = 111;
+const APP_VERSION = "v0.3.10";
+const APP_BUILD = 112;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;

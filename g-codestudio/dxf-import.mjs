@@ -2523,6 +2523,22 @@ function selectedContourAmbiguity(selected, candidates) {
         message: "Another closed DXF contour is inside the combined geometry-uncertainty clearance of the selection, so material topology is ambiguous.",
       };
     }
+    // Intersections and uncertainty-sized clearances were rejected above.
+    // Separated full-curve bounds also prove neither loop contains the other;
+    // a ray aligned with an unrelated vertex must not override that proof.
+    // These analytic bounds include arc extrema, not just source endpoints.
+    const bounds = [selected.bounds, other.bounds];
+    if (bounds.every((bound) => bound
+      && [bound.minZ, bound.maxZ, bound.minX, bound.maxX].every(Number.isFinite)
+      && bound.minZ <= bound.maxZ && bound.minX <= bound.maxX)) {
+      const [first, second] = bounds;
+      const separationMm = Math.max(
+        second.minZ - first.maxZ, first.minZ - second.maxZ,
+        second.minX - first.maxX, first.minX - second.maxX,
+      );
+      if (Number.isFinite(separationMm)
+        && separationMm > combinedUncertaintyMm + clearanceRoundoffMm) continue;
+    }
     const otherAgainstSelected = classifyPointAgainstMaterialBoundary(
       materialRepresentativePoint(other.simpleBoundary),
       selected.simpleBoundary,
