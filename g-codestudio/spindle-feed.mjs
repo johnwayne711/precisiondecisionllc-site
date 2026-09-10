@@ -34,7 +34,7 @@ export function programmedFeedMmPerMinute(state, rpm) {
   const scale = state.unitScale;
   if (![1, 25.4].includes(scale)) return {feed: null, reason: "Feed units are unknown."};
   const perMinute = state.feedMode === "per-minute";
-  if (!perMinute && state.feedMode !== "per-revolution") return {feed: null, reason: "Select G98 or G99 to establish feed mode."};
+  if (!perMinute && state.feedMode !== "per-revolution") return {feed: null, reason: "Feed mode is unknown. Program G98/G99 or set a supported Starting feed mode in the machine definition."};
   if (!perMinute && !Number.isFinite(rpm)) return {feed: null, reason: "G99 feed per minute needs a known spindle RPM."};
   const feed = state.feed * scale * (perMinute ? 1 : rpm);
   return Number.isFinite(feed) ? {feed} : {feed: null, reason: "Calculated feed exceeds the numeric range."};

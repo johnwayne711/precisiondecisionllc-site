@@ -84,8 +84,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.7";
-const APP_BUILD = 109;
+const APP_VERSION = "v0.3.8";
+const APP_BUILD = 110;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -212,8 +212,8 @@ const DEFAULT_MACHINE_PROFILES = [
   {
     id: "mori-seiki-sl75", name: "Mori-Seiki SL-75", manufacturer: "Mori Seiki",
     model: "SL-75", serialNumber: "", controlMake: "", controlModel: "",
-    status: "draft", templateRevision: 3, units: "inch", xProgramming: "diameter", orientation: "left", cssUnits: "program",
-    initialPlane: "G18", startMode: "unknown", rapidBehavior: "unknown",
+    status: "draft", templateRevision: 4, units: "inch", xProgramming: "diameter", orientation: "left", cssUnits: "program",
+    initialPlane: "G18", initialFeedMode: "G99", startMode: "unknown", rapidBehavior: "unknown",
     xAxisStroke: 400 / 25.4, zAxisStroke: 1550 / 25.4, turretStations: 12,
     rapidXMax: 5000 / 25.4, rapidYMax: null, rapidZMax: 8000 / 25.4, rapidCMax: null,
     liveToolDialect: "unconfigured", liveToolCapability: "unknown", cAxisCapability: "unknown",
@@ -246,7 +246,7 @@ const DEFAULT_MACHINE_PROFILES = [
 ];
 const MACHINE_PROFILE_FIELDS = [
   "name", "manufacturer", "model", "serialNumber", "controlMake", "controlModel", "status", "units",
-  "xProgramming", "orientation", "initialPlane", "cssUnits", "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ",
+  "xProgramming", "orientation", "initialPlane", "initialFeedMode", "cssUnits", "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ",
   "xAxisStroke", "zAxisStroke",
   "startMode", "startX", "startZ", "rapidBehavior", "rapidXMax", "rapidZMax", "toolChangeX", "toolChangeZ",
   "safeIndexX", "safeIndexZ", "turretStations", "liveToolDialect", "liveToolCapability", "cAxisCapability",
@@ -1089,10 +1089,12 @@ function normalizeMachineProfile(profile) {
   const upgraded = {...profile};
   if (needsTemplateUpgrade) {
     for (const [field, estimate] of Object.entries(fallback)) {
-      // Revision 3 establishes the CSS program convention only. Do not refill
-      // machine measurements that a revision-2 owner deliberately left unknown.
-      if (template.id === "mori-seiki-sl75" && Number(profile?.templateRevision || 0) >= 2 && field !== "cssUnits") continue;
-      if (field === "initialPlane" && Object.hasOwn(upgraded, field)) continue;
+      // Upgrade only newly introduced defaults; preserve explicit unknowns and
+      // user values, including revision-3 CSS choices and starting feed modes.
+      const revision = Number(profile?.templateRevision || 0);
+      if (template.id === "mori-seiki-sl75" && revision >= 2
+        && !(field === "cssUnits" && revision < 3) && field !== "initialFeedMode") continue;
+      if (["initialPlane", "initialFeedMode"].includes(field) && Object.hasOwn(upgraded, field)) continue;
       const existing = upgraded[field];
       if (existing === null || existing === undefined || existing === "" || existing === "unknown") upgraded[field] = estimate;
     }
@@ -1102,6 +1104,7 @@ function normalizeMachineProfile(profile) {
   }
   const normalized = {...fallback, ...upgraded};
   normalized.initialPlane = normalized.initialPlane === "G18" ? "G18" : "unknown";
+  normalized.initialFeedMode = ["G98", "G99"].includes(normalized.initialFeedMode) ? normalized.initialFeedMode : "unknown";
   normalized.cssUnits = ["sfm", "m/min", "program"].includes(normalized.cssUnits) ? normalized.cssUnits : "unknown";
   for (const field of NUMERIC_MACHINE_FIELDS) {
     const value = normalized[field];
@@ -1189,6 +1192,7 @@ function machinePlotOptions(profile) {
     initialPosition,
     referencePosition,
     initialPlane: profile.initialPlane === "G18" ? "G18" : null,
+    initialFeedMode: profile.initialFeedMode || "unknown",
     cssUnits: profile.cssUnits || "unknown",
     spindleGearContract: sl75SpindleGearContract(profile),
     initialPositionMode: configuredStart.mode,
@@ -1228,6 +1232,7 @@ function openMachineEditor() {
   $("sl75MachineReference").hidden = profile.id !== "mori-seiki-sl75";
   elements.machineSaveStatus.textContent = "";
   elements.machineSaveStatus.className = "";
+  $("mf-initialFeedMode").disabled = profile.liveToolDialect === "haas-lathe-ngc";
   for (const field of MACHINE_PROFILE_FIELDS) {
     const control = elements.machineForm.elements.namedItem(field);
     if (control) control.value = profile[field] ?? "";
@@ -6916,7 +6921,12 @@ function updateSpindleFeedReadout() {
   const runningStatus = result.spindleRunning === false ? "stopped" : result.spindleRunning === true ? `${result.spindleDirection.toUpperCase()} commanded` : "running state unknown";
   $("spindleModeReadout").textContent = `${speedMode}${Number.isFinite(result.spindleSpeed) ? ` · S${number(result.spindleSpeed)} ${speedUnits}` : ""} · ${runningStatus}${result.spindleMode === "css" && result.cssUnits === "program" ? " · program units convention" : ""}`;
   $("feedModeReadout").textContent = result.feedMode === "per-minute" ? "G98" : result.feedMode === "per-revolution" ? "G99" : "Mode unknown";
-  if (Number.isFinite(result.commandedFeed)) $("feedModeReadout").textContent += ` · F${number(result.commandedFeed)} ${result.programUnits === "in" ? "in" : "mm"}/${result.feedMode === "per-revolution" ? "rev" : "min"}`;
+  if (result.feedModeSource === "machine") $("feedModeReadout").textContent += " · machine start setting";
+  if (Number.isFinite(result.commandedFeed)) {
+    const basis = result.feedMode === "per-revolution" ? "rev" : result.feedMode === "per-minute" ? "min" : null;
+    const feedUnits = basis ? ` ${result.programUnits === "in" ? "in" : "mm"}/${basis}` : " · feed basis unknown";
+    $("feedModeReadout").textContent += ` · F${number(result.commandedFeed)}${feedUnits}`;
+  }
   if (Number.isFinite(result.threadLeadMmPerRev)) $("feedModeReadout").textContent += " · thread lead";
   $("spindleLimitReadout").textContent = Number.isFinite(result.spindleLimit)
     ? `G50 S${number(result.spindleLimit)} · ${result.spindleRpmLimitMode === "css-only" ? "G96 only" : result.spindleRpmLimitMode === "both" ? "G96/G97" : "G97 effect unconfigured"}` : "G50 cap not set";
@@ -7440,6 +7450,9 @@ elements.toolLibraryAssign.addEventListener("click", () => {
   });
 });
 elements.machineForm.addEventListener("submit", saveMachineEditor);
+elements.machineForm.elements.namedItem("liveToolDialect").addEventListener("change", (event) => {
+  $("mf-initialFeedMode").disabled = event.target.value === "haas-lathe-ngc";
+});
 elements.machineForm.elements.namedItem("status").addEventListener("change", (event) => updateMachineStatusBadge(event.target.value));
 $("closeMachineButton").addEventListener("click", () => elements.machineDialog.close());
 $("cancelMachineButton").addEventListener("click", () => elements.machineDialog.close());

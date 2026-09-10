@@ -973,6 +973,7 @@ function timingSnapshot(state) {
   return {
     feed: state.feed ?? null,
     feedMode: state.feedMode ?? "unknown",
+    feedModeSource: state.feedModeSource ?? "unknown",
     spindleMode: state.spindleMode ?? "unknown",
     spindleSpeed: state.spindleSpeed ?? null,
     spindleLimit: state.spindleLimit ?? null,
@@ -1217,8 +1218,10 @@ function updateModalState(record, state, warnings) {
         message: `G${code} is a Haas Group 09 canned cycle and is not modeled; its modal motion is blocked until G80 or a documented G00/G01 cancellation.`,
       });
     }
-    else if (feedModes.perMinute.includes(code)) state.feedMode = "per-minute";
-    else if (feedModes.perRevolution.includes(code)) state.feedMode = "per-revolution";
+    else if (feedModes.perMinute.includes(code) || feedModes.perRevolution.includes(code)) {
+      state.feedMode = feedModes.perMinute.includes(code) ? "per-minute" : "per-revolution";
+      state.feedModeSource = "program";
+    }
     else if (code === 96) state.spindleMode = "css";
     else if (code === 97) state.spindleMode = "rpm";
     else if (code === 80) state.unsupportedGroup09MotionMode = null;
@@ -3625,6 +3628,7 @@ export function parseGcode(source, {
   rapidBehavior = "linear", rapidXMax = null, rapidZMax = null, arcChordTolerance = 0.0254,
   defaultUnits = "mm", warnOnAssumedUnits = false,
   initialPlane: requestedInitialPlane = null,
+  initialFeedMode: requestedInitialFeedMode = "unknown",
   spindleGearContract = null,
   cssUnits = "unknown",
   liveToolDialect: requestedLiveToolDialect = "unconfigured",
@@ -3655,6 +3659,10 @@ export function parseGcode(source, {
   const extractedToolCalls = extractProgramToolCalls(source);
   const normalizedDefaultUnits = defaultUnits === "inch" || defaultUnits === "in" ? "in" : "mm";
   const liveToolDialectDefinition = resolveLiveToolDialect(requestedLiveToolDialect);
+  // Starting feed authority is explicit setup, never inferred from F magnitude.
+  // Haas special-cycle contracts still require their programmed startup mode.
+  const initialFeedMode = liveToolDialectDefinition.id === "unconfigured"
+    && ["G98", "G99"].includes(requestedInitialFeedMode) ? requestedInitialFeedMode : "unknown";
   const state = {
     x: Number.isFinite(initialPosition?.x) ? initialPosition.x : null,
     z: Number.isFinite(initialPosition?.z) ? initialPosition.z : null,
@@ -3664,7 +3672,10 @@ export function parseGcode(source, {
     referencePosition: isKnownPoint(referencePosition) ? {...referencePosition} : null,
     rapidBehavior, rapidXMax, rapidZMax, arcChordTolerance,
     absolute: true, scale: normalizedDefaultUnits === "in" ? 25.4 : 1, units: normalizedDefaultUnits,
-    motion: "rapid", feed: null, feedMode: "unknown", spindleMode: "unknown", spindleSpeed: null,
+    motion: "rapid", feed: null,
+    feedMode: initialFeedMode === "G99" ? "per-revolution" : initialFeedMode === "G98" ? "per-minute" : "unknown",
+    initialFeedMode, feedModeSource: initialFeedMode === "unknown" ? "unknown" : "machine",
+    spindleMode: "unknown", spindleSpeed: null,
     threadingActive: false, threadingSequenceRpm: null, threadingPositionEstablished: false, sawCutterCompOff: false,
     g76Settings: g76Settings && typeof g76Settings === "object" ? {...g76Settings} : null,
     g76PHistory: null,
@@ -4317,6 +4328,8 @@ export function parseGcode(source, {
       initialPlaneUsed: state.initialPlaneUsed,
       coordinateMode: state.g112Active ? "g112-face" : "turning-xz",
       feedMode: state.feedMode,
+      feedModeSource: state.feedModeSource,
+      initialFeedMode: state.initialFeedMode,
       spindleRunning: state.spindleRunning,
       spindleDirection: state.spindleDirection,
       optionalStopEnabled: state.optionalStopEnabled,

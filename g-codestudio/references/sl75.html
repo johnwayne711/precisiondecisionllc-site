@@ -84,6 +84,13 @@
       <p class="source">Reference: Mori programming manual B-12 / B-13 contains ordinary X/Z radius examples. Check the program and selected environment together.</p>
     </section>
 
+    <section class="reference-section" aria-labelledby="feedHeading">
+      <h2 id="feedHeading">Starting feed mode and cutting feed</h2>
+      <p>The SL-75 environment starts in G99: F is distance per spindle revolution. The Mori manual lists G99 as the power-on/reset mode and explains that G99 need not be repeated unless G98 changed the mode. Programmed G98/G99 overrides the starting setting; re-enter F when changing feed mode.</p>
+      <p>Starting feed mode is editable in the machine definition. The readout identifies when it uses that setting. With G99, F0.008 means 0.008 in/rev in inch programs; at 33.7431 RPM the calculated feed is about 0.269945 in/min. The display toggle changes the shown units, not the program mode.</p>
+      <p class="source">Source: Mori manual PM-NLTMSC518-I1EN, B-1 / B-4 (power-on/reset modes) and <a href="https://www.remontservo.ru/tash-kumyr/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf#page=281" target="_blank" rel="noopener noreferrer">D-20: G98 / G99 feed modes</a>. Confirm this setup against the installed control; the environment remains a draft.</p>
+    </section>
+
     <section class="reference-section" aria-labelledby="playHeading">
       <h2 id="playHeading">Playback and review</h2>
       <p>M00 pauses the reader; Play resumes at the following block. M01 does so when Optional Stop is ON. M02/M30 ends the program and enables restart.</p>
