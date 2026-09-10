@@ -152,6 +152,72 @@ function programFilename(options) {
   return normalized ? normalized.toUpperCase() : null;
 }
 
+// Header labels are presentation only; they never validate or rewrite G-code.
+export function programHeaderKey(source) {
+  const text = String(source ?? "");
+  // Inspect only the bounded tape header, not comments or later executable O words.
+  for (const raw of text.slice(0, 65536).split(/\r?\n/)) {
+    let inComment = false;
+    for (const char of raw) {
+      if (char === ";" && !inComment) break;
+      if (char === "(") { if (inComment) return null; inComment = true; }
+      if (char === ")") { if (!inComment) return null; inComment = false; }
+    }
+    if (inComment) return null;
+    const code = lineParts(raw).code.trim();
+    if (!code || code === "%" || code === "$") continue;
+    const match = code.match(/^(?:N\s*\d+\s*)?O\s*(\d{1,32})\s*$/i);
+    return match ? `O${match[1]}` : null;
+  }
+  return null;
+}
+
+function sourceBasename(value) {
+  return String(value ?? "").trim().replaceAll("\\", "/").split("/").at(-1)?.trim() || "program.nc";
+}
+
+export function createProgramIdentity(source, {fileName, origin = "file"} = {}) {
+  const kind = ["file", "sample"].includes(origin) ? origin : "editor";
+  const key = programHeaderKey(source);
+  return {
+    schemaVersion: 1, origin: kind,
+    fileName: kind === "editor" ? `${key || "program"}.nc` : sourceBasename(fileName),
+    ...(kind === "sample" ? {sampleProgramKey: key, edited: false} : {}),
+  };
+}
+
+export function editedProgramIdentity(identity, source) {
+  if (identity?.origin === "file") return createProgramIdentity(source, identity);
+  if (identity?.origin === "sample" && identity.sampleProgramKey === programHeaderKey(source)) {
+    return {...identity, edited: true};
+  }
+  return createProgramIdentity(source, {origin: "editor"});
+}
+
+export function programIdentityLabel(identity, source) {
+  const key = programHeaderKey(source);
+  if (identity?.origin === "editor") return key ? `${key} · Unsaved` : "Unsaved program";
+  if (identity?.origin === "sample" && identity.edited) return key ? `${key} · Edited sample` : "Edited sample";
+  return sourceBasename(identity?.fileName);
+}
+
+export function restoredProgramIdentity(source, saved, samples = {}) {
+  const recorded = saved?.programIdentity;
+  const fileName = sourceBasename(saved?.fileName);
+  const valid = recorded?.schemaVersion === 1 && ["file", "sample", "editor"].includes(recorded.origin)
+    && sourceBasename(recorded.fileName) === fileName;
+  if (valid && recorded.origin === "file") return createProgramIdentity(source, {fileName});
+  if (valid && recorded.origin === "editor") return createProgramIdentity(source, {origin: "editor"});
+  const sample = Object.entries(samples).find(([name]) => name.toUpperCase() === fileName.toUpperCase());
+  if (sample) {
+    const identity = createProgramIdentity(sample[1], {fileName, origin: "sample"});
+    const unchanged = String(source).replace(/\r/g, "") === String(sample[1]).replace(/\r/g, "");
+    return unchanged && saved?.bundledSample === true && recorded?.edited !== true
+      ? identity : editedProgramIdentity(identity, source);
+  }
+  return createProgramIdentity(source, {fileName, origin: saved?.fileName ? "file" : "editor"});
+}
+
 function exactAssemblyRef(candidate) {
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
   const {id, revision} = candidate;

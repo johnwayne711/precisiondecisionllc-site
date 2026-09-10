@@ -58,8 +58,9 @@ import {
 import {millingToolPreviewClaimLabels, millingToolPreviewViewModel} from "./milling-tool-preview.mjs";
 import {plottedProgramStart, sl75SpindleGearContract} from "./machine-semantics.mjs";
 import {
-  activeToolKeyAtLine, createVersionedToolAssignment, isExactBundledProgram, normalizeVersionedToolAssignment,
-  programAssignmentScope, programToolDocumentIdentity, reconcileToolAssignments,
+  activeToolKeyAtLine, createProgramIdentity, createVersionedToolAssignment, editedProgramIdentity,
+  isExactBundledProgram, normalizeVersionedToolAssignment,
+  programAssignmentScope, programIdentityLabel, programToolDocumentIdentity, reconcileToolAssignments, restoredProgramIdentity,
   reconcileToolAssignmentsForEditorEdit, reviseToolAssignmentSetup, toolAssignmentAssemblyRef, toolAssignmentsForPersistence,
 } from "./program-tools.mjs";
 import {
@@ -84,8 +85,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.8";
-const APP_BUILD = 110;
+const APP_VERSION = "v0.3.9";
+const APP_BUILD = 111;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -374,6 +375,7 @@ const state = {
   showTool2d: false,
   toolAssignments: {}, toolAssignmentRevision: 0, toolAssignmentScope: null,
   toolAssignmentDocumentIdentity: null, programEditOrigin: null, bundledSample: false,
+  programIdentity: createProgramIdentity(sampleProgram, {fileName: "sample-g71-rough.nc", origin: "sample"}),
   bundledStepReference: false,
   toolLibraryTab: "assemblies", toolLibrarySelection: null,
   referenceGeometry: null, referenceComparison: null, showReferenceWitness: false, referenceGeneration: 0, referenceIntentRevision: 0,
@@ -894,8 +896,20 @@ function invalidateReferenceComparison(label, message) {
   if (witnessWasVisible) draw();
 }
 
+function currentProgramFileName() {
+  return state.programIdentity?.fileName || "program.nc";
+}
+
+function renderProgramIdentity() {
+  elements.fileName.textContent = programIdentityLabel(state.programIdentity, elements.input.value);
+  elements.fileName.title = state.programIdentity?.origin === "editor" ? "Unsaved editor program"
+    : state.programIdentity?.origin === "sample" ? "Bundled sample or an edited sample" : currentProgramFileName();
+}
+
 function markProgramChanged() {
   state.programRevision += 1;
+  state.programIdentity = editedProgramIdentity(state.programIdentity, elements.input.value);
+  renderProgramIdentity();
   clearToolOffsetConfirmations();
   state.playing = false;
   state.lastFrame = 0;
@@ -1030,7 +1044,8 @@ function persistSession() {
   }
   const result = saveRememberedJob(localStorage, {
     preferences: capturedPreferences(),
-    fileName: elements.fileName.textContent,
+    fileName: currentProgramFileName(),
+    programIdentity: state.programIdentity,
     program: elements.input.value,
     toolAssignments: toolAssignmentsForPersistence(state.toolAssignments),
     latheControllerSettings: state.latheControllerSettings || null,
@@ -1059,7 +1074,12 @@ function restoreSession(saved) {
   applyStoredPreferences(saved.preferences);
   if (typeof saved.program === "string" && saved.program.trim()) {
     elements.input.value = saved.program;
-    elements.fileName.textContent = typeof saved.fileName === "string" ? saved.fileName : "restored-program.nc";
+    state.programIdentity = restoredProgramIdentity(saved.program, saved, {
+      "sample-g71-rough.nc": sampleProgram, "sample-g71-solid-match.nc": stepSampleProgram,
+      "sample-g71-dxf-match.nc": dxfSampleProgram, "sample-live-bore.nc": liveBoreSampleProgram,
+      "sample-3-axis-mill.nc": millSampleProgram,
+    });
+    renderProgramIdentity();
     state.bundledSample = isExactBundledSample(saved.program, saved.bundledSample === true);
     state.bundledStepReference = saved.bundledStepReference === true
       && isExactBundledProgram(saved.program, stepSampleProgram, state.bundledSample);
@@ -1297,7 +1317,10 @@ function loadProgram(name, content, {bundledSample = false, machineMode = null} 
   state.bundledStepReference = false;
   elements.input.value = content;
   elements.codeInspector.hidden = true;
-  elements.fileName.textContent = name || "program.nc";
+  state.programIdentity = createProgramIdentity(content, {
+    fileName: name, origin: bundledSample ? "sample" : name ? "file" : "editor",
+  });
+  renderProgramIdentity();
   clearComparison();
   elements.programSearchPanel.hidden = true;
   elements.programReplaceRow.hidden = true;
@@ -3017,14 +3040,18 @@ function removeReferenceGeometry() {
 }
 
 async function saveProgram() {
-  const suggestedName = elements.fileName.textContent || "program.nc";
+  const suggestedName = currentProgramFileName();
   if (window.pywebview?.api?.save_gcode) {
-    const saved = await window.pywebview.api.save_gcode(suggestedName, elements.input.value);
+    const programRevision = state.programRevision;
+    const content = elements.input.value;
+    const saved = await window.pywebview.api.save_gcode(suggestedName, content);
+    if (state.programRevision !== programRevision || elements.input.value !== content) return;
     if (saved?.error) { elements.status.textContent = saved.error; return; }
     if (saved?.name) {
       const normalizedName = (value) => String(value ?? "").trim().replaceAll("\\", "/").split("/").at(-1)?.toUpperCase() || "";
       const renamed = normalizedName(saved.name) !== normalizedName(suggestedName);
-      elements.fileName.textContent = saved.name;
+      state.programIdentity = createProgramIdentity(elements.input.value, {fileName: saved.name});
+      renderProgramIdentity();
       if (renamed) {
         clearToolAssignmentContext();
         state.bundledSample = false;
@@ -3079,9 +3106,9 @@ function setComparisonOriginal(name, content, {snapshot = false} = {}) {
   state.comparisonOriginalRevision += 1;
   state.comparisonOriginal = {name: name || "original-program.nc", content: String(content ?? "")};
   if (snapshot) {
-    state.comparisonOriginal.sourceFileName = elements.fileName.textContent;
+    state.comparisonOriginal.sourceFileName = currentProgramFileName();
     state.comparisonOriginal.confirmedToolOffsetPairings = toolOffsetPairingsForSource(content);
-    state.comparisonOriginal.toolOffsetConfirmationScope = toolOffsetScopeFor(content, elements.fileName.textContent);
+    state.comparisonOriginal.toolOffsetConfirmationScope = toolOffsetScopeFor(content, currentProgramFileName());
   }
   $("originalCompareName").textContent = state.comparisonOriginal.name;
   $("originalCompareMeta").textContent = `${state.comparisonOriginal.content.replace(/\r/g, "").split("\n").length} lines · held in memory on this device`;
@@ -6599,7 +6626,7 @@ function toolOffsetScopeFor(source, fileName) {
 }
 
 function toolOffsetPairingsForSource(source) {
-  const scope = toolOffsetScopeFor(elements.input.value, elements.fileName.textContent);
+  const scope = toolOffsetScopeFor(elements.input.value, currentProgramFileName());
   if (scope !== toolOffsetConfirmationScope) {
     confirmedToolOffsetPairings.clear();
     toolOffsetConfirmationScope = scope;
@@ -6919,6 +6946,8 @@ function updateSpindleFeedReadout() {
   const speedMode = result.spindleMode === "css" ? "G96" : result.spindleMode === "rpm" ? "G97" : "Mode unknown";
   const speedUnits = result.spindleMode === "css" ? (cssUnits === "sfm" ? "SFM" : cssUnits === "m/min" ? "m/min" : "units unknown") : "RPM";
   const runningStatus = result.spindleRunning === false ? "stopped" : result.spindleRunning === true ? `${result.spindleDirection.toUpperCase()} commanded` : "running state unknown";
+  $("spindleStateReadout").textContent = result.spindleRunning === false ? "Stopped"
+    : result.spindleRunning === true ? result.spindleDirection.toUpperCase() : "State unknown";
   $("spindleModeReadout").textContent = `${speedMode}${Number.isFinite(result.spindleSpeed) ? ` · S${number(result.spindleSpeed)} ${speedUnits}` : ""} · ${runningStatus}${result.spindleMode === "css" && result.cssUnits === "program" ? " · program units convention" : ""}`;
   $("feedModeReadout").textContent = result.feedMode === "per-minute" ? "G98" : result.feedMode === "per-revolution" ? "G99" : "Mode unknown";
   if (result.feedModeSource === "machine") $("feedModeReadout").textContent += " · machine start setting";
@@ -6932,7 +6961,13 @@ function updateSpindleFeedReadout() {
     ? `G50 S${number(result.spindleLimit)} · ${result.spindleRpmLimitMode === "css-only" ? "G96 only" : result.spindleRpmLimitMode === "both" ? "G96/G97" : "G97 effect unconfigured"}` : "G50 cap not set";
   const reasons = [...(result.reasons || [])];
   if (state.feedReadoutMode !== "per-minute" && result.feedPerRevolutionReason) reasons.push(result.feedPerRevolutionReason);
-  $("spindleFeedStatus").textContent = reasons.join(" ") || "At the selected block/substep end. Acceleration, overrides and machine limits are not included.";
+  $("spindleFeedStatus").textContent = reasons.join(" ");
+  $("spindleFeedStatus").hidden = reasons.length === 0;
+  const unknownFeed = !result.rapid && (!Number.isFinite(perMinute ? result.feed : result.feedPerRevolution)
+    || (state.feedReadoutMode === "both" && !Number.isFinite(result.feedPerRevolution)));
+  const readoutIssue = state.programDirty || !Number.isFinite(result.rpm) || unknownFeed;
+  $("spindleFeedDetailsToggle").dataset.issue = String(readoutIssue);
+  $("spindleFeedDetailsToggle").textContent = state.programDirty ? "Plot required" : readoutIssue ? "Why unknown?" : "Details";
 }
 
 function updateTransport({scrollProgram = false} = {}) {
@@ -7067,7 +7102,7 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
   const editOrigin = state.programDirty ? state.programEditOrigin : null;
   const nextAssignmentScope = mill
     ? previousAssignmentScope
-    : programAssignmentScope(elements.input.value, {fileName: elements.fileName.textContent});
+    : programAssignmentScope(elements.input.value, {fileName: currentProgramFileName()});
   state.parsed = mill
     ? parseMillGcode(elements.input.value, {
       defaultUnits: selectedProgramUnits(machine),
@@ -7086,7 +7121,7 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
         message: `Starting plane: X/Z (G18) from ${machine.name} setup. Programmed plane changes take precedence.`});
     }
     const nextDocumentIdentity = programToolDocumentIdentity(elements.input.value, {
-      fileName: elements.fileName.textContent,
+      fileName: currentProgramFileName(),
     });
     if (plotOptions.initialPosition) {
       const source = String(plotOptions.initialPositionMode || "custom").replaceAll("-", " ").toUpperCase();
@@ -7378,6 +7413,11 @@ $("feedDisplayToggle").addEventListener("click", event => {
   if (!["per-minute", "per-revolution", "both"].includes(mode)) return;
   state.feedReadoutMode = mode;
   updateSpindleFeedReadout();
+});
+$("spindleFeedDetailsToggle").addEventListener("click", () => {
+  const details = $("spindleFeedDetails");
+  details.hidden = !details.hidden;
+  $("spindleFeedDetailsToggle").setAttribute("aria-expanded", String(!details.hidden));
 });
 
 elements.programUnits.addEventListener("change", () => {
@@ -8388,6 +8428,7 @@ if (!restored) {
   elements.input.value = sampleProgram;
   state.bundledSample = true;
 }
+renderProgramIdentity();
 applyMachineModeUi();
 updateOptionalStopControl();
 plotProgram();

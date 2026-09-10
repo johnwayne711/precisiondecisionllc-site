@@ -228,17 +228,27 @@
           <div id="toolVerificationBadge" class="tool-verification-badge" aria-live="polite" hidden><span>2D TOOL OUTLINE</span><strong>NO ACTIVE TOOL</strong></div>
           <div id="emptyState" class="empty-state" hidden>No motion blocks found</div>
         </div>
-        <section id="spindleFeedReadout" class="spindle-feed-readout" aria-label="Programmed spindle and feed targets">
-          <div><span>SPINDLE TARGET</span><strong id="spindleRpmReadout">Unknown</strong><small id="spindleModeReadout">Mode unknown</small></div>
-          <div><span>CUTTING FEED TARGET</span>
-            <div id="feedDisplayToggle" class="feed-display-toggle" role="group" aria-label="Feed display units">
-              <button type="button" data-feed-display="per-minute" aria-pressed="true">in/min</button>
-              <button type="button" data-feed-display="per-revolution" aria-pressed="false">in/rev</button>
-              <button type="button" data-feed-display="both" aria-pressed="false">Both</button>
-            </div>
-            <strong id="cuttingFeedReadout">Unknown</strong><strong id="cuttingFeedSecondaryReadout" hidden></strong><small id="feedModeReadout">Mode unknown</small>
+        <section id="spindleFeedReadout" class="spindle-feed-readout" aria-label="Spindle speed and feed rate">
+          <div class="spindle-feed-meter">
+            <div class="spindle-feed-heading"><span>Spindle speed</span><small id="spindleStateReadout">State unknown</small></div>
+            <strong id="spindleRpmReadout">Unknown</strong>
           </div>
-          <div class="spindle-feed-context"><span>CALCULATED · NO MACHINE FEEDBACK</span><small id="spindleLimitReadout">G50 cap not set</small><small id="spindleFeedStatus">No spindle/feed state established.</small></div>
+          <div class="spindle-feed-meter">
+            <div class="spindle-feed-heading"><span>Feed rate</span>
+              <div id="feedDisplayToggle" class="feed-display-toggle" role="group" aria-label="Feed display units">
+                <button type="button" data-feed-display="per-minute" aria-pressed="true">in/min</button>
+                <button type="button" data-feed-display="per-revolution" aria-pressed="false">in/rev</button>
+                <button type="button" data-feed-display="both" aria-pressed="false">Both</button>
+              </div>
+            </div>
+            <div class="spindle-feed-values"><strong id="cuttingFeedReadout">Unknown</strong><strong id="cuttingFeedSecondaryReadout" hidden></strong></div>
+          </div>
+          <div class="spindle-feed-info"><small>Calculated</small><button id="spindleFeedDetailsToggle" type="button" aria-expanded="false" aria-controls="spindleFeedDetails">Details</button></div>
+          <div id="spindleFeedDetails" class="spindle-feed-details" hidden>
+            <small id="spindleModeReadout">Mode unknown</small><small id="feedModeReadout">Mode unknown</small><small id="spindleLimitReadout">G50 cap not set</small>
+            <small id="spindleFeedStatus">No spindle/feed state established.</small>
+            <small class="spindle-feed-basis">Calculated at the selected block/substep end. No machine feedback; acceleration, overrides and machine limits are not included.</small>
+          </div>
         </section>
         <div class="transport">
           <button id="playButton" class="play-button" data-transport-state="play" aria-label="Play"></button>
