@@ -2719,35 +2719,61 @@ function rapidSegment(start, end, record, state, xMode, stage) {
 }
 
 function parseReferenceReturn(record, state, xMode, warnings) {
-  const reference = state.referencePosition;
-  if (!isKnownPoint(reference)) {
+  const unsupportedAxes = ["X", "Z"].filter(letter => record.byLetter.has(letter));
+  const duplicateAxes = ["U", "W"].filter(letter => (record.byLetter.get(letter) || []).length > 1);
+  if (unsupportedAxes.length || duplicateAxes.length) {
     state.x = null;
     state.z = null;
     state.xUncertaintyMm = null;
     state.zUncertaintyMm = null;
-    warnings.push({line: record.line, message: "G28 returns to machine reference, but its position cannot be placed in the part view without a plotted reference estimate."});
+    state.turningPathTainted = true;
+    warningOnce(warnings, {
+      line: record.line, code: "reference-return-form-unsupported", verificationBlocked: true,
+      message: "This G28 form is not modeled; use at most one U and one W address, or an axisless G28. X/Z intermediate-position forms are unresolved.",
+    });
     return [];
   }
 
-  const segments = [];
+  const hasU = record.byLetter.has("U");
+  const hasW = record.byLetter.has("W");
+  const referenceAxes = hasU || hasW
+    ? [...(hasU ? ["X"] : []), ...(hasW ? ["Z"] : [])]
+    : ["X", "Z"];
   const start = {x: state.x, z: state.z};
-  let intermediate = null;
-  if (isKnownPoint(start)) {
-    intermediate = {
-      x: start.x + (record.byLetter.has("U") ? interpretedHaasAddressValue(record, "U", state) * state.scale : 0),
-      z: start.z + (record.byLetter.has("W") ? interpretedHaasAddressValue(record, "W", state) * state.scale : 0),
-    };
-    if (distance(start, intermediate) > EPSILON) segments.push(rapidSegment(start, intermediate, record, state, xMode, "intermediate"));
-    if (distance(intermediate, reference) > EPSILON) segments.push(rapidSegment(intermediate, reference, record, state, xMode, "reference"));
+  const intermediateX = resolvedPositionCoordinate(state.x, state.xUncertaintyMm,
+    hasU ? scaledPositionAddress(record, "U", state) : null, false);
+  const intermediateZ = resolvedPositionCoordinate(state.z, state.zUncertaintyMm,
+    hasW ? scaledPositionAddress(record, "W", state) : null, false);
+  const intermediate = {x: intermediateX.value, z: intermediateZ.value};
+  const segments = [];
+  if (isKnownPoint(start) && isKnownPoint(intermediate) && distance(start, intermediate) > EPSILON) {
+    segments.push(rapidSegment(start, intermediate, record, state, xMode, "intermediate"));
   }
 
-  state.x = reference.x;
-  state.z = reference.z;
-  state.xUncertaintyMm = numericUncertainty(reference.x);
-  state.zUncertaintyMm = numericUncertainty(reference.z);
+  const reference = state.referencePosition;
+  // U selects the X return and W selects the Z return. A reference return
+  // cannot move or invalidate an axis that was not selected by this block.
+  for (const axis of referenceAxes) {
+    const coordinate = axis.toLowerCase();
+    state[coordinate] = isKnownPoint(reference) ? reference[coordinate] : null;
+    state[`${coordinate}UncertaintyMm`] = isKnownPoint(reference) ? numericUncertainty(reference[coordinate]) : null;
+  }
+  if (!isKnownPoint(reference)) {
+    warnings.push({
+      line: record.line, code: "reference-return-position-unknown", verificationScope: "reference-return", referenceAxes,
+      message: `G28 ${referenceAxes.join("/")} machine-reference return has no known position in program coordinates; its return path is unresolved.`,
+    });
+    return segments;
+  }
+
+  const end = {x: state.x, z: state.z};
+  if (isKnownPoint(intermediate) && isKnownPoint(end) && distance(intermediate, end) > EPSILON) {
+    segments.push(rapidSegment(intermediate, end, record, state, xMode, "reference"));
+  }
+  const referenceLabel = referenceAxes.map(axis => `${axis}${(reference[axis.toLowerCase()] / state.scale).toFixed(4)}`).join(" ");
   const message = isKnownPoint(start)
-    ? `G28 returned to the estimated machine reference at X${(reference.x / state.scale).toFixed(4)} Z${(reference.z / state.scale).toFixed(4)}.`
-    : `G28 established the estimated machine reference at X${(reference.x / state.scale).toFixed(4)} Z${(reference.z / state.scale).toFixed(4)}; the unknown incoming move was not drawn.`;
+    ? `G28 returned to the estimated machine reference at ${referenceLabel}.`
+    : `G28 established the estimated machine reference at ${referenceLabel}; the unknown incoming move was not drawn.`;
   warnings.push({line: record.line, info: true, message});
   return segments;
 }

@@ -601,6 +601,10 @@
               <label class="wide">Rapid interpolation<select name="rapidBehavior"><option value="unknown">Unknown / not confirmed</option><option value="linear">Linear vector path</option><option value="dogleg">Independent-axis / dogleg</option><option value="parameter-dependent">Control-parameter dependent</option></select></label>
               <label>Maximum X rapid<input name="rapidXMax" type="number" min="0" step="any" placeholder="Unknown"></label>
               <label>Maximum Z rapid<input name="rapidZMax" type="number" min="0" step="any" placeholder="Unknown"></label>
+              <label class="wide">Home estimate · 2D display only<select name="displayHomeMode"><option value="off">Off</option><option value="estimate">Show estimated home marker</option></select></label>
+              <label>Estimated home X<input name="displayHomeX" type="number" step="any" placeholder="Not set"></label>
+              <label>Estimated home Z<input name="displayHomeZ" type="number" step="any" placeholder="Not set"></label>
+              <div class="wide"><button id="estimateHomeFromStroke" type="button" class="secondary">Use stroke-sized estimate</button><p>Part coordinates in machine units and the selected X diameter/radius mode. The preset places the marker one stroke from zero in +X/+Z; edit for your setup. Display only; excluded from verification and timing.</p></div>
             </div>
           </section>
 

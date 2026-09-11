@@ -158,7 +158,8 @@ export function estimateCycleTime(parsed, {
 } = {}) {
   const segments = Array.isArray(parsed?.segments) ? parsed.segments : [];
   const blockedParserWarnings = (Array.isArray(parsed?.warnings) ? parsed.warnings : [])
-    .filter((warning) => warning?.verificationBlocked);
+    .filter((warning) => warning?.verificationBlocked
+      || (warning?.code === "reference-return-position-unknown" && warning?.verificationScope === "reference-return"));
   const limitations = new Set();
   const segmentSeconds = [];
   const segmentAssumed = [];

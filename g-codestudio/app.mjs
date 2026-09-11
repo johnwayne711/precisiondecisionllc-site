@@ -38,7 +38,7 @@ import {
   compareProgramProfileMaterialEntry, compareProgramProfileToNominal,
   DEFAULT_PROFILE_NUMERICAL_BUDGET_MM, DEFAULT_PROFILE_TOLERANCE_MM, MAX_PROFILE_PENETRATION_FRAGMENTS,
 } from "./profile-compare.mjs";
-import {materialEntryDiagnostics} from "./profile-diagnostics.mjs";
+import {blocksCuttingProfileVerification, materialEntryDiagnostics} from "./profile-diagnostics.mjs";
 import {graphicsQualityPreset, renderGraphicsQualityPreset} from "./graphics-quality.mjs";
 import {createFrameScheduler} from "./render-scheduler.mjs";
 import {
@@ -58,6 +58,7 @@ import {
 } from "./milling-tool-library.mjs";
 import {millingToolPreviewClaimLabels, millingToolPreviewViewModel} from "./milling-tool-preview.mjs";
 import {plottedProgramStart, sl75SpindleGearContract} from "./machine-semantics.mjs";
+import {displayHomeEstimate, machineProfileForVerification, onlyDisplayHomeChanged, strokeSizedHomeEstimate} from "./machine-semantics.mjs";
 import {
   activeToolKeyAtLine, createProgramIdentity, createVersionedToolAssignment, editedProgramIdentity,
   isExactBundledProgram, normalizeVersionedToolAssignment,
@@ -86,8 +87,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.11";
-const APP_BUILD = 113;
+const APP_VERSION = "v0.3.12";
+const APP_BUILD = 114;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -250,12 +251,14 @@ const MACHINE_PROFILE_FIELDS = [
   "name", "manufacturer", "model", "serialNumber", "controlMake", "controlModel", "status", "units",
   "xProgramming", "orientation", "initialPlane", "initialFeedMode", "cssUnits", "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ",
   "xAxisStroke", "zAxisStroke",
+  "displayHomeMode", "displayHomeX", "displayHomeZ",
   "startMode", "startX", "startZ", "rapidBehavior", "rapidXMax", "rapidZMax", "toolChangeX", "toolChangeZ",
   "safeIndexX", "safeIndexZ", "turretStations", "liveToolDialect", "liveToolCapability", "cAxisCapability",
   "yAxisCapability", "cAxisEngagement", "rapidYMax", "rapidCMax", "liveToolMaxRpm", "haasDefaultToFloat",
   "haasIntegerFeedScale", "liveToolEvidence", "notes",
 ];
 const NUMERIC_MACHINE_FIELDS = new Set([
+  "displayHomeX", "displayHomeZ",
   "xAxisStroke", "zAxisStroke",
   "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ", "startX", "startZ",
   "rapidXMax", "rapidYMax", "rapidZMax", "rapidCMax", "liveToolMaxRpm", "toolChangeX", "toolChangeZ",
@@ -1127,6 +1130,7 @@ function normalizeMachineProfile(profile) {
   normalized.initialPlane = normalized.initialPlane === "G18" ? "G18" : "unknown";
   normalized.initialFeedMode = ["G98", "G99"].includes(normalized.initialFeedMode) ? normalized.initialFeedMode : "unknown";
   normalized.cssUnits = ["sfm", "m/min", "program"].includes(normalized.cssUnits) ? normalized.cssUnits : "unknown";
+  normalized.displayHomeMode = normalized.displayHomeMode === "estimate" ? "estimate" : "off";
   for (const field of NUMERIC_MACHINE_FIELDS) {
     const value = normalized[field];
     normalized[field] = value === "" || value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
@@ -1287,8 +1291,12 @@ function saveMachineEditor(event) {
   updateProgramUnitsHint(profile);
   elements.machineDialogTitle.textContent = profile.name;
   updateMachineStatusBadge(profile.status);
-  clearToolAssignmentContext();
-  plotProgram();
+  if (onlyDisplayHomeChanged(current, profile)) {
+    fitView();
+  } else {
+    clearToolAssignmentContext();
+    plotProgram();
+  }
   persistSession();
   elements.machineSaveStatus.className = stored ? "" : "error";
   elements.machineSaveStatus.textContent = stored
@@ -2007,9 +2015,7 @@ function updateReferenceComparison() {
     return;
   }
   const selected = referenceComparisonSegments();
-  const parserVerificationBlockers = (state.parsed.warnings || []).filter((warning) => (
-    warning.verificationBlocked || warning.info !== true
-  ));
+  const parserVerificationBlockers = (state.parsed.warnings || []).filter(blocksCuttingProfileVerification);
   if (!selected.segments.length) {
     state.referenceComparison = {selectionLabel: selected.label, error: "No planar cutting path is available to compare."};
     return;
@@ -3822,17 +3828,22 @@ function fitView() {
   const rect = elements.wrap.getBoundingClientRect();
   // Dimension inspection frames the setup, not distant tool-change/rapid moves.
   const inspectingStock = $("stockDimensionsToggle").checked && appliedStockSetup;
-  const bounds = inspectingStock ? {
+  let bounds = inspectingStock ? {
     minZ: Math.min(appliedStockSetup.startZ, appliedStockSetup.faceZ - collisionOptions().chuckDepth, 0),
     maxZ: Math.max(appliedStockSetup.frontZ, 0),
     minX: -Math.max(appliedStockSetup.diameter, collisionOptions().jawDiameter) / 2,
     maxX: Math.max(appliedStockSetup.diameter, collisionOptions().jawDiameter) / 2,
   } : boundsIncludingStock();
+  const homeEstimate = inspectingStock ? null : displayHomeEstimate(currentMachineProfile());
+  if (homeEstimate) {
+    bounds = mergeBounds(bounds, {minX: homeEstimate.x, maxX: homeEstimate.x,
+      minZ: homeEstimate.z, maxZ: homeEstimate.z});
+  }
   if (!bounds || !rect.width || !rect.height) return;
   const zSpan = Math.max(10, bounds.maxZ - bounds.minZ);
   const xSpan = Math.max(10, bounds.maxX - bounds.minX);
   const dimensionPadding = $("stockDimensionsToggle").checked ? 180 : 80;
-  state.camera.scale = Math.max(1, Math.min((rect.width - dimensionPadding) / zSpan, (rect.height - dimensionPadding) / xSpan));
+  state.camera.scale = Math.max(homeEstimate ? 0.0001 : 1, Math.min((rect.width - dimensionPadding) / zSpan, (rect.height - dimensionPadding) / xSpan));
   const displayCenterZ = (bounds.minZ + bounds.maxZ) / 2 * orientationSign();
   const centerX = (bounds.minX + bounds.maxX) / 2;
   state.camera.offsetX = rect.width / 2 - displayCenterZ * state.camera.scale;
@@ -6160,6 +6171,28 @@ function drawProfilePenetrationFragments() {
   ctx.restore();
 }
 
+function drawDisplayHomeEstimate(width, height) {
+  const estimate = displayHomeEstimate(currentMachineProfile());
+  if (!estimate) return;
+  const point = geometryToScreen(estimate);
+  if (point.x < 0 || point.x > width || point.y < 0 || point.y > height) return;
+  ctx.save();
+  ctx.strokeStyle = "#9ba9bb";
+  ctx.fillStyle = "#c5ceda";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, 8, 0, Math.PI * 2);
+  ctx.moveTo(point.x - 12, point.y); ctx.lineTo(point.x + 12, point.y);
+  ctx.moveTo(point.x, point.y - 12); ctx.lineTo(point.x, point.y + 12);
+  ctx.stroke();
+  ctx.font = "11px monospace";
+  const label = "ESTIMATED HOME · DISPLAY ONLY";
+  const labelWidth = ctx.measureText(label).width;
+  ctx.fillText(label, Math.max(8, Math.min(point.x + 16, width - labelWidth - 8)), Math.max(20, point.y - 16));
+  ctx.restore();
+}
+
 function drawToolpath() {
   if (!elements.toolpathToggle.checked) {
     state.graphicsHits = [];
@@ -6581,6 +6614,7 @@ function draw() {
     drawGeometryInspection();
     drawPinnedDimensions();
     drawStockSetupDimensions(rect.width, rect.height);
+    drawDisplayHomeEstimate(rect.width, rect.height);
   }
   renderGeometryInspector();
   updateDimensionControls();
@@ -6642,7 +6676,7 @@ function clearToolOffsetConfirmations() {
 
 function toolOffsetScopeFor(source, fileName) {
   return JSON.stringify([source, fileName,
-    currentMachineProfile(), state.latheControllerSettings, elements.machineMode.value, elements.xMode.value, elements.programUnits.value]);
+    machineProfileForVerification(currentMachineProfile()), state.latheControllerSettings, elements.machineMode.value, elements.xMode.value, elements.programUnits.value]);
 }
 
 function toolOffsetPairingsForSource(source) {
@@ -7510,6 +7544,17 @@ elements.toolLibraryAssign.addEventListener("click", () => {
   });
 });
 elements.machineForm.addEventListener("submit", saveMachineEditor);
+$("estimateHomeFromStroke").addEventListener("click", () => {
+  const estimate = strokeSizedHomeEstimate(readMachineEditor(currentMachineProfile()));
+  if (!estimate) {
+    elements.machineSaveStatus.textContent = "Enter positive X and Z strokes to create a display estimate.";
+    return;
+  }
+  elements.machineForm.elements.namedItem("displayHomeX").value = Number(estimate.x.toPrecision(10));
+  elements.machineForm.elements.namedItem("displayHomeZ").value = Number(estimate.z.toPrecision(10));
+  elements.machineForm.elements.namedItem("displayHomeMode").value = "estimate";
+  elements.machineSaveStatus.textContent = "Stroke-sized display estimate prepared. Review coordinates, then save.";
+});
 elements.machineForm.elements.namedItem("liveToolDialect").addEventListener("change", (event) => {
   $("mf-initialFeedMode").disabled = event.target.value === "haas-lathe-ngc";
 });

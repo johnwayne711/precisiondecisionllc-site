@@ -105,3 +105,37 @@ export function plottedProgramStart(profile) {
   }
   return {mode, point: {x, z}, reason: null};
 }
+
+// These coordinates are a visual aid only. Never pass them to the parser,
+// stock simulation, measurements, collision checks or cycle-time estimator.
+export function displayHomeEstimate(profile) {
+  if (profile?.displayHomeMode !== "estimate" || !["inch", "mm"].includes(profile.units)
+    || !["diameter", "radius"].includes(profile.xProgramming)) return null;
+  const values = [profile.displayHomeX, profile.displayHomeZ];
+  if (values.some((value) => value === null || value === undefined || value === "" || !Number.isFinite(Number(value)))) return null;
+  const scale = profile.units === "inch" ? 25.4 : 1;
+  // Physical radius, independent of the currently plotted program's X mode.
+  const x = Number(values[0]) * scale / (profile.xProgramming === "diameter" ? 2 : 1);
+  const z = Number(values[1]) * scale;
+  return Number.isFinite(x) && Number.isFinite(z) ? {x, z} : null;
+}
+
+export function strokeSizedHomeEstimate(profile) {
+  const x = Number(profile?.xAxisStroke), z = Number(profile?.zAxisStroke);
+  if (!(x > 0) || !(z > 0) || !Number.isFinite(x + z)
+    || !["diameter", "radius"].includes(profile?.xProgramming)) return null;
+  // Deliberate display convention: +X/+Z stroke from part zero, not a
+  // manufacturer claim about the reference point or the work offset.
+  return {x: x * (profile.xProgramming === "diameter" ? 2 : 1), z};
+}
+
+const DISPLAY_PROFILE_FIELDS = new Set(["displayHomeMode", "displayHomeX", "displayHomeZ", "updatedAt"]);
+
+export function machineProfileForVerification(profile) {
+  return Object.fromEntries(Object.entries(profile || {}).filter(([key]) => !DISPLAY_PROFILE_FIELDS.has(key)));
+}
+
+export function onlyDisplayHomeChanged(before, after) {
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .every((key) => DISPLAY_PROFILE_FIELDS.has(key) || before[key] === after[key]);
+}

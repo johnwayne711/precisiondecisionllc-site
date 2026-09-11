@@ -1,5 +1,13 @@
-// Presentation-only explanations of retained comparison results. No geometry,
-// classification, source text or numerical threshold is changed here.
+// Scope parser diagnostics to cutting-profile checks and explain retained results.
+// An unplaced rapid return is separate from the cutting paths; the parser emits
+// a distinct blocking diagnostic if a later cut starts at an unknown position.
+export function blocksCuttingProfileVerification(warning) {
+  if (warning?.verificationBlocked === true) return true;
+  if (warning?.code === "reference-return-position-unknown"
+    && warning.verificationScope === "reference-return") return false;
+  return warning?.info !== true;
+}
+
 const problemClassifications = new Set(["unsupported", "unresolved", "tolerance-boundary"]);
 
 function knownLine(value) {
