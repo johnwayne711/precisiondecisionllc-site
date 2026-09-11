@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "verify-app-";
-const CACHE_NAME = "verify-app-v112";
+const CACHE_NAME = "verify-app-v113";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -23,6 +23,7 @@ const APP_ASSETS = [
   "./compare.mjs",
   "./dxf-import.mjs",
   "./profile-compare.mjs",
+  "./profile-diagnostics.mjs",
   "./reference-display-budget.mjs",
   "./step-import.mjs",
   "./step-worker-client.mjs",

@@ -38,6 +38,7 @@ import {
   compareProgramProfileMaterialEntry, compareProgramProfileToNominal,
   DEFAULT_PROFILE_NUMERICAL_BUDGET_MM, DEFAULT_PROFILE_TOLERANCE_MM, MAX_PROFILE_PENETRATION_FRAGMENTS,
 } from "./profile-compare.mjs";
+import {materialEntryDiagnostics} from "./profile-diagnostics.mjs";
 import {graphicsQualityPreset, renderGraphicsQualityPreset} from "./graphics-quality.mjs";
 import {createFrameScheduler} from "./render-scheduler.mjs";
 import {
@@ -85,8 +86,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.10";
-const APP_BUILD = 112;
+const APP_VERSION = "v0.3.11";
+const APP_BUILD = 113;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -1792,6 +1793,14 @@ function formatReferenceBound(bounds) {
     : `${formatReferenceDistance(bounds.lowerBoundMm)}–${formatReferenceDistance(bounds.upperBoundMm)}`;
 }
 
+function formatMaterialDiagnostic(diagnostic) {
+  const {sourceLine, executionLine, message} = diagnostic;
+  const location = sourceLine
+    ? `Source line ${sourceLine}${executionLine && executionLine !== sourceLine ? ` (executed at line ${executionLine})` : ""}`
+    : "Whole-program check";
+  return `${location}: ${message}`;
+}
+
 function renderProfilePenetrationUi({ready = false, comparison = null} = {}) {
   const materialEntry = comparison?.materialEntry;
   const cutterAware = materialEntry?.cutterAware === true;
@@ -1832,8 +1841,11 @@ function renderProfilePenetrationUi({ready = false, comparison = null} = {}) {
   elements.referenceGeometrySetup.classList.toggle("penetration", showRisk);
   elements.profilePenetrationAlert.hidden = !(showRisk || showReview);
   elements.profilePenetrationAlert.classList.toggle("review", !showRisk);
-  elements.profilePenetrationJump.hidden = !worst;
-  elements.profilePenetrationJump.disabled = !worst;
+  const diagnostics = showReview ? materialEntryDiagnostics(comparison) : [];
+  const review = diagnostics[0];
+  const jumpAvailable = Boolean(worst || review?.sourceLine);
+  elements.profilePenetrationJump.hidden = !jumpAvailable;
+  elements.profilePenetrationJump.disabled = !jumpAvailable;
   if (showRisk) {
     const sourceLine = Number(worst?.sourceLine);
     const executionLine = Number(worst?.executionLine);
@@ -1847,12 +1859,15 @@ function renderProfilePenetrationUi({ready = false, comparison = null} = {}) {
   } else if (showReview) {
     const title = classification === "within-tolerance-entry"
       ? "NOMINAL PROFILE ENTRY WITHIN REPORTING THRESHOLD"
-      : "NOMINAL MATERIAL ENTRY UNRESOLVED";
+      : classification === "tolerance-boundary"
+        ? "NOMINAL MATERIAL ENTRY NEAR THRESHOLD"
+        : "NOMINAL MATERIAL CHECK INCOMPLETE";
     elements.profilePenetrationAlertTitle.textContent = title;
-    elements.profilePenetrationAlertMessage.textContent = comparison?.materialEntryError
-      || (classification === "within-tolerance-entry"
-        ? `${comparison.materialSelectionLabel || "Program path"}: bounded penetration ${formatReferenceBound(aggregate.maximumPenetration)}. ${scopeText}`
-        : "The bounded analytic result cannot decide which side of the qualified nominal profile the program occupies. Treat this as requiring review.");
+    elements.profilePenetrationAlertMessage.textContent = classification === "within-tolerance-entry"
+      ? `${comparison.materialSelectionLabel || "Program path"}: bounded penetration ${formatReferenceBound(aggregate.maximumPenetration)}. ${scopeText}`
+      : (review ? formatMaterialDiagnostic(review)
+        + (diagnostics.length > 1 ? ` ${diagnostics.length - 1} additional issue(s) listed under Reference geometry.` : "")
+        : "Material-entry verification is incomplete; no detailed reason was returned.");
     elements.referenceGeometrySummary.textContent = classification === "within-tolerance-entry" ? "ENTRY ≤ THRESHOLD" : "ENTRY UNRESOLVED";
   }
   renderProgramRiskHighlights();
@@ -2035,6 +2050,7 @@ function updateReferenceComparison() {
       materialEntry,
       materialEntryError,
       parserVerificationBlockerCount: parserVerificationBlockers.length,
+      parserVerificationBlockers,
     };
   } catch (error) {
     state.referenceComparison = {selectionLabel: selected.label, error: error instanceof Error ? error.message : String(error)};
@@ -2143,6 +2159,10 @@ function renderReferenceDiagnostics() {
             message: `The red overlay exceeded its ${MAX_PROFILE_PENETRATION_FRAGMENTS.toLocaleString()}-fragment display limit and is incomplete; the proven material-entry warning remains valid.`,
           });
         }
+      }
+      for (const diagnostic of materialEntryDiagnostics(state.referenceComparison)) {
+        if (diagnostic.message === state.referenceComparison?.materialEntryError) continue;
+        entries.push({severity: "error", message: `Material check - ${formatMaterialDiagnostic(diagnostic)}`});
       }
       if (state.referenceComparison?.parserVerificationBlockerCount) {
         entries.push({
@@ -7736,11 +7756,11 @@ elements.toolRotationJump.addEventListener("click", () => {
   elements.input.focus({preventScroll: true});
 });
 elements.profilePenetrationJump.addEventListener("click", () => {
-  const worst = worstProfilePenetrationResult();
-  if (!worst || state.programDirty) return;
-  const sourceLine = Number(worst.sourceLine);
-  const executionLine = Number(worst.executionLine);
-  const globalBlockIndex = Number(worst.globalBlockIndex);
+  const target = worstProfilePenetrationResult() || materialEntryDiagnostics(state.referenceComparison)[0];
+  if (!target?.sourceLine || state.programDirty) return;
+  const sourceLine = Number(target.sourceLine);
+  const executionLine = Number(target.executionLine);
+  const globalBlockIndex = Number(target.globalBlockIndex);
   const targetExecutionLine = Number.isInteger(executionLine) && executionLine > 0
     ? executionLine
     : sourceLine;
@@ -7753,7 +7773,7 @@ elements.profilePenetrationJump.addEventListener("click", () => {
     positionProgramLineHighlight();
     renderProgramRiskHighlights();
   }
-  elements.status.textContent = `Nominal-material entry · source line ${sourceLine || targetExecutionLine}`;
+  elements.status.textContent = `Nominal-material check · source line ${sourceLine || targetExecutionLine}`;
   elements.input.focus({preventScroll: true});
 });
 elements.removeGeometry.addEventListener("click", removeReferenceGeometry);
