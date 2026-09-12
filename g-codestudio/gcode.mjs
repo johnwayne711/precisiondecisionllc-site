@@ -2515,7 +2515,14 @@ function parseBasicRecord(record, state, xMode, warnings, {
   }
   if (!isKnownPoint(end)) {
     if (state.motion === "rapid") {
-      warnings.push({line: record.line, info: true, message: "Motion is waiting for both X and Z to become known."});
+      warnings.push({
+        line: record.line,
+        code: "rapid-position-incomplete",
+        info: true,
+        timingExcluded: true,
+        timingScope: "unknown-start-rapid",
+        message: "Rapid positioning is waiting for both X and Z to become known; any commanded travel from an unknown point is omitted from Feed + Rapid time.",
+      });
     } else {
       state.turningPathTainted = true;
       warningOnce(warnings, {
@@ -2529,7 +2536,14 @@ function parseBasicRecord(record, state, xMode, warnings, {
   }
   if (!isKnownPoint(start)) {
     if (!wasTurningPathTainted && state.motion === "rapid") {
-      warnings.push({line: record.line, info: true, message: `Position established at X${(end.x / state.scale).toFixed(4)} Z${(end.z / state.scale).toFixed(4)}; no invented approach was drawn.`});
+      warnings.push({
+        line: record.line,
+        code: "rapid-start-position-unknown",
+        info: true,
+        timingExcluded: true,
+        timingScope: "unknown-start-rapid",
+        message: `Position established at X${(end.x / state.scale).toFixed(4)} Z${(end.z / state.scale).toFixed(4)}; no invented approach was drawn, and the rapid from the unknown start is omitted from Feed + Rapid time.`,
+      });
     } else if (!wasTurningPathTainted) {
       state.turningPathTainted = true;
       warningOnce(warnings, {
@@ -4043,7 +4057,7 @@ export function parseGcode(source, {
             ? (pLexeme?.includes(".") ? millisecondsWord : millisecondsWord / 1000)
             : NaN);
         if (seconds >= 0) timingEvents.push({type: "dwell", line: record.line, seconds});
-        else warnings.push({line: record.line, message: "G04 dwell needs nonnegative X/U seconds, integer P milliseconds, or decimal-point P seconds for cycle-time estimation."});
+        else warnings.push({line: record.line, message: "G04 dwell needs nonnegative X/U seconds, integer P milliseconds, or decimal-point P seconds for bounded dwell-event review."});
         continue;
       }
       if (hasG(record, 28)) {

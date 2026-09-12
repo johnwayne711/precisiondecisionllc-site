@@ -154,9 +154,17 @@ export function estimateCycleTime(parsed, {
   fallbackRapidRate = LEGACY_RAPID_RATE_MM_PER_MINUTE,
 } = {}) {
   const segments = Array.isArray(parsed?.segments) ? parsed.segments : [];
-  const blockedParserWarnings = (Array.isArray(parsed?.warnings) ? parsed.warnings : [])
-    .filter((warning) => warning?.verificationBlocked
-      || (warning?.code === "reference-return-position-unknown" && warning?.verificationScope === "reference-return"));
+  const parserWarnings = Array.isArray(parsed?.warnings) ? parsed.warnings : [];
+  const blockedParserWarnings = parserWarnings.filter((warning) => warning?.verificationBlocked);
+  const excludedReferenceReturnWarnings = parserWarnings.filter((warning) => (
+    warning?.code === "reference-return-position-unknown" && warning?.verificationScope === "reference-return"
+  ));
+  const excludedUnknownStartRapidWarnings = parserWarnings.filter((warning) => (
+    warning?.timingExcluded === true && warning?.timingScope === "unknown-start-rapid"
+  ));
+  const excludedReferenceReturnLines = new Set(excludedReferenceReturnWarnings
+    .map((warning) => Number(warning?.line))
+    .filter(Number.isFinite));
   const limitations = new Set();
   const segmentSeconds = [];
   const segmentAssumed = [];
@@ -171,10 +179,25 @@ export function estimateCycleTime(parsed, {
   let untimedSegments = 0;
   let assumedSegments = 0;
   let blockedSegments = 0;
+  let excludedReferenceReturnSegments = 0;
   let fallbackRapidXUsed = false;
   let fallbackRapidZUsed = false;
 
   for (const segment of segments) {
+    const segmentLine = Number(segment?.executionLine ?? segment?.line);
+    const excludedReferenceReturn = Boolean(segment?.referenceReturn
+      && excludedReferenceReturnLines.has(segmentLine));
+    if (excludedReferenceReturn) {
+      segmentSeconds.push(0);
+      segmentAssumed.push(false);
+      segmentBlocked.push(false);
+      excludedReferenceReturnSegments += 1;
+      cumulativeSeconds.push(cumulativeSeconds.at(-1));
+      cumulativeUntimedSegments.push(cumulativeUntimedSegments.at(-1));
+      cumulativeAssumedSegments.push(cumulativeAssumedSegments.at(-1));
+      cumulativeBlockedSegments.push(cumulativeBlockedSegments.at(-1));
+      continue;
+    }
     const blocked = Boolean(segment?.verificationBlocked || segment?.liveToolBlocked);
     const timing = segment.type === "rapid"
       ? rapidTiming(segment, {xScale, rapidXMax, rapidYMax, rapidZMax, rapidCMax, fallbackRapidRate})
@@ -253,10 +276,19 @@ export function estimateCycleTime(parsed, {
       end: Number.isFinite(end) ? end : null,
     });
   }
-  const timingEvents = [...sourceTimingEvents, ...cAxisTimingEvents]
+  const excludedUnknownStartRapidEvents = excludedUnknownStartRapidWarnings.map((warning) => ({
+    type: "rapid-motion-excluded",
+    line: warning?.line,
+    seconds: 0,
+    untimed: false,
+    reason: warning?.code || "unknown-start",
+  }));
+  const timingEvents = [...sourceTimingEvents, ...cAxisTimingEvents, ...excludedUnknownStartRapidEvents]
     .sort((before, after) => (Number(before?.line) || 0) - (Number(after?.line) || 0));
-  const dwell = sourceTimingEvents.reduce((sum, event) => sum + (event.type === "dwell" ? Math.max(0, Number(event.seconds) || 0) : 0), 0);
-  const untimedTimingEvents = sourceTimingEvents.filter((event) => event?.untimed === true).length;
+  const dwellEvents = sourceTimingEvents.filter((event) => event?.type === "dwell");
+  const excludedDwellSeconds = dwellEvents.reduce((sum, event) => sum + Math.max(0, Number(event.seconds) || 0), 0);
+  const untimedTimingEvents = sourceTimingEvents
+    .filter((event) => event?.untimed === true && event?.type !== "program-stop").length;
   const programStopEvents = sourceTimingEvents.filter((event) => event?.type === "program-stop");
   const programStops = programStopEvents.length;
   if (fallbackRapidXUsed || fallbackRapidZUsed) {
@@ -267,7 +299,7 @@ export function estimateCycleTime(parsed, {
     limitations.add(`${unknownStartCAxisMotions} C-axis index block${unknownStartCAxisMotions === 1 ? " starts" : "s start"} from an unknown rotary position and is excluded from timing.`);
   }
   if (blockedCAxisMotions) {
-    limitations.add(`${blockedCAxisMotions} blocked C-axis motion block${blockedCAxisMotions === 1 ? " is" : "s are"} excluded from cycle-time claims.`);
+    limitations.add(`${blockedCAxisMotions} blocked C-axis motion block${blockedCAxisMotions === 1 ? " is" : "s are"} excluded from feed + rapid claims.`);
   }
   if (untimedCAxisMotions > unknownStartCAxisMotions + blockedCAxisMotions && !(rapidCMax > 0)) {
     limitations.add("C-axis rapid timing needs a confirmed machine C rapid rate.");
@@ -275,12 +307,21 @@ export function estimateCycleTime(parsed, {
   if (programStops) {
     const commands = [...new Set(programStopEvents.map((event) => event.command).filter(Boolean))];
     const commandLabel = commands.length ? commands.join("/") : "program";
-    limitations.add(`${programStops} ${commandLabel} program stop${programStops === 1 ? " has" : "s have"} unknown operator-response duration and ${programStops === 1 ? "is" : "are"} excluded from cycle-time totals.`);
+    limitations.add(`${programStops} ${commandLabel} program stop${programStops === 1 ? " contributes" : "s contribute"} 0:00 to the feed + rapid total; operator-response duration is outside this metric.`);
+  }
+  if (dwellEvents.length) {
+    limitations.add(`${dwellEvents.length} G04 dwell block${dwellEvents.length === 1 ? " contributes" : "s contribute"} 0:00 to the feed + rapid total; programmed dwell remains available as a separate exclusion.`);
+  }
+  if (excludedReferenceReturnWarnings.length) {
+    limitations.add(`${excludedReferenceReturnWarnings.length} G28 reference return${excludedReferenceReturnWarnings.length === 1 ? " has" : "s have"} unknown home travel and ${excludedReferenceReturnWarnings.length === 1 ? "is" : "are"} omitted from the feed + rapid total.`);
+  }
+  if (excludedUnknownStartRapidWarnings.length) {
+    limitations.add(`${excludedUnknownStartRapidWarnings.length} rapid positioning block${excludedUnknownStartRapidWarnings.length === 1 ? " starts" : "s start"} from an unknown program position and ${excludedUnknownStartRapidWarnings.length === 1 ? "is" : "are"} omitted from the feed + rapid subtotal because travel distance cannot be established.`);
   }
   if (untimedSegments) limitations.add(`${untimedSegments} motion block${untimedSegments === 1 ? " is" : "s are"} missing feed, spindle, or rapid-rate data; a starting position may also be unresolved.`);
-  if (blockedSegments) limitations.add(`${blockedSegments} verification-blocked motion block${blockedSegments === 1 ? " is" : "s are"} excluded from cycle-time claims.`);
+  if (blockedSegments) limitations.add(`${blockedSegments} verification-blocked motion block${blockedSegments === 1 ? " is" : "s are"} excluded from feed + rapid claims.`);
   if (segments.some((segment) => segment.liveTool && segment.verificationBlocked)) {
-    limitations.add("Blocked live-tool motion is excluded from cycle-time claims.");
+    limitations.add("Blocked live-tool motion is excluded from feed + rapid claims.");
   }
   if (segments.some(segment => segment.threading)) {
     limitations.add("G32/G76 timing is nominal programmed lead/RPM feed plus modeled returns; encoder synchronization, acceleration and physical runout dynamics are not timed.");
@@ -305,9 +346,9 @@ export function estimateCycleTime(parsed, {
     limitations.add("C-axis rapid timing needs a confirmed machine C rapid rate.");
   }
   if (blockedParserWarnings.length) {
-    limitations.add(`${blockedParserWarnings.length} verification-blocking parser warning${blockedParserWarnings.length === 1 ? " marks" : "s mark"} omitted or unresolved program behavior that is excluded from cycle-time claims.`);
+    limitations.add(`${blockedParserWarnings.length} verification-blocking parser warning${blockedParserWarnings.length === 1 ? " marks" : "s mark"} omitted or unresolved program behavior that is excluded from feed + rapid claims.`);
   }
-  const seconds = rapid + cutting + dwell;
+  const seconds = rapid + cutting;
   const quality = blockedParserWarnings.length || blockedSegments
     ? "partial"
     : qualityFor(untimedSegments + untimedTimingEvents, assumedSegments);
@@ -315,7 +356,13 @@ export function estimateCycleTime(parsed, {
     seconds,
     rapidSeconds: rapid,
     cuttingSeconds: cutting,
-    dwellSeconds: dwell,
+    dwellSeconds: 0,
+    excludedDwellSeconds,
+    excludedDwellEvents: dwellEvents.length,
+    excludedProgramStops: programStops,
+    excludedReferenceReturns: excludedReferenceReturnWarnings.length,
+    excludedReferenceReturnSegments,
+    excludedUnknownStartRapids: excludedUnknownStartRapidWarnings.length,
     timedSegments,
     untimedSegments,
     untimedTimingEvents,
@@ -323,7 +370,11 @@ export function estimateCycleTime(parsed, {
     assumedSegments,
     quality,
     complete: quality === "calculated",
-    hasEstimate: timedSegments > 0 || dwell > 0,
+    hasEstimate: timedSegments > 0
+      || dwellEvents.length > 0
+      || programStops > 0
+      || excludedReferenceReturnWarnings.length > 0
+      || excludedUnknownStartRapidWarnings.length > 0,
     limitations: [...limitations],
     segmentSeconds,
     segmentAssumed,
@@ -345,7 +396,7 @@ export function cycleTimeAtPosition(estimate, {visibleBlocks = 0, sourceLine = 0
   const block = Math.max(0, Math.min(segmentCount, Math.trunc(Number(visibleBlocks) || 0)));
   const line = Math.max(0, Math.trunc(Number(sourceLine) || 0));
   const eventSecondsElapsed = (estimate?.timingEvents || []).reduce((sum, event) => (
-    (event.type === "dwell" || event.type === "c-axis-index") && Number(event.line) <= line
+    event.type === "c-axis-index" && Number(event.line) <= line
       ? sum + Math.max(0, Number(event.seconds) || 0)
       : sum
   ), 0);
@@ -362,7 +413,7 @@ export function cycleTimeAtPosition(estimate, {visibleBlocks = 0, sourceLine = 0
     return eventLine <= line ? "past" : "future";
   };
   const untimedEventPositions = (estimate?.timingEvents || [])
-    .filter((event) => event?.untimed === true)
+    .filter((event) => event?.untimed === true && event?.type !== "program-stop")
     .map(timingEventPosition);
   const elapsedUntimedEvents = untimedEventPositions.filter((position) => position !== "future").length;
   const pendingUntimedEvents = untimedEventPositions.filter((position) => position === "pending").length;

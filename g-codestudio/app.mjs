@@ -88,8 +88,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.13";
-const APP_BUILD = 115;
+const APP_VERSION = "v0.3.14";
+const APP_BUILD = 116;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -6809,8 +6809,8 @@ function updateMillStats() {
   const timeText = cycleTime.hasEstimate ? qualifiedTime(cycleTime.seconds, cycleTime.quality) : "—";
   const timeTitle = [
     cycleTime.hasEstimate
-      ? `Estimated programmed motion and dwell time: ${formatCycleTime(cycleTime.seconds)}.`
-      : "Cycle time cannot be estimated from the available commanded path and feed data.",
+      ? `Estimated feed + rapid subtotal: ${formatCycleTime(cycleTime.seconds)}.`
+      : "Feed + rapid time cannot be estimated from the available commanded path and feed data.",
     ...cycleTime.limitations,
     "Generic mill rapid rates, tool-change duration, and spindle acceleration are not modeled.",
   ].join(" ");
@@ -6884,10 +6884,10 @@ function updateStats() {
     : "—";
   const timeTitleParts = [
     cycleTime.hasEstimate
-      ? `Estimated motion and dwell time: ${formatCycleTime(cycleTime.seconds)} (cut ${formatCycleTime(cycleTime.cuttingSeconds)}, rapid ${formatCycleTime(cycleTime.rapidSeconds)}, dwell ${formatCycleTime(cycleTime.dwellSeconds)}).`
-      : "Cycle time cannot be estimated from the available program and machine data.",
+      ? `Estimated feed + rapid subtotal: ${formatCycleTime(cycleTime.seconds)} (feed ${formatCycleTime(cycleTime.cuttingSeconds)}, rapid ${formatCycleTime(cycleTime.rapidSeconds)}).`
+      : "Feed + rapid time cannot be estimated from the available program and machine data.",
     ...cycleTime.limitations,
-    "Excludes tool-change duration and spindle acceleration.",
+    "G04 dwell, program-stop response, tool-change duration, spindle acceleration, and unresolved G28 home travel are outside this total; their actual durations are not treated as zero.",
   ];
   for (const element of [$("cycleTimeHeader"), $("cycleTimeStat")]) {
     element.textContent = timeText;

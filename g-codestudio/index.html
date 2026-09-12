@@ -33,7 +33,7 @@
       </div>
       <div class="header-status">
         <span class="status-dot"></span>
-        <span class="cycle-time-summary"><span>CYCLE</span> <strong id="cycleTimeHeader" aria-live="polite">—</strong></span>
+        <span class="cycle-time-summary"><span>FEED + RAPID</span> <strong id="cycleTimeHeader" aria-live="polite">—</strong></span>
         <span class="status-divider" aria-hidden="true">•</span>
         <span id="programStatus">Sample loaded</span>
       </div>
@@ -272,8 +272,8 @@
           </div>
           <div class="transport-readouts">
             <span id="blockReadout">Line 0 / 0</span>
-            <span class="reader-time" aria-label="Cycle time at the current program line">
-              <span><b>ELAPSED</b><strong id="readerElapsedTime" aria-live="polite">00:00.0</strong></span>
+            <span class="reader-time" aria-label="Feed and rapid time at the current program line" title="Programmed feed and rapid motion only; excluded machine and operator time is not treated as zero.">
+              <span><b>TO HERE</b><strong id="readerElapsedTime" aria-live="polite">00:00.0</strong></span>
               <span><b>REMAIN</b><strong id="readerRemainingTime" aria-live="polite">—</strong></span>
               <span><b>TOTAL</b><strong id="readerTotalTime">—</strong></span>
             </span>
@@ -523,7 +523,7 @@
           <div><span>BLOCKS</span><strong id="motionCount">0</strong></div>
           <div><span>CYCLES</span><strong id="cycleCount">0</strong></div>
           <div><span id="operationModeLabel">LIVE TOOL</span><strong id="liveToolStatus" class="muted-value" aria-live="polite">UNKNOWN</strong></div>
-          <div class="runtime-stat"><span>PROGRAM CYCLE TIME</span><strong id="cycleTimeStat" aria-live="polite">—</strong></div>
+          <div class="runtime-stat"><span>FEED + RAPID TIME</span><strong id="cycleTimeStat" aria-live="polite">—</strong></div>
           <div><span>CUT DIST.</span><strong id="cutDistance">0 mm</strong></div>
           <div><span>RAPID DIST.</span><strong id="rapidDistance">0 mm</strong></div>
           <div><span id="stockStatusLabel">STOCK SIMULATION</span><strong id="stockRemoved">0%</strong></div>
