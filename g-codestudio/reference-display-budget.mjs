@@ -14,8 +14,8 @@ import {geometrySamplePointCount} from "./geometry-inspector.mjs";
 export const MAX_REFERENCE_DISPLAY_STROKES = 512;
 export const MAX_REFERENCE_DISPLAY_SAMPLED_POINTS = 12288;
 export const REFERENCE_DISPLAY_ARC_MAXIMUM_SEGMENTS = 192;
-// Shared one-shot plot budget for nearest-deviation plus signed STEP material
-// entry. Neither analytic pass runs during pan/zoom redraws.
+// Per-check one-shot plot budget. Directed deviation and signed material entry
+// each receive this full bound; neither analytic pass runs during pan/zoom redraws.
 export const MAX_REFERENCE_UI_COMPARISON_OPERATIONS = 250000;
 export const REFERENCE_DISPLAY_WORKLOAD_DIAGNOSTIC = "reference-display-workload-exceeded";
 

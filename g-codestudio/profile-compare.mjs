@@ -26,6 +26,7 @@ export const MAX_PROFILE_PROGRAM_SEGMENTS = 100000;
 export const MAX_PROFILE_PROGRAM_CURVES = 100000;
 export const MAX_PROFILE_PROGRAM_SOURCE_POINTS = 100001;
 export const MAX_PROFILE_PENETRATION_FRAGMENTS = 4096;
+export const PROFILE_COMPARISON_WORKLOAD_EXHAUSTED = "profile-comparison-workload-exhausted";
 export const PROFILE_COMPARISON_SCOPE = Object.freeze({
   direction: "program-to-nominal",
   coordinates: "canonical-mm-lathe-zx",
@@ -436,10 +437,30 @@ function distancePointToCircle(point, circle) {
 }
 
 function comparisonBudgetError(operationBudget, requested, context) {
-  return new RangeError(
+  const error = new RangeError(
     `Profile comparison blocked: ${context} would exceed the safe ${operationBudget.limit.toLocaleString()}-operation budget `
     + `(${operationBudget.used.toLocaleString()} used, ${requested.toLocaleString()} requested). Reduce nominal geometry or program scope.`,
   );
+  error.code = PROFILE_COMPARISON_WORKLOAD_EXHAUSTED;
+  error.operationLimit = operationBudget.limit;
+  error.operationsUsed = operationBudget.used;
+  error.operationsRequested = requested;
+  error.operationContext = context;
+  return error;
+}
+
+function minimumComparisonBudgetError(message, operationLimit, operationsRequested, operationContext) {
+  const error = new RangeError(message);
+  error.code = PROFILE_COMPARISON_WORKLOAD_EXHAUSTED;
+  error.operationLimit = operationLimit;
+  error.operationsUsed = 0;
+  error.operationsRequested = operationsRequested;
+  error.operationContext = operationContext;
+  return error;
+}
+
+export function isProfileComparisonWorkloadError(error) {
+  return error?.code === PROFILE_COMPARISON_WORKLOAD_EXHAUSTED;
 }
 
 function consumeComparisonOperations(operationBudget, requested, context) {
@@ -1025,9 +1046,12 @@ export function compareProgramProfileToNominal(programSegments, nominalGeometry,
     // for all prepared curves before starting any nominal-piece scan.
     const minimumOperations = comparableCurveCount * nominal.pieces.length * 4;
     if (minimumOperations > maximumComparisonOperations) {
-      throw new RangeError(
+      throw minimumComparisonBudgetError(
         `Profile comparison blocked: the minimum workload is ${minimumOperations.toLocaleString()} nominal-pair operations, `
         + `which exceeds the safe ${maximumComparisonOperations.toLocaleString()}-operation budget. Reduce nominal geometry or program scope.`,
+        maximumComparisonOperations,
+        minimumOperations,
+        "minimum directed-deviation workload",
       );
     }
     preparedSegments.push({segment, segmentIndex, curves});
@@ -1564,7 +1588,7 @@ function comparableMaterialEntrySegmentResult(segment, segmentIndex, curves, nom
 
 function aggregateMaterialEntryResults(segmentResults, toleranceMm) {
   const comparable = segmentResults.filter((result) => result.comparable && result.penetration);
-  const classifications = ["clear", "within-tolerance-entry", "penetration", "tolerance-boundary", "unresolved", "excluded", "unsupported"];
+  const classifications = ["clear", "within-tolerance-entry", "penetration", "tolerance-boundary", "unresolved", "excluded", "unsupported", "not-calculated"];
   const counts = Object.fromEntries(classifications.map((classification) => [
     classification,
     segmentResults.filter((result) => result.classification === classification).length,
@@ -1589,6 +1613,7 @@ function aggregateMaterialEntryResults(segmentResults, toleranceMm) {
   }
   let classification = "no-comparable-segments";
   if (counts.penetration) classification = "penetration";
+  else if (counts["not-calculated"]) classification = "calculation-incomplete";
   else if (counts.unsupported || counts.unresolved) classification = "unresolved";
   else if (counts["tolerance-boundary"]) classification = "tolerance-boundary";
   else if (counts["within-tolerance-entry"]) classification = "within-tolerance-entry";
@@ -1598,6 +1623,7 @@ function aggregateMaterialEntryResults(segmentResults, toleranceMm) {
     complete: comparable.length > 0
       && !counts.unsupported
       && !counts.unresolved
+      && !counts["not-calculated"]
       && !counts["tolerance-boundary"]
       && !analyticRemainderUnresolved,
     violationOverlayComplete: !fragmentLimitExceeded,
@@ -1723,9 +1749,12 @@ export function compareProgramProfileMaterialEntry(programSegments, nominalGeome
     // followed by one analytic upper-bound pass (N).
     const minimumOperations = comparableCurveCount * nominal.pieces.length * 10;
     if (minimumOperations > maximumComparisonOperations) {
-      throw new RangeError(
+      throw minimumComparisonBudgetError(
         `Signed profile check blocked: the minimum workload is ${minimumOperations.toLocaleString()} analytic operations, `
         + `which exceeds the remaining ${maximumComparisonOperations.toLocaleString()}-operation budget.`,
+        maximumComparisonOperations,
+        minimumOperations,
+        "minimum signed-material workload",
       );
     }
     const cutter = cutterResolver ? cutterResolver(segment) : null;
@@ -1753,16 +1782,38 @@ export function compareProgramProfileMaterialEntry(programSegments, nominalGeome
       ),
     });
   }
-  const segmentResults = preparedSegments.map((prepared) => {
-    if (prepared.result) return prepared.result;
-    try {
-      return comparableMaterialEntrySegmentResult(prepared.segment, prepared.segmentIndex,
-        prepared.curves, nominal.pieces, {...options, cutterEdges: prepared.cutterEdges});
-    } catch (error) {
-      if (!cutterResolver || !String(error.message).includes('operation')) throw error;
-      return excludedSegmentResult(prepared.segment, prepared.segmentIndex, 'unsupported', error.message);
+  const segmentResults = [];
+  let calculationIncomplete = null;
+  for (let preparedIndex = 0; preparedIndex < preparedSegments.length; preparedIndex += 1) {
+    const prepared = preparedSegments[preparedIndex];
+    if (prepared.result) {
+      segmentResults.push(prepared.result);
+      continue;
     }
-  });
+    try {
+      segmentResults.push(comparableMaterialEntrySegmentResult(prepared.segment, prepared.segmentIndex,
+        prepared.curves, nominal.pieces, {...options, cutterEdges: prepared.cutterEdges}));
+    } catch (error) {
+      if (!isProfileComparisonWorkloadError(error)) throw error;
+      calculationIncomplete = {
+        code: PROFILE_COMPARISON_WORKLOAD_EXHAUSTED,
+        operationLimit: error.operationLimit,
+        operationsUsed: error.operationsUsed,
+        operationsRequested: error.operationsRequested,
+        operationContext: error.operationContext,
+      };
+      for (let remainingIndex = preparedIndex; remainingIndex < preparedSegments.length; remainingIndex += 1) {
+        const remaining = preparedSegments[remainingIndex];
+        segmentResults.push(remaining.result || excludedSegmentResult(
+          remaining.segment,
+          remaining.segmentIndex,
+          "not-calculated",
+          "Not calculated because the local comparison workload limit was reached.",
+        ));
+      }
+      break;
+    }
+  }
   return {
     scope: segmentResults.some(result => result.cuttingBasis === 'nominal-cutting-edge')
       ? PROFILE_CUTTER_ENTRY_SCOPE : PROFILE_MATERIAL_ENTRY_SCOPE,
@@ -1776,6 +1827,7 @@ export function compareProgramProfileMaterialEntry(programSegments, nominalGeome
     nominalMetadataUncertaintyMm: nominal.metadataUncertaintyMm,
     maximumComparisonOperations,
     comparisonOperations: operationBudget.used,
+    calculationIncomplete,
     cutterAware: segmentResults.some(result => result.cuttingBasis === 'nominal-cutting-edge'),
     cutterCoverageComplete: segmentResults.filter(result => result.classification !== 'excluded')
       .every(result => result.cuttingBasis === 'nominal-cutting-edge'),

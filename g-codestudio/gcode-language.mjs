@@ -556,7 +556,7 @@ export function identifyGcodeToken(tokenOrText, context = {}) {
       code, family, number, modeled: true, controllerSpecific: true,
       title: `${code} · spindle gear range ${gear}${gear === 1 ? " (low)" : ""}`,
       description: `Selects commanded spindle range ${gear} in the SL-75 environment. Playback continues after this block.`,
-      scope: "Mori SL-series manual C-1/C-3 and C-76/C-77. Gear engagement, range RPM limits and shift duration are not verified; spindle-dependent timing remains incomplete. Other M words or feed motion on this block need separate execution-order support.",
+      scope: "Mori SL-series manual C-1/C-3 and C-76/C-77. Programmed G96/G97 and S values remain the commanded spindle-speed authority. Other M words or feed motion on this block need separate execution-order support.",
     });
   }
   const known = CODE_HELP.get(code);

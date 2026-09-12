@@ -73,7 +73,6 @@ export function spindleFeedAtPosition(parsed, {sourceLine = 0, visibleBlocks = 0
   if (spindle.reason) reasons.push(spindle.reason);
   if (spindle.capped) reasons.push("G50 RPM cap reached.");
   if (spindle.uncapped) reasons.push("No G50 cap is programmed; machine limits are not included.");
-  if (state.commandedSpindleGear != null) reasons.push(`Gear ${state.commandedSpindleGear}: range limits and engagement are unconfigured.`);
   if (event.line < sourceLine && event.blocked) reasons.push(`Last interpreted spindle command state is from line ${event.line}; later blocks were not interpreted.`);
   if (blocked) return {...state, commandedFeed: state.feed, rpm, feed: null, feedPerRevolution: null, reasons};
   const rapid = Boolean(atMove ? segment.type === "rapid" : event.line === sourceLine && event.rapidBlock);

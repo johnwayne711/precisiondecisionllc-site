@@ -1481,10 +1481,6 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
     const gear = commandedSpindleGear(state.spindleGearContract, code, state.liveToolDialect);
     if (gear !== null) {
       state.commandedSpindleGear = gear;
-      timingEvents.push({type: "spindle-gear", line: record.line, command: `M${code}`,
-        range: gear, seconds: null, untimed: true, phase: "end-of-block"});
-      warningOnce(warnings, {line: record.line, code: "spindle-gear-timing-unresolved",
-        message: `M${code} selects SL-75 spindle gear range ${gear}${gear === 1 ? " (low)" : ""}. Gear-change time and range RPM limits are unconfigured; spindle-dependent timing remains incomplete.`});
       handled = true;
     } else if (code === 0 || code === 1) {
       handled = true;

@@ -1,5 +1,6 @@
 // Mori manual PM-NLTMSC518-I1EN, C-1/C-3 and C-76/C-77.
-// This is commanded range selection, not measured gear engagement or RPM authority.
+// This is commanded range selection. Programmed G96/G97 and S values remain
+// the spindle-speed authority; the application has no measured machine feedback.
 export const SL75_SPINDLE_GEAR_CONTRACT = "mori-sl75-spindle-gears-v1";
 
 export function sl75SpindleGearContract(profile) {

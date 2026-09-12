@@ -37,6 +37,7 @@ import {
 import {
   compareProgramProfileMaterialEntry, compareProgramProfileToNominal,
   DEFAULT_PROFILE_NUMERICAL_BUDGET_MM, DEFAULT_PROFILE_TOLERANCE_MM, MAX_PROFILE_PENETRATION_FRAGMENTS,
+  isProfileComparisonWorkloadError,
 } from "./profile-compare.mjs";
 import {blocksCuttingProfileVerification, materialEntryDiagnostics} from "./profile-diagnostics.mjs";
 import {graphicsQualityPreset, renderGraphicsQualityPreset} from "./graphics-quality.mjs";
@@ -87,8 +88,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.12";
-const APP_BUILD = 114;
+const APP_VERSION = "v0.3.13";
+const APP_BUILD = 115;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -1811,6 +1812,7 @@ function formatMaterialDiagnostic(diagnostic) {
 
 function renderProfilePenetrationUi({ready = false, comparison = null} = {}) {
   const materialEntry = comparison?.materialEntry;
+  const calculationIncomplete = comparison?.materialEntryCalculationIncomplete;
   const cutterAware = materialEntry?.cutterAware === true;
   const scopeText = cutterAware
     ? `Nominal active cutting-edge sweep${materialEntry.cutterCoverageComplete ? '' : ' with point-only or unresolved portions'}. Not a full insert/holder collision or finished-part guarantee.`
@@ -1818,12 +1820,15 @@ function renderProfilePenetrationUi({ready = false, comparison = null} = {}) {
   const aggregate = materialEntry?.aggregate;
   const classification = comparison?.pending
     ? "pending"
-    : (comparison?.materialEntryError ? "unresolved" : aggregate?.classification);
+    : (calculationIncomplete && aggregate?.classification !== "penetration"
+      ? "calculation-incomplete"
+      : (comparison?.materialEntryError ? "unresolved" : aggregate?.classification));
   const labels = {
     penetration: ["PATH ENTERS MATERIAL", "blocked"],
     "within-tolerance-entry": ["ENTRY ≤ REPORTING THRESHOLD", "review"],
     clear: ["NO ENTRY ABOVE THRESHOLD", "ready"],
     "tolerance-boundary": ["ENTRY NEAR THRESHOLD · REVIEW", "review"],
+    "calculation-incomplete": ["CALCULATION INCOMPLETE", "review"],
     unresolved: ["UNRESOLVED", "blocked"],
     "not-qualified": ["MATERIAL SIDE NOT QUALIFIED", "review"],
     "no-comparable-segments": ["NO CUTTING PATH", "blocked"],
@@ -1845,7 +1850,7 @@ function renderProfilePenetrationUi({ready = false, comparison = null} = {}) {
   const worst = worstProfilePenetrationResult(materialEntry);
   const cutterWitness = worst?.cuttingBasis === 'nominal-cutting-edge';
   const showRisk = ready && classification === "penetration";
-  const showReview = ready && ["within-tolerance-entry", "tolerance-boundary", "unresolved"].includes(classification);
+  const showReview = ready && ["within-tolerance-entry", "tolerance-boundary", "calculation-incomplete", "unresolved"].includes(classification);
   elements.referenceGeometrySetup.classList.toggle("penetration", showRisk);
   elements.profilePenetrationAlert.hidden = !(showRisk || showReview);
   elements.profilePenetrationAlert.classList.toggle("review", !showRisk);
@@ -1865,18 +1870,24 @@ function renderProfilePenetrationUi({ready = false, comparison = null} = {}) {
     elements.profilePenetrationAlertMessage.textContent = `${comparison.materialSelectionLabel || "Program path"}: proven penetration ${formatReferenceBound(aggregate.maximumPenetration)}.${lineText}${completenessText} ${scopeText}`;
     elements.referenceGeometrySummary.textContent = cutterWitness ? "CUTTER ENTERS PART" : "PATH ENTERS MATERIAL";
   } else if (showReview) {
-    const title = classification === "within-tolerance-entry"
+    const title = classification === "calculation-incomplete"
+      ? "REFERENCE CHECK CALCULATION INCOMPLETE"
+      : classification === "within-tolerance-entry"
       ? "NOMINAL PROFILE ENTRY WITHIN REPORTING THRESHOLD"
       : classification === "tolerance-boundary"
         ? "NOMINAL MATERIAL ENTRY NEAR THRESHOLD"
         : "NOMINAL MATERIAL CHECK INCOMPLETE";
     elements.profilePenetrationAlertTitle.textContent = title;
-    elements.profilePenetrationAlertMessage.textContent = classification === "within-tolerance-entry"
+    elements.profilePenetrationAlertMessage.textContent = classification === "calculation-incomplete"
+      ? calculationIncomplete
+      : classification === "within-tolerance-entry"
       ? `${comparison.materialSelectionLabel || "Program path"}: bounded penetration ${formatReferenceBound(aggregate.maximumPenetration)}. ${scopeText}`
       : (review ? formatMaterialDiagnostic(review)
         + (diagnostics.length > 1 ? ` ${diagnostics.length - 1} additional issue(s) listed under Reference geometry.` : "")
         : "Material-entry verification is incomplete; no detailed reason was returned.");
-    elements.referenceGeometrySummary.textContent = classification === "within-tolerance-entry" ? "ENTRY ≤ THRESHOLD" : "ENTRY UNRESOLVED";
+    elements.referenceGeometrySummary.textContent = classification === "calculation-incomplete"
+      ? "CALCULATION INCOMPLETE"
+      : (classification === "within-tolerance-entry" ? "ENTRY ≤ THRESHOLD" : "ENTRY UNRESOLVED");
   }
   renderProgramRiskHighlights();
 }
@@ -2029,22 +2040,25 @@ function updateReferenceComparison() {
       maximumComparisonOperations: MAX_REFERENCE_UI_COMPARISON_OPERATIONS,
     });
     const materialSelection = referenceMaterialEntrySegments();
-    const remainingOperations = MAX_REFERENCE_UI_COMPARISON_OPERATIONS - result.comparisonOperations;
     let materialEntry = null;
     let materialEntryError = null;
-    if (remainingOperations < 1) {
-      materialEntryError = "Signed retained-profile entry check exhausted the bounded UI comparison workload.";
-    } else {
-      try {
-        materialEntry = compareProgramProfileMaterialEntry(materialSelection.segments, reference.mapped, {
-          programXScale: xScale(),
-          toleranceMm,
-          numericalBudgetMm: Math.min(DEFAULT_PROFILE_NUMERICAL_BUDGET_MM, toleranceMm / 10),
-          programVerificationBlocked: parserVerificationBlockers.length > 0,
-          maximumComparisonOperations: remainingOperations,
-          cutterResolver: referenceCutterForSegment,
-        });
-      } catch (error) {
+    let materialEntryCalculationIncomplete = null;
+    try {
+      materialEntry = compareProgramProfileMaterialEntry(materialSelection.segments, reference.mapped, {
+        programXScale: xScale(),
+        toleranceMm,
+        numericalBudgetMm: Math.min(DEFAULT_PROFILE_NUMERICAL_BUDGET_MM, toleranceMm / 10),
+        programVerificationBlocked: parserVerificationBlockers.length > 0,
+        maximumComparisonOperations: MAX_REFERENCE_UI_COMPARISON_OPERATIONS,
+        cutterResolver: referenceCutterForSegment,
+      });
+      if (materialEntry.calculationIncomplete) {
+        materialEntryCalculationIncomplete = "G-Code Studio reached its local material-comparison workload limit. No G-code or coordinate error was identified; the material calculation is incomplete.";
+      }
+    } catch (error) {
+      if (isProfileComparisonWorkloadError(error)) {
+        materialEntryCalculationIncomplete = "G-Code Studio reached its local material-comparison workload limit. No G-code or coordinate error was identified; the material calculation is incomplete.";
+      } else {
         materialEntryError = error instanceof Error ? error.message : String(error);
       }
     }
@@ -2055,11 +2069,19 @@ function updateReferenceComparison() {
       materialSelectionLabel: materialSelection.label,
       materialEntry,
       materialEntryError,
+      materialEntryCalculationIncomplete,
       parserVerificationBlockerCount: parserVerificationBlockers.length,
       parserVerificationBlockers,
     };
   } catch (error) {
-    state.referenceComparison = {selectionLabel: selected.label, error: error instanceof Error ? error.message : String(error)};
+    if (isProfileComparisonWorkloadError(error)) {
+      state.referenceComparison = {
+        selectionLabel: selected.label,
+        calculationIncomplete: "G-Code Studio reached its local deviation-comparison workload limit. No G-code or coordinate error was identified; the reference calculation is incomplete.",
+      };
+    } else {
+      state.referenceComparison = {selectionLabel: selected.label, error: error instanceof Error ? error.message : String(error)};
+    }
   }
 }
 
@@ -2143,6 +2165,8 @@ function renderReferenceDiagnostics() {
       const materialEntry = state.referenceComparison?.materialEntry;
       if (state.referenceComparison?.materialEntryError) {
         entries.push({severity: "error", message: state.referenceComparison.materialEntryError});
+      } else if (state.referenceComparison?.materialEntryCalculationIncomplete) {
+        entries.push({severity: "warning", message: state.referenceComparison.materialEntryCalculationIncomplete});
       } else if (materialEntry?.aggregate?.classification === "not-qualified") {
         entries.push({severity: "warning", message: materialEntry.reason});
       } else if (materialEntry?.available) {
@@ -2181,6 +2205,9 @@ function renderReferenceDiagnostics() {
       }
       if (reference.kind === "dxf") entries.push({severity: "warning", message: "Only the explicitly selected analytic contour can define DXF nominal material, and every edge must share one validated visible, unfrozen, plotted layer. Other imported curves remain overlay-only deviation references."});
       entries.push({severity: "warning", message: `Program-to-closest-${reference.kind === "step" ? "selected STEP contour" : "DXF"} deviation does not prove that every reference curve is machined.`});
+    }
+    if (state.referenceComparison?.calculationIncomplete) {
+      entries.push({severity: "warning", message: state.referenceComparison.calculationIncomplete});
     }
     if (state.referenceComparison?.error) entries.push({severity: "error", message: state.referenceComparison.error});
   }
@@ -2269,7 +2296,9 @@ function renderReferenceGeometryUi() {
     setReferenceResult(elements.referenceGeometryAlignmentStatus, comparison.pendingLabel, "review");
     setReferenceResult(elements.referenceGeometryDeviation, "—");
   } else if (!aggregate || comparison?.error) {
-    setReferenceResult(elements.referenceGeometryAlignmentStatus, "BLOCKED", "blocked");
+    setReferenceResult(elements.referenceGeometryAlignmentStatus,
+      comparison?.calculationIncomplete ? "CALCULATION INCOMPLETE" : "BLOCKED",
+      comparison?.calculationIncomplete ? "review" : "blocked");
     setReferenceResult(elements.referenceGeometryDeviation, "—");
   } else {
     const labels = {

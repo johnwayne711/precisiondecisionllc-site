@@ -68,9 +68,6 @@ function cuttingTiming(segment, xScale) {
   // Compensated motion length and programmed CSS diameter are different
   // curves. Their time integral is not modeled by the legacy point estimator.
   if (segment.programmedGeometry && segment.spindleMode === "css" && segment.feedMode === "per-revolution") return null;
-  // A commanded gear can clamp RPM below G50/S. Its actual range limits have
-  // not been configured; retain geometry without inventing spindle-driven time.
-  if (segment.commandedSpindleGear != null && segment.feedMode === "per-revolution") return null;
   if (segment.threading) {
     const thread = segment.threading;
     const supportedContract = (thread.code === "G32" && thread.contract === "haas-lathe-ngc-g32-v1")
@@ -279,9 +276,6 @@ export function estimateCycleTime(parsed, {
     const commands = [...new Set(programStopEvents.map((event) => event.command).filter(Boolean))];
     const commandLabel = commands.length ? commands.join("/") : "program";
     limitations.add(`${programStops} ${commandLabel} program stop${programStops === 1 ? " has" : "s have"} unknown operator-response duration and ${programStops === 1 ? "is" : "are"} excluded from cycle-time totals.`);
-  }
-  if (sourceTimingEvents.some(event => event.type === "spindle-gear")) {
-    limitations.add("SL-75 gear-change duration and range RPM limits are unconfigured. Gear changes and subsequent feed-per-revolution motion are excluded from timing; commanded paths remain available.");
   }
   if (untimedSegments) limitations.add(`${untimedSegments} motion block${untimedSegments === 1 ? " is" : "s are"} missing feed, spindle, or rapid-rate data; a starting position may also be unresolved.`);
   if (blockedSegments) limitations.add(`${blockedSegments} verification-blocked motion block${blockedSegments === 1 ? " is" : "s are"} excluded from cycle-time claims.`);

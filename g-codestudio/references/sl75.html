@@ -55,7 +55,7 @@
         </tbody>
       </table>
       <p>These meanings apply to the selected SL-75 environment. They do not enable these commands for other machine profiles or a conflicting Haas dialect.</p>
-      <p>The manufacturer prohibits gear changes under cutting load. Actual range speed limits belong to the machine’s spindle-output drawings. G-Code Studio does not know gear engagement, range RPM limits or shift duration, so gear-change time and later feed-per-revolution cutting time remain incomplete.</p>
+      <p>The manufacturer prohibits gear changes under cutting load. In this environment M41/M42/M43 select the commanded spindle range; programmed G96/G97 and S values continue to determine the displayed spindle speed and feed calculation. The display is programmed state, not measured spindle feedback.</p>
       <p>Use only one M word in a gear-selection block in this reader. A rapid/tool-selection block such as <code>G00 T0101 M41</code> is supported, as shown in the manual. Combined M-word or feed-motion execution order is unconfigured. M40 neutral and other machine-specific M codes remain outside this gear-selection subset.</p>
       <p class="source">Source: Mori programming manual <a href="https://www.remontservo.ru/tash-kumyr/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf#page=175" target="_blank" rel="noopener noreferrer">C-1 / C-3: SL-75 applicability and M-code list ↗</a>; <a href="https://www.remontservo.ru/tash-kumyr/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf#page=250" target="_blank" rel="noopener noreferrer">C-76 / C-77: ranges and programming example ↗</a>.</p>
     </section>
