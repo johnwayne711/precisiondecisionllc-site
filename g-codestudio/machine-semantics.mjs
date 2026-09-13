@@ -107,6 +107,21 @@ export function plottedProgramStart(profile) {
   return {mode, point: {x, z}, reason: null};
 }
 
+// A home-declared plotted coordinate also locates that axis's G28 reference.
+// Missing the other axis must not discard this one. Raw machine home and the
+// display-only estimate are in different frames and cannot supply it.
+export function plottedProgramReference(profile) {
+  if (profile?.startMode !== "home") return null;
+  const coordinate = (value) => {
+    if (typeof value !== "number" && typeof value !== "string") return null;
+    if (typeof value === "string" && !value.trim()) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
+  const x = coordinate(profile.startX), z = coordinate(profile.startZ);
+  return x === null && z === null ? null : {x, z};
+}
+
 // These coordinates are a visual aid only. Never pass them to the parser,
 // stock simulation, measurements, collision checks or cycle-time estimator.
 export function displayHomeEstimate(profile) {

@@ -2761,17 +2761,20 @@ function parseReferenceReturn(record, state, xMode, warnings) {
   }
 
   const reference = state.referencePosition;
+  const unresolvedAxes = [];
   // U selects the X return and W selects the Z return. A reference return
   // cannot move or invalidate an axis that was not selected by this block.
   for (const axis of referenceAxes) {
     const coordinate = axis.toLowerCase();
-    state[coordinate] = isKnownPoint(reference) ? reference[coordinate] : null;
-    state[`${coordinate}UncertaintyMm`] = isKnownPoint(reference) ? numericUncertainty(reference[coordinate]) : null;
+    const known = Number.isFinite(reference[coordinate]);
+    state[coordinate] = known ? reference[coordinate] : null;
+    state[`${coordinate}UncertaintyMm`] = known ? numericUncertainty(reference[coordinate]) : null;
+    if (!known) unresolvedAxes.push(axis);
   }
-  if (!isKnownPoint(reference)) {
+  if (unresolvedAxes.length) {
     warnings.push({
-      line: record.line, code: "reference-return-position-unknown", verificationScope: "reference-return", referenceAxes,
-      message: `G28 ${referenceAxes.join("/")} machine-reference return has no known position in program coordinates; its return path is unresolved.`,
+      line: record.line, code: "reference-return-position-unknown", verificationScope: "reference-return", referenceAxes: unresolvedAxes,
+      message: `G28 ${unresolvedAxes.join("/")} machine-reference return has no known position in program coordinates; its return path is unresolved.`,
     });
     return segments;
   }
@@ -2784,7 +2787,8 @@ function parseReferenceReturn(record, state, xMode, warnings) {
   const message = isKnownPoint(start)
     ? `G28 returned to the estimated machine reference at ${referenceLabel}.`
     : `G28 established the estimated machine reference at ${referenceLabel}; the unknown incoming move was not drawn.`;
-  warnings.push({line: record.line, info: true, message});
+  warnings.push({line: record.line, code: "reference-return-resolved", info: true,
+    ...(!isKnownPoint(start) ? {requiresAttention: true} : {}), message});
   return segments;
 }
 
@@ -3705,7 +3709,10 @@ export function parseGcode(source, {
     xUncertaintyMm: Number.isFinite(initialPosition?.x) ? numericUncertainty(initialPosition.x) : null,
     zUncertaintyMm: Number.isFinite(initialPosition?.z) ? numericUncertainty(initialPosition.z) : null,
     xMode,
-    referencePosition: isKnownPoint(referencePosition) ? {...referencePosition} : null,
+    referencePosition: {
+      x: Number.isFinite(referencePosition?.x) ? referencePosition.x : null,
+      z: Number.isFinite(referencePosition?.z) ? referencePosition.z : null,
+    },
     rapidBehavior, rapidXMax, rapidZMax, arcChordTolerance,
     absolute: true, scale: normalizedDefaultUnits === "in" ? 25.4 : 1, units: normalizedDefaultUnits,
     motion: "rapid", feed: null,

@@ -564,6 +564,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .warnings li { margin-bottom: 7px; padding: 7px 8px; color: #f5d89d; border-left: 2px solid var(--warn); background: rgba(245, 158, 11, .06); font-size: 10px; line-height: 1.4; }
 .warnings li.danger { color: #fecdd3; border-left-color: var(--danger); background: rgba(251, 113, 133, .08); }
 .warnings li.muted { color: var(--muted); border-left-color: var(--border); background: rgba(255, 255, 255, .02); }
+.program-notes-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; color: var(--text); font-size: 11px; font-weight: 700; }
+.program-notes-empty { margin: 10px 0; color: var(--muted); font-size: 11px; }
+.program-note-message { margin: 0; overflow-wrap: anywhere; }
+.program-info-notes { margin-top: 12px; border-top: 1px solid var(--border); color: var(--muted); }
+.program-info-notes > summary, .note-occurrences > summary { min-height: 36px; padding: 8px 0; cursor: pointer; font-size: 11px; line-height: 20px; }
+.program-info-notes > summary .chip { margin-left: 6px; }
+.warnings summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.note-occurrences > summary { padding-bottom: 0; color: inherit; }
+.warnings .note-occurrences ol { margin: 6px 0 0; padding: 0; list-style: none; }
+.warnings .note-occurrences li { margin: 0; padding: 7px 0; color: inherit; border: 0; border-top: 1px solid var(--border); background: none; overflow-wrap: anywhere; }
 .safety-note { margin: 0; padding: 10px 12px; color: #d4a8ae; border-top: 1px solid var(--border); background: rgba(251, 113, 133, .05); font-size: 9px; line-height: 1.45; }
 .machine-dialog { width: min(920px, calc(100vw - 28px)); max-height: min(900px, calc(100dvh - 28px)); padding: 0; color: var(--text); border: 1px solid #355159; border-radius: 14px; background: #091416; box-shadow: 0 28px 90px rgba(0, 0, 0, .72); overflow: hidden; }
 .machine-dialog::backdrop { background: rgba(2, 8, 10, .82); backdrop-filter: blur(5px); }

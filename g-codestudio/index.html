@@ -502,7 +502,7 @@
               <label><span>Overall length · calculated</span><input id="stockLength" class="calculated-input" type="number" value="3.15" readonly aria-label="Calculated overall stock length"></label>
               <label><span>Jaw face Z · calculated</span><input id="chuckFaceZ" class="calculated-input" type="number" value="-3.15" readonly aria-label="Calculated jaw face Z"></label>
             </div>
-            <small class="stock-placement-hint">Overall = stick-out + grip. Changing either keeps the stock front at the same Z.</small>
+            <small class="stock-placement-hint">Jaw face Z = stock front Z − stick-out. Overall = stick-out + grip. Changing either length keeps the stock front at the same Z.</small>
             <label><span>Starting through-bore Ø (<span data-unit-label>in</span>)</span><input id="stockPilotBore" type="number" min="0" step="any" value="0" aria-describedby="stockPilotBoreHint" required></label>
             <small id="stockPilotBoreHint" class="stock-placement-hint">0 = solid bar. For ID tools, enter the existing through-bore. A boring bar does not drill its own starting hole.</small>
             <p id="stockSetupStatus" class="stock-setup-status" aria-live="polite">Press Enter or leave a field to apply.</p>
@@ -533,9 +533,15 @@
           <div><span>BOUNDS</span><strong id="boundsReadout">—</strong></div>
         </div>
 
-        <div class="warnings">
-          <div class="section-title"><span>PROGRAM NOTES</span><span id="warningCount" class="chip">0</span></div>
-          <ul id="warningList"><li class="muted">No parser warnings.</li></ul>
+        <div class="warnings" aria-labelledby="programNotesTitle">
+          <div class="section-title"><span id="programNotesTitle">PROGRAM NOTES</span></div>
+          <div class="program-notes-heading"><span>Needs attention</span><span id="warningCount" class="chip" aria-label="0 notes need attention">0</span></div>
+          <p id="programNotesEmpty" class="program-notes-empty">No notes need attention.</p>
+          <ul id="warningList" aria-label="Notes needing attention"></ul>
+          <details id="programInfoNotes" class="program-info-notes" hidden>
+            <summary>Information <span id="programInfoCount" class="chip">0</span></summary>
+            <ul id="programInfoList" aria-label="Informational program notes"></ul>
+          </details>
         </div>
         <p id="workspaceSafetyNote" class="safety-note">Preview only — the keep-out is a tool-point envelope, not full machine collision verification. Prove out with the control's approved process.</p>
       </aside>
@@ -599,8 +605,9 @@
             <div class="machine-section-heading"><span>03</span><div><h3>Program start & rapid motion</h3><p>The explicit program-coordinate tool-reference position before the first move. This is not a turret-body or raw machine-coordinate transform.</p></div></div>
             <div class="machine-form-grid">
               <label class="wide">Initial position assumption<select name="startMode"><option value="unknown">Unknown — do not invent an approach</option><option value="home">Machine home / reference</option><option value="tool-change">Tool-change position</option><option value="safe-index">Safe-index position</option><option value="custom">Custom coordinates</option></select></label>
-              <label>Initial plotted X<input name="startX" type="number" step="any" placeholder="Unknown"></label>
-              <label>Initial plotted Z<input name="startZ" type="number" step="any" placeholder="Unknown"></label>
+              <label>Initial plotted X<input name="startX" type="number" step="any" placeholder="Unknown" aria-describedby="programReferenceHint"></label>
+              <label>Initial plotted Z<input name="startZ" type="number" step="any" placeholder="Unknown" aria-describedby="programReferenceHint"></label>
+              <p id="programReferenceHint" class="wide">With Machine home / reference selected, each known coordinate locates that axis's G28 return in program coordinates. Leave an unknown axis blank. X uses the selected diameter/radius mode. Both coordinates are needed to draw the initial approach.</p>
               <label class="wide">Rapid interpolation<select name="rapidBehavior"><option value="unknown">Unknown / not confirmed</option><option value="linear">Linear vector path</option><option value="dogleg">Independent-axis / dogleg</option><option value="parameter-dependent">Control-parameter dependent</option></select></label>
               <label>Maximum X rapid<input name="rapidXMax" type="number" min="0" step="any" placeholder="Unknown"></label>
               <label>Maximum Z rapid<input name="rapidZMax" type="number" min="0" step="any" placeholder="Unknown"></label>

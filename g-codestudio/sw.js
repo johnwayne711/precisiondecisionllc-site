@@ -1,10 +1,11 @@
 const CACHE_PREFIX = "verify-app-";
-const CACHE_NAME = "verify-app-v119";
+const CACHE_NAME = "verify-app-v121";
 const APP_ASSETS = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.mjs",
+  "./program-notes.mjs",
   "./machine-profile-storage.mjs",
   "./references/sl75.html",
   "./references/reference.css",

@@ -8,6 +8,7 @@ import {
 } from "./mill-gcode.mjs";
 import {cycleTimeAtPosition, estimateCycleTime, formatCycleTime} from "./runtime.mjs";
 import {spindleFeedAtPosition} from "./spindle-feed.mjs";
+import {groupProgramNotes} from "./program-notes.mjs";
 import {
   buildStockProfile, collisionPointForSegment, evaluateCollisions, extendStockProfile, isLiveToolSegment,
   stockContourPoints, stockMaterialIntervals, stockPlacement, stockVerificationColumns,
@@ -58,7 +59,7 @@ import {
   MILLING_TOOL_LIBRARY_CATALOG, listMillingToolLibraryRecords, millingToolLibraryRecordById,
 } from "./milling-tool-library.mjs";
 import {millingToolPreviewClaimLabels, millingToolPreviewViewModel} from "./milling-tool-preview.mjs";
-import {plottedProgramStart, sl75SpindleGearContract} from "./machine-semantics.mjs";
+import {plottedProgramReference, plottedProgramStart, sl75SpindleGearContract} from "./machine-semantics.mjs";
 import {displayHomeEstimate, machineProfileForVerification, onlyDisplayHomeChanged, strokeSizedHomeEstimate} from "./machine-semantics.mjs";
 import {
   activeToolKeyAtLine, createProgramIdentity, createVersionedToolAssignment, editedProgramIdentity,
@@ -88,8 +89,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.17";
-const APP_BUILD = 119;
+const APP_VERSION = "v0.3.19";
+const APP_BUILD = 121;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -1227,7 +1228,15 @@ function machinePlotOptions(profile) {
   const initialPosition = configuredStart.point
     ? point(configuredStart.point.x, configuredStart.point.z)
     : null;
-  const referencePosition = configuredStart.mode === "home" ? initialPosition : null;
+  const configuredReference = plottedProgramReference(profile);
+  const referenceCoordinate = (value) => {
+    if (!Number.isFinite(value)) return null;
+    const converted = machineLengthMm(value, profile);
+    return Number.isFinite(converted) ? converted : null;
+  };
+  const referencePosition = configuredReference ? {
+    x: referenceCoordinate(configuredReference.x), z: referenceCoordinate(configuredReference.z),
+  } : null;
   return {
     initialPosition,
     referencePosition,
@@ -4447,7 +4456,7 @@ function applyProgramNoseCompensation() {
   state.parsed.warnings = state.parsed.commandedWarnings.filter(warning => warning.code !== 'tool-nose-compensation-pending'
     || result.segments.some(segment => segment.compensationPending && (segment.line === warning.line || segment.executionLine === warning.line)));
   state.parsed.warnings.push(...result.issues.map(issue => ({...issue, danger: true, verificationBlocked: true})));
-  if (result.modeledCount) state.parsed.warnings.push({line: null, info: true,
+  if (result.modeledCount) state.parsed.warnings.push({line: null, info: true, routine: true,
     message: 'G41/G42 shows the resolved nominal NOSE-CENTER path. Stock and part-entry checks sweep its actual nose circle; drawing deviation uses the original commanded contour. Full insert/holder and physical machine accuracy remain unqualified.'});
 }
 
@@ -6767,26 +6776,49 @@ function updateToolOffsetAlert() {
 }
 
 function renderProgramNotes(notes) {
-  $("warningCount").textContent = String(notes.length);
-  const list = $("warningList");
-  list.replaceChildren();
-  if (!notes.length) {
-    const item = document.createElement("li");
-    item.className = "muted";
-    item.textContent = "No parser warnings.";
-    list.append(item);
-    return;
-  }
-  [...notes].sort((a, b) => Number(b.code === "tool-offset-pairing-unconfirmed")
-    - Number(a.code === "tool-offset-pairing-unconfirmed")).slice(0, 12).forEach((warning) => {
-    const item = document.createElement("li");
-    const controllerPreview = warning.code === "unsupported-m-code"
-      && state.parsed.machineState?.blockedPathPreview === true;
-    if ((warning.danger || warning.verificationBlocked) && !controllerPreview) item.className = "danger";
-    else if (warning.info) item.className = "muted";
-    item.textContent = `${warning.line ? `Line ${warning.line}: ` : ""}${warning.message}`;
-    list.append(item);
-  });
+  const grouped = groupProgramNotes(notes);
+  const count = $("warningCount");
+  count.textContent = String(grouped.attention.length);
+  count.setAttribute("aria-label", `${grouped.attention.length} notes need attention`);
+  count.title = "Distinct notes needing attention; repeated occurrences are grouped.";
+  const expanded = new Set([...document.querySelectorAll(".note-occurrences[open]")]
+    .map(detail => detail.dataset.noteKey));
+  const noteText = note => `${note.line ? `Line ${note.line}: ` : ""}${note.message}`;
+  const renderGroups = (list, groups) => {
+    list.replaceChildren();
+    for (const group of groups) {
+      const item = document.createElement("li");
+      const controllerPreview = group.notes.every(note => note.code === "unsupported-m-code")
+        && state.parsed.machineState?.blockedPathPreview === true;
+      item.className = group.severity === "danger" && !controllerPreview ? "danger" : group.severity === "info" ? "muted" : "";
+      const message = document.createElement("p");
+      message.className = "program-note-message";
+      message.textContent = group.notes.length === 1 ? noteText(group.notes[0]) : group.message;
+      item.append(message);
+      if (group.notes.length > 1) {
+        const detail = document.createElement("details");
+        detail.className = "note-occurrences";
+        detail.dataset.noteKey = group.key;
+        detail.open = expanded.has(group.key);
+        const summary = document.createElement("summary");
+        summary.textContent = `${group.notes.length} occurrences · View details`;
+        const occurrences = document.createElement("ol");
+        for (const note of group.notes) {
+          const occurrence = document.createElement("li");
+          occurrence.textContent = noteText(note);
+          occurrences.append(occurrence);
+        }
+        detail.append(summary, occurrences);
+        item.append(detail);
+      }
+      list.append(item);
+    }
+  };
+  renderGroups($("warningList"), grouped.attention);
+  $("programNotesEmpty").hidden = grouped.attention.length > 0;
+  renderGroups($("programInfoList"), grouped.information);
+  $("programInfoNotes").hidden = grouped.information.length === 0;
+  $("programInfoCount").textContent = String(grouped.information.length);
 }
 
 function updateMillStats() {
@@ -6859,6 +6891,7 @@ function updateMillStats() {
     {
       line: null,
       info: true,
+      routine: true,
       message: "Mill mode preserves canonical XYZ programmed coordinates and analytic arc definitions. The canvas is a command-centerline display; cutter geometry, offsets, stock, fixtures, machine travel, and collision are not modeled.",
     },
     ...(state.parsed.warnings || []),
@@ -6959,7 +6992,7 @@ function updateStats() {
   state.stockCuttingWarning = stockWarnings.length ? {...stockWarnings[0], blockedCuts: analyzedStock.turningBlockedCuts} : null;
   notes.unshift(...stockWarnings.map(warning => ({...warning, danger: !isToolSetupStockWarning(warning)})));
   if (analyzedStock?.nominalModeledCuts > 0 || analyzedStock?.compensatedModeledCuts > 0) {
-    notes.push({line: null, info: true, message: analyzedStock.threadEnvelopeCuts > 0
+    notes.push({line: null, info: true, routine: true, message: analyzedStock.threadEnvelopeCuts > 0
       ? "THREAD SECTION ENVELOPE — nominal axisymmetric removal, not helical thread geometry, pitch-diameter inspection or holder clearance."
       : "NOMINAL CUTTER SIMULATION — published cutter dimensions and explicitly selected datum; physical accuracy and holder clearance are not verified."});
   }
@@ -6977,6 +7010,7 @@ function updateStats() {
       notes.unshift({
         line: boreLine,
         info: true,
+        routine: true,
         message: `Axial bore stock removal modeled${boreDetail}. Cutter-holder collision remains PATH ONLY.`,
       });
     } else {
@@ -6989,7 +7023,7 @@ function updateStats() {
   }
   for (const cycle of state.parsed.cycles) {
     if (cycle.code === "G70") continue;
-    notes.push({line: cycle.line, info: true, message: `${cycle.code} Type ${cycle.type} expanded to ${cycle.passes} roughing passes (P${cycle.p}–Q${cycle.q}).`});
+    notes.push({line: cycle.line, info: true, routine: true, message: `${cycle.code} Type ${cycle.type} expanded to ${cycle.passes} roughing passes (P${cycle.p}–Q${cycle.q}).`});
   }
   notes.unshift(...primaryProgramBlockers);
   renderProgramNotes(notes);
@@ -7225,7 +7259,7 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
     });
   if (!mill) {
     if (state.parsed.machineState?.initialPlaneUsed) {
-      state.parsed.warnings.unshift({line: null, info: true,
+      state.parsed.warnings.unshift({line: null, info: true, routine: true,
         message: `Starting plane: X/Z (G18) from ${machine.name} setup. Programmed plane changes take precedence.`});
     }
     const nextDocumentIdentity = programToolDocumentIdentity(elements.input.value, {
@@ -7236,6 +7270,7 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
       state.parsed.warnings.unshift({
         line: null,
         info: true,
+        routine: true,
         message: `Initial rapid begins at the configured ${source} plotted tool-reference point. Turret, holder, and machine-coordinate transforms are not modeled by this point.`,
       });
     } else if (plotOptions.initialPositionMode !== "unknown" && plotOptions.initialPositionIssue === "incomplete") {
