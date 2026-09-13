@@ -307,7 +307,7 @@ export function estimateCycleTime(parsed, {
   if (programStops) {
     const commands = [...new Set(programStopEvents.map((event) => event.command).filter(Boolean))];
     const commandLabel = commands.length ? commands.join("/") : "program";
-    limitations.add(`${programStops} ${commandLabel} program stop${programStops === 1 ? " contributes" : "s contribute"} 0:00 to the feed + rapid total; operator-response duration is outside this metric.`);
+    limitations.add(`${programStops} ${commandLabel} program stop${programStops === 1 ? " contributes" : "s contribute"} 0:00 to the feed + rapid total; operator-response duration is outside this metric, while programmed feed and rapid before and after each stop remain included in the full-program subtotal.`);
   }
   if (dwellEvents.length) {
     limitations.add(`${dwellEvents.length} G04 dwell block${dwellEvents.length === 1 ? " contributes" : "s contribute"} 0:00 to the feed + rapid total; programmed dwell remains available as a separate exclusion.`);

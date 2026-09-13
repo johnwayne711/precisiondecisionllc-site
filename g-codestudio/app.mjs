@@ -88,8 +88,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.14";
-const APP_BUILD = 116;
+const APP_VERSION = "v0.3.15";
+const APP_BUILD = 117;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -216,14 +216,14 @@ const DEFAULT_MACHINE_PROFILES = [
   {
     id: "mori-seiki-sl75", name: "Mori-Seiki SL-75", manufacturer: "Mori Seiki",
     model: "SL-75", serialNumber: "", controlMake: "", controlModel: "",
-    status: "draft", templateRevision: 4, units: "inch", xProgramming: "diameter", orientation: "left", cssUnits: "program",
+    status: "draft", templateRevision: 5, units: "inch", xProgramming: "diameter", orientation: "left", cssUnits: "m/min",
     initialPlane: "G18", initialFeedMode: "G99", startMode: "unknown", rapidBehavior: "unknown",
     xAxisStroke: 400 / 25.4, zAxisStroke: 1550 / 25.4, turretStations: 12,
     rapidXMax: 5000 / 25.4, rapidYMax: null, rapidZMax: 8000 / 25.4, rapidCMax: null,
     liveToolDialect: "unconfigured", liveToolCapability: "unknown", cAxisCapability: "unknown",
     yAxisCapability: "unknown", cAxisEngagement: "unknown", liveToolMaxRpm: null,
     haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown", liveToolEvidence: "",
-    notes: "DRAFT — factory specifications, pending confirmation on this machine. Mori Seiki SL-75 brochure, specification table (PDF page 4): 12 turret stations; physical X slide stroke 20 + 380 = 400 mm; Z stroke 1550 mm; X rapid 5000 mm/min; Z rapid 8000 mm/min. Inch fields are converted from these published metric values. Source: https://t-mt.com/kousaku/img/25809/25809.pdf\nThe brochure distinguishes SL-75A/B/C and several controls. Exact variant/control, spindle limits, installed options, machine-coordinate limits, home, tool-change positions and rapid interpolation remain unconfirmed. Stroke lengths do not establish coordinate limits or part zero.\nInitial plane is X/Z (G18); programmed plane changes override it. Inch/diameter inputs match the owner's setup. Ordinary X/Z radius programming is shown without G18 in Mori manual PM-NLTMSC518-I1EN, B-12/B-13; edition/control applicability remains unconfirmed. Source: https://www.remontservo.ru/arys/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf",
+    notes: "DRAFT — factory specifications, pending confirmation on this machine. Mori Seiki SL-75 brochure, specification table (PDF page 4): 12 turret stations; physical X slide stroke 20 + 380 = 400 mm; Z stroke 1550 mm; X rapid 5000 mm/min; Z rapid 8000 mm/min. Inch fields are converted from these published metric values. Source: https://t-mt.com/kousaku/img/25809/25809.pdf\nThe brochure distinguishes SL-75A/B/C and several controls. Exact variant/control, spindle limits, installed options, machine-coordinate limits, home, tool-change positions and rapid interpolation remain unconfirmed. Stroke lengths do not establish coordinate limits or part zero.\nInitial plane is X/Z (G18); programmed plane changes override it. Inch/diameter inputs match the owner's setup. Mori manual PM-NLTMSC518-I1EN defines G96 S in m/min, G50 S as the spindle-speed limit in min^-1, and shows ordinary X/Z radius programming without G18 (B-12/B-13, B-17/B-19, D-15/D-18); edition/control applicability to the installed machine remains unconfirmed. Source: https://www.remontservo.ru/tash-kumyr/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf",
     updatedAt: null,
   },
   {
@@ -1113,10 +1113,18 @@ function normalizeMachineProfile(profile) {
   const needsTemplateUpgrade = Number(profile?.templateRevision || 0) < Number(fallback.templateRevision || 0);
   const upgraded = {...profile};
   if (needsTemplateUpgrade) {
+    const revision = Number(profile?.templateRevision || 0);
+    // Revision 3/4 seeded the SL-75 with the generic G20=SFM convention.
+    // The applicable Mori manual instead defines G96 S in m/min, independent
+    // of linear program units. Replace that obsolete seeded value while
+    // preserving explicit sfm and revision-3/4 unknown choices for differently
+    // configured controls. Revision-1/2 unknown was the legacy seeded default.
+    if (template.id === "mori-seiki-sl75" && revision < 5 && upgraded.cssUnits === "program") {
+      upgraded.cssUnits = fallback.cssUnits;
+    }
     for (const [field, estimate] of Object.entries(fallback)) {
       // Upgrade only newly introduced defaults; preserve explicit unknowns and
-      // user values, including revision-3 CSS choices and starting feed modes.
-      const revision = Number(profile?.templateRevision || 0);
+      // user values, including non-seeded CSS choices and starting feed modes.
       if (template.id === "mori-seiki-sl75" && revision >= 2
         && !(field === "cssUnits" && revision < 3) && field !== "initialFeedMode") continue;
       if (["initialPlane", "initialFeedMode"].includes(field) && Object.hasOwn(upgraded, field)) continue;
