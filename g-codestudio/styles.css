@@ -300,7 +300,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .canvas-wrap { position: relative; flex: 1; min-height: 500px; overflow: hidden; background-color: #071012; background-image: radial-gradient(circle at center, rgba(35, 91, 79, .2), transparent 65%); }
 #plotCanvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
 .canvas-wrap.face-view #plotCanvas { cursor: default; }
-.profile-penetration-alert { position: absolute; z-index: 6; top: 12px; left: 50%; display: flex; width: min(690px, calc(100% - 28px)); align-items: center; justify-content: space-between; gap: 14px; padding: 11px 12px; color: #fff1f2; border: 1px solid rgba(255, 72, 105, .9); border-radius: 9px; background: linear-gradient(105deg, rgba(88, 10, 28, .97), rgba(45, 8, 18, .94)); box-shadow: 0 0 0 2px rgba(255, 54, 92, .13), 0 12px 38px rgba(0, 0, 0, .48), 0 0 30px rgba(244, 63, 94, .17); transform: translateX(-50%); }
+/* Shared flow preserves the centered warning and reserves 60px + the 12px gap for the inspector header. */
+.plot-overlays { position: absolute; inset: 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; pointer-events: none; }
+.plot-overlays > section { pointer-events: auto; }
+.plot-overlays:has(.geometry-inspector:not([hidden])) .profile-penetration-alert { max-height: calc(100% - 72px); }
+.profile-penetration-alert { position: relative; z-index: 6; display: flex; flex: 0 0 auto; align-self: center; width: min(690px, calc(100% - 4px)); max-height: 100%; overflow-y: auto; overscroll-behavior: contain; align-items: safe center; justify-content: space-between; gap: 14px; padding: 11px 12px; color: #fff1f2; border: 1px solid rgba(255, 72, 105, .9); border-radius: 9px; background: linear-gradient(105deg, rgba(88, 10, 28, .97), rgba(45, 8, 18, .94)); box-shadow: 0 0 0 2px rgba(255, 54, 92, .13), 0 12px 38px rgba(0, 0, 0, .48), 0 0 30px rgba(244, 63, 94, .17); }
 .profile-penetration-alert[hidden] { display: none; }
 .profile-penetration-alert > div { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
 .profile-penetration-alert strong { color: #ff6683; font: 900 12px/1.2 "Cascadia Code", Consolas, monospace; letter-spacing: .08em; }
@@ -324,19 +328,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .view-cube canvas { position: absolute; inset: 0; width: 132px; height: 120px; pointer-events: auto; filter: drop-shadow(0 4px 5px rgba(0, 0, 0, .32)); }
 .view-cube button { position: absolute; z-index: 1; top: 2px; left: 2px; display: grid; place-items: center; width: 25px; height: 25px; padding: 0 0 2px; color: rgba(170, 193, 197, .76); border: 0; border-radius: 50%; background: transparent; pointer-events: auto; font: 800 20px/1 system-ui, sans-serif; }
 .view-cube button:hover, .view-cube button:focus-visible { color: var(--accent); background: rgba(7, 20, 21, .58); outline: 1px solid rgba(86, 227, 159, .5); }
-.geometry-inspector { position: absolute; z-index: 4; top: 12px; left: 12px; width: min(310px, calc(100% - 24px)); padding: 10px 11px; color: var(--text); border: 1px solid rgba(125, 211, 252, .42); border-radius: 9px; background: rgba(5, 17, 21, .94); box-shadow: 0 12px 36px rgba(0, 0, 0, .38); backdrop-filter: blur(10px); }
+.geometry-inspector { position: relative; z-index: 4; flex: 0 1 auto; min-height: 60px; width: min(310px, 100%); overflow-y: auto; overscroll-behavior: contain; color: var(--text); border: 1px solid rgba(125, 211, 252, .42); border-radius: 9px; background: rgba(5, 17, 21, .94); box-shadow: 0 12px 36px rgba(0, 0, 0, .38); backdrop-filter: blur(10px); }
 .geometry-inspector[hidden] { display: none; }
-.geometry-inspector header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.geometry-inspector header { position: sticky; z-index: 1; top: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 10px 11px 7px; background: #061215; }
 .geometry-inspector header > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .geometry-inspector header span { color: #7dd3fc; font-size: 8px; font-weight: 850; letter-spacing: .13em; }
 .geometry-inspector header strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.geometry-inspector header button { flex: 0 0 auto; width: 23px; height: 23px; padding: 0; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; background: #0d1728; }
-.geometry-inspector > p { margin: 7px 0 8px; color: #a9c4ca; font-size: 9px; line-height: 1.4; }
-.geometry-inspector dl { display: grid; gap: 1px; margin: 0; background: rgba(66, 104, 113, .24); }
+.geometry-inspector header button { flex: 0 0 auto; width: 32px; height: 32px; padding: 0; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; background: #0d1728; }
+.geometry-inspector header button:hover { color: #e1f5f7; border-color: #7dd3fc; background: #142b35; }
+.geometry-inspector header button:focus-visible { color: #e1f5f7; outline: 2px solid #7dd3fc; outline-offset: 2px; }
+.geometry-inspector > p { margin: 0 11px 8px; color: #a9c4ca; font-size: 9px; line-height: 1.4; }
+.geometry-inspector dl { display: grid; gap: 1px; margin: 0 11px; background: rgba(66, 104, 113, .24); }
 .geometry-inspector dl > div { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 8px; padding: 5px 7px; background: rgba(7, 20, 23, .96); }
 .geometry-inspector dt { color: var(--muted); font-size: 8px; font-weight: 750; }
 .geometry-inspector dd { margin: 0; color: #e1f5f7; font: 9px "Cascadia Code", Consolas, monospace; text-align: right; white-space: nowrap; }
-.geometry-inspector > small { display: block; margin-top: 8px; color: #78959b; font-size: 7.5px; line-height: 1.4; }
+.geometry-inspector > small { display: block; margin: 8px 11px 10px; color: #78959b; font-size: 7.5px; line-height: 1.4; }
 .tool-verification-badge { position: absolute; z-index: 3; top: 12px; right: 12px; display: flex; align-items: center; gap: 7px; padding: 6px 8px; color: #d7c4a2; border: 1px solid rgba(251, 191, 36, .36); border-radius: 7px; background: rgba(31, 23, 7, .88); box-shadow: 0 7px 24px rgba(0, 0, 0, .3); backdrop-filter: blur(8px); }
 .tool-verification-badge[hidden] { display: none; }
 .tool-verification-badge span { color: #a98d55; font-size: 7px; font-weight: 850; letter-spacing: .11em; }
@@ -912,8 +918,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .gcode-editor, #gcodeInput { min-height: 340px; }
   .canvas-wrap { min-height: 400px; }
   .face-view-status, .mill-view-status { right: 8px; bottom: 8px; max-width: calc(100% - 16px); }
-  .profile-penetration-alert { top: 8px; width: calc(100% - 16px); align-items: stretch; flex-direction: column; gap: 8px; padding: 10px; }
+  .plot-overlays { inset: 8px; }
+  .profile-penetration-alert { width: 100%; align-items: stretch; flex-direction: column; gap: 8px; padding: 10px; }
   .profile-penetration-alert button { align-self: flex-start; }
+  .geometry-inspector { margin-left: 4px; width: min(310px, calc(100% - 8px)); }
+  .geometry-inspector header button { width: 40px; height: 40px; }
   .reference-demo-actions { grid-template-columns: 1fr; }
   .face-view-status strong, .mill-view-status strong { font-size: 10px; }
   .face-view-status span, .mill-view-status span { font-size: 9px; }

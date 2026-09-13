@@ -177,13 +177,32 @@
         </section>
         <div id="canvasWrap" class="canvas-wrap">
           <canvas id="plotCanvas" role="img" aria-label="Interactive lathe backplot. In 2D, click component geometry to inspect it, or use Dimension to pin exact line and radius measurements." title="In 2D, click component geometry to measure it. Turn on Dimension to pin exact line and radius measurements."></canvas>
-          <section id="profilePenetrationAlert" class="profile-penetration-alert" role="alert" aria-live="assertive" hidden>
-            <div>
-              <strong id="profilePenetrationAlertTitle">PATH ENTERS NOMINAL MATERIAL</strong>
-              <span id="profilePenetrationAlertMessage"></span>
-            </div>
-            <button id="profilePenetrationJump" type="button">Show source line</button>
-          </section>
+          <div class="plot-overlays">
+            <section id="profilePenetrationAlert" class="profile-penetration-alert" role="alert" aria-live="assertive" hidden>
+              <div>
+                <strong id="profilePenetrationAlertTitle">PATH ENTERS NOMINAL MATERIAL</strong>
+                <span id="profilePenetrationAlertMessage"></span>
+              </div>
+              <button id="profilePenetrationJump" type="button">Show source line</button>
+            </section>
+            <section id="geometryInspector" class="geometry-inspector" aria-live="polite" hidden>
+              <header>
+                <div><span>GEOMETRY INSPECTOR</span><strong id="geometryComponent">Select component geometry</strong></div>
+                <button id="clearGeometrySelection" class="close-icon" type="button" aria-label="Clear geometry selection" title="Clear selection"></button>
+              </header>
+              <p id="geometryEntity">Corners, midpoints, and lines snap in 2D.</p>
+              <dl>
+                <div><dt>Selected</dt><dd id="geometrySelectedPoint">—</dd></div>
+                <div><dt id="geometryPrimaryLabel">Length</dt><dd id="geometryLength">—</dd></div>
+                <div><dt id="geometrySecondaryLabel">Delta</dt><dd id="geometrySecondaryValue">—</dd></div>
+                <div><dt>Center</dt><dd id="geometryCenter">—</dd></div>
+                <div><dt>Start</dt><dd id="geometryStart">—</dd></div>
+                <div><dt>Midpoint</dt><dd id="geometryMidpoint">—</dd></div>
+                <div><dt>End</dt><dd id="geometryEnd">—</dd></div>
+              </dl>
+              <small>Geometric X is signed radius from spindle centerline. Dimension mode pins exact analytic/programmed entities; sampled stock-grid chords are labeled approximate and cannot be pinned as exact dimensions.</small>
+            </section>
+          </div>
           <section id="solidSetupWorkspace" class="solid-setup-workspace" aria-labelledby="solidSetupTitle" hidden>
             <header class="solid-setup-header">
               <div><span class="solid-eyebrow">STEP PLACEMENT · LOCAL</span><h2 id="solidSetupTitle">Place the solid</h2><p id="solidSetupFile"></p></div>
@@ -208,23 +227,6 @@
             <canvas id="viewCubeCanvas" role="img" aria-label="Clickable view cube. Select a face, edge, or corner to orient the model."></canvas>
             <button id="viewCubeHome" type="button" aria-label="Return to home isometric view" title="Home isometric view">⌂</button>
           </div>
-          <section id="geometryInspector" class="geometry-inspector" aria-live="polite" hidden>
-            <header>
-              <div><span>GEOMETRY INSPECTOR</span><strong id="geometryComponent">Select component geometry</strong></div>
-              <button id="clearGeometrySelection" class="close-icon" type="button" aria-label="Clear geometry selection" title="Clear selection"></button>
-            </header>
-            <p id="geometryEntity">Corners, midpoints, and lines snap in 2D.</p>
-            <dl>
-              <div><dt>Selected</dt><dd id="geometrySelectedPoint">—</dd></div>
-              <div><dt id="geometryPrimaryLabel">Length</dt><dd id="geometryLength">—</dd></div>
-              <div><dt id="geometrySecondaryLabel">Delta</dt><dd id="geometrySecondaryValue">—</dd></div>
-              <div><dt>Center</dt><dd id="geometryCenter">—</dd></div>
-              <div><dt>Start</dt><dd id="geometryStart">—</dd></div>
-              <div><dt>Midpoint</dt><dd id="geometryMidpoint">—</dd></div>
-              <div><dt>End</dt><dd id="geometryEnd">—</dd></div>
-            </dl>
-            <small>Geometric X is signed radius from spindle centerline. Dimension mode pins exact analytic/programmed entities; sampled stock-grid chords are labeled approximate and cannot be pinned as exact dimensions.</small>
-          </section>
           <div id="toolVerificationBadge" class="tool-verification-badge" aria-live="polite" hidden><span>2D TOOL OUTLINE</span><strong>NO ACTIVE TOOL</strong></div>
           <div id="emptyState" class="empty-state" hidden>No motion blocks found</div>
         </div>

@@ -88,8 +88,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.16";
-const APP_BUILD = 118;
+const APP_VERSION = "v0.3.17";
+const APP_BUILD = 119;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -427,6 +427,7 @@ const preferenceIds = [
 let installPrompt = null;
 let persistTimer = null;
 let programCursorFrame = null;
+let programCursorJumpSelection = null;
 let programLanguageFrame = null;
 let programLanguageSource = "";
 let programLanguage = tokenizeGcodeLanguage("");
@@ -912,6 +913,7 @@ function renderProgramIdentity() {
 }
 
 function markProgramChanged() {
+  programCursorJumpSelection = null;
   state.programRevision += 1;
   state.programIdentity = editedProgramIdentity(state.programIdentity, elements.input.value);
   renderProgramIdentity();
@@ -1336,6 +1338,7 @@ function clearToolAssignmentContext() {
 }
 
 function loadProgram(name, content, {bundledSample = false, machineMode = null} = {}) {
+  programCursorJumpSelection = null;
   state.programRevision += 1;
   if (machineMode === "lathe" || machineMode === "mill") {
     elements.machineMode.value = machineMode;
@@ -7197,6 +7200,7 @@ function stepProgram(direction) {
 }
 
 function plotProgram({fit = true, clearDimensions = true} = {}) {
+  programCursorJumpSelection = null;
   const mill = isMillMode();
   const machine = currentMachineProfile();
   const plotOptions = machinePlotOptions(machine);
@@ -7862,6 +7866,17 @@ elements.profilePenetrationJump.addEventListener("click", () => {
   const targetExecutionLine = Number.isInteger(executionLine) && executionLine > 0
     ? executionLine
     : sourceLine;
+  if (Number.isInteger(sourceLine) && sourceLine > 0) {
+    const text = elements.input.value;
+    const offset = text.split("\n").slice(0, sourceLine - 1).reduce((total, line) => total + line.length + 1, 0);
+    elements.input.setSelectionRange(offset, offset);
+    programCursorJumpSelection = {
+      revision: state.programRevision,
+      text,
+      start: elements.input.selectionStart,
+      end: elements.input.selectionEnd,
+    };
+  }
   setProgramLine(targetExecutionLine, {
     visibleBlocks: Number.isInteger(globalBlockIndex) && globalBlockIndex >= 0 ? globalBlockIndex + 1 : null,
   });
@@ -8345,7 +8360,15 @@ elements.input.addEventListener("scroll", () => {
 });
 function syncProgramLineToCursor({force = false} = {}) {
   if (state.programDirty) return;
-  const line = sourceLineAtOffset(elements.input.value, elements.input.selectionStart);
+  const text = elements.input.value;
+  // Focusing the source of a generated move must retain its execution line and substep.
+  if (!force && programCursorJumpSelection
+    && programCursorJumpSelection.revision === state.programRevision
+    && programCursorJumpSelection.text === text
+    && programCursorJumpSelection.start === elements.input.selectionStart
+    && programCursorJumpSelection.end === elements.input.selectionEnd) return;
+  programCursorJumpSelection = null;
+  const line = sourceLineAtOffset(text, elements.input.selectionStart);
   if (!force && line === state.programLine) return;
   state.playing = false;
   state.lastFrame = 0;
