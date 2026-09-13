@@ -1,5 +1,10 @@
 // Program targets, not measured machine motion. Coordinates are canonical mm.
 // Sources and controller differences: docs/DECISIONS.md D-042.
+export function cssUnitScaleMm(state) {
+  const units = state.cssUnits === "program" ? (state.programUnits === "in" ? "sfm" : "m/min") : state.cssUnits;
+  return units === "sfm" ? 304.8 : units === "m/min" ? 1000 : null;
+}
+
 export function programmedSpindleRpm(state, point, xScale = 0.5) {
   if (state.spindleSpeedIssue) return {rpm: null, reason: state.spindleSpeedIssue};
   const speed = state.spindleSpeed;
@@ -14,15 +19,15 @@ export function programmedSpindleRpm(state, point, xScale = 0.5) {
     return {rpm: capped ? limit : speed, capped};
   }
   if (state.spindleMode !== "css") return {rpm: null, reason: "Select G96 or G97 to establish the meaning of S."};
-  const cssUnits = state.cssUnits === "program" ? (state.programUnits === "in" ? "sfm" : "m/min") : state.cssUnits;
-  if (!["sfm", "m/min"].includes(cssUnits)) return {rpm: null, reason: "G96 surface-speed units are unknown. Set CSS units in the machine definition."};
+  const cssScale = cssUnitScaleMm(state);
+  if (cssScale === null) return {rpm: null, reason: "G96 surface-speed units are unknown. Set CSS units in the machine definition."};
   if (!Number.isFinite(point?.x) || ![0.5, 1].includes(xScale)) return {rpm: null, reason: "G96 needs a known programmed diameter at this block."};
   const diameter = Math.abs(point.x) * xScale * 2;
   if (!Number.isFinite(diameter)) return {rpm: null, reason: "Programmed diameter exceeds the numeric range."};
   if (speed === 0) return {rpm: 0, capped: false};
   if (diameter === 0) return limit !== null ? {rpm: limit, capped: true}
     : {rpm: null, reason: "G96 reaches spindle centerline without a known G50 RPM cap."};
-  const requested = (speed / diameter) * ((cssUnits === "sfm" ? 304.8 : 1000) / Math.PI);
+  const requested = (speed / diameter) * (cssScale / Math.PI);
   const rpm = limit !== null ? Math.min(requested, limit) : requested;
   if (!Number.isFinite(rpm) || rpm === 0) return {rpm: null, reason: "Calculated RPM exceeds the numeric range."};
   return {rpm, capped: limit !== null && requested >= limit, uncapped: limit === null};

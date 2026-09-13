@@ -88,8 +88,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.15";
-const APP_BUILD = 117;
+const APP_VERSION = "v0.3.16";
+const APP_BUILD = 118;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -216,14 +216,14 @@ const DEFAULT_MACHINE_PROFILES = [
   {
     id: "mori-seiki-sl75", name: "Mori-Seiki SL-75", manufacturer: "Mori Seiki",
     model: "SL-75", serialNumber: "", controlMake: "", controlModel: "",
-    status: "draft", templateRevision: 5, units: "inch", xProgramming: "diameter", orientation: "left", cssUnits: "m/min",
+    status: "draft", templateRevision: 6, units: "inch", xProgramming: "diameter", orientation: "left", cssUnits: "program", cssUnitsSource: "template",
     initialPlane: "G18", initialFeedMode: "G99", startMode: "unknown", rapidBehavior: "unknown",
     xAxisStroke: 400 / 25.4, zAxisStroke: 1550 / 25.4, turretStations: 12,
     rapidXMax: 5000 / 25.4, rapidYMax: null, rapidZMax: 8000 / 25.4, rapidCMax: null,
     liveToolDialect: "unconfigured", liveToolCapability: "unknown", cAxisCapability: "unknown",
     yAxisCapability: "unknown", cAxisEngagement: "unknown", liveToolMaxRpm: null,
     haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown", liveToolEvidence: "",
-    notes: "DRAFT — factory specifications, pending confirmation on this machine. Mori Seiki SL-75 brochure, specification table (PDF page 4): 12 turret stations; physical X slide stroke 20 + 380 = 400 mm; Z stroke 1550 mm; X rapid 5000 mm/min; Z rapid 8000 mm/min. Inch fields are converted from these published metric values. Source: https://t-mt.com/kousaku/img/25809/25809.pdf\nThe brochure distinguishes SL-75A/B/C and several controls. Exact variant/control, spindle limits, installed options, machine-coordinate limits, home, tool-change positions and rapid interpolation remain unconfirmed. Stroke lengths do not establish coordinate limits or part zero.\nInitial plane is X/Z (G18); programmed plane changes override it. Inch/diameter inputs match the owner's setup. Mori manual PM-NLTMSC518-I1EN defines G96 S in m/min, G50 S as the spindle-speed limit in min^-1, and shows ordinary X/Z radius programming without G18 (B-12/B-13, B-17/B-19, D-15/D-18); edition/control applicability to the installed machine remains unconfirmed. Source: https://www.remontservo.ru/tash-kumyr/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf",
+    notes: "DRAFT — factory specifications, pending confirmation on this machine. Mori Seiki SL-75 brochure, specification table (PDF page 4): 12 turret stations; physical X slide stroke 20 + 380 = 400 mm; Z stroke 1550 mm; X rapid 5000 mm/min; Z rapid 8000 mm/min. Inch fields are converted from these published metric values. Source: https://t-mt.com/kousaku/img/25809/25809.pdf\nThe brochure distinguishes SL-75A/B/C and several controls. Exact variant/control, spindle limits, installed options, machine-coordinate limits, home, tool-change positions and rapid interpolation remain unconfirmed. Stroke lengths do not establish coordinate limits or part zero.\nInitial plane is X/Z (G18); programmed plane changes override it. Inch/diameter inputs match the owner's setup. The visible G96 application convention is G20=SFM/G21=m/min; it is editable and does not qualify the installed control. Mori manual PM-NLTMSC518-I1EN contains metric G96 examples and defines G50 S as the spindle-speed limit in min^-1 (B-17/B-19, D-15/D-18), but its exact edition/control applicability is unconfirmed. Ordinary X/Z radius examples omit G18 (B-12/B-13). Source: https://www.remontservo.ru/tash-kumyr/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf",
     updatedAt: null,
   },
   {
@@ -1114,15 +1114,16 @@ function normalizeMachineProfile(profile) {
   const upgraded = {...profile};
   if (needsTemplateUpgrade) {
     const revision = Number(profile?.templateRevision || 0);
-    // Revision 3/4 seeded the SL-75 with the generic G20=SFM convention.
-    // The applicable Mori manual instead defines G96 S in m/min, independent
-    // of linear program units. Replace that obsolete seeded value while
-    // preserving explicit sfm and revision-3/4 unknown choices for differently
-    // configured controls. Revision-1/2 unknown was the legacy seeded default.
-    if (template.id === "mori-seiki-sl75" && revision < 5 && upgraded.cssUnits === "program") {
-      upgraded.cssUnits = fallback.cssUnits;
+    // Revision 5 changed both the seeded CSS convention and saved program-unit
+    // choices to m/min without recording their provenance. That value could
+    // also be an explicit shop choice: retain it for review instead of guessing.
+    if (template.id === "mori-seiki-sl75" && revision === 5
+      && upgraded.cssUnits === "m/min" && upgraded.cssUnitsSource !== "user") {
+      upgraded.cssUnitsNeedsReview = true;
+      upgraded.cssUnitsSource = "legacy";
     }
     for (const [field, estimate] of Object.entries(fallback)) {
+      if (field === "cssUnitsSource") continue;
       // Upgrade only newly introduced defaults; preserve explicit unknowns and
       // user values, including non-seeded CSS choices and starting feed modes.
       if (template.id === "mori-seiki-sl75" && revision >= 2
@@ -1139,6 +1140,9 @@ function normalizeMachineProfile(profile) {
   normalized.initialPlane = normalized.initialPlane === "G18" ? "G18" : "unknown";
   normalized.initialFeedMode = ["G98", "G99"].includes(normalized.initialFeedMode) ? normalized.initialFeedMode : "unknown";
   normalized.cssUnits = ["sfm", "m/min", "program"].includes(normalized.cssUnits) ? normalized.cssUnits : "unknown";
+  normalized.cssUnitsSource = ["template", "user", "legacy"].includes(upgraded.cssUnitsSource)
+    ? upgraded.cssUnitsSource : Object.hasOwn(profile || {}, "cssUnits") ? "legacy" : "template";
+  normalized.cssUnitsNeedsReview = upgraded.cssUnitsNeedsReview === true;
   normalized.displayHomeMode = normalized.displayHomeMode === "estimate" ? "estimate" : "off";
   for (const field of NUMERIC_MACHINE_FIELDS) {
     const value = normalized[field];
@@ -1227,7 +1231,7 @@ function machinePlotOptions(profile) {
     referencePosition,
     initialPlane: profile.initialPlane === "G18" ? "G18" : null,
     initialFeedMode: profile.initialFeedMode || "unknown",
-    cssUnits: profile.cssUnits || "unknown",
+    cssUnits: profile.cssUnitsNeedsReview ? "unknown" : profile.cssUnits || "unknown",
     spindleGearContract: sl75SpindleGearContract(profile),
     initialPositionMode: configuredStart.mode,
     initialPositionIssue: configuredStart.reason,
@@ -1271,6 +1275,9 @@ function openMachineEditor() {
     const control = elements.machineForm.elements.namedItem(field);
     if (control) control.value = profile[field] ?? "";
   }
+  elements.machineForm.dataset.cssUnitsChanged = "false";
+  $("machineCssUnitsReview").hidden = !profile.cssUnitsNeedsReview;
+  $("confirmMachineCssUnits").checked = false;
   updateMachineStatusBadge(profile.status);
   elements.machineDialog.showModal();
 }
@@ -1282,6 +1289,10 @@ function readMachineEditor(profile) {
     if (!control) continue;
     if (NUMERIC_MACHINE_FIELDS.has(field)) next[field] = control.value === "" ? null : Number(control.value);
     else next[field] = control.value.trim();
+  }
+  if (elements.machineForm.dataset.cssUnitsChanged === "true" || $("confirmMachineCssUnits").checked) {
+    next.cssUnitsSource = "user";
+    next.cssUnitsNeedsReview = false;
   }
   next.updatedAt = new Date().toISOString();
   return normalizeMachineProfile(next);
@@ -7051,6 +7062,8 @@ function updateSpindleFeedReadout() {
   $("spindleLimitReadout").textContent = Number.isFinite(result.spindleLimit)
     ? `G50 S${number(result.spindleLimit)} · ${result.spindleRpmLimitMode === "css-only" ? "G96 only" : result.spindleRpmLimitMode === "both" ? "G96/G97" : "G97 effect unconfigured"}` : "G50 cap not set";
   const reasons = [...(result.reasons || [])];
+  const cssUnitsNeedsReview = !state.programDirty && result.spindleMode === "css" && currentMachineProfile()?.cssUnitsNeedsReview;
+  if (cssUnitsNeedsReview) reasons.unshift("Review G96 units in the machine definition. The previous release changed this saved profile to m/min without retaining whether you selected it. Choose the intended units or confirm the retained choice before calculating CSS RPM, feed per minute and timing.");
   if (state.feedReadoutMode !== "per-minute" && result.feedPerRevolutionReason) reasons.push(result.feedPerRevolutionReason);
   $("spindleFeedStatus").textContent = reasons.join(" ");
   $("spindleFeedStatus").hidden = reasons.length === 0;
@@ -7058,7 +7071,7 @@ function updateSpindleFeedReadout() {
     || (state.feedReadoutMode === "both" && !Number.isFinite(result.feedPerRevolution)));
   const readoutIssue = state.programDirty || !Number.isFinite(result.rpm) || unknownFeed;
   $("spindleFeedDetailsToggle").dataset.issue = String(readoutIssue);
-  $("spindleFeedDetailsToggle").textContent = state.programDirty ? "Plot required" : readoutIssue ? "Why unknown?" : "Details";
+  $("spindleFeedDetailsToggle").textContent = state.programDirty ? "Plot required" : cssUnitsNeedsReview ? "Review G96 units" : readoutIssue ? "Why unknown?" : "Details";
 }
 
 function updateTransport({scrollProgram = false} = {}) {
@@ -7581,6 +7594,9 @@ elements.toolLibraryAssign.addEventListener("click", () => {
   });
 });
 elements.machineForm.addEventListener("submit", saveMachineEditor);
+elements.machineForm.elements.namedItem("cssUnits").addEventListener("change", () => {
+  elements.machineForm.dataset.cssUnitsChanged = "true";
+});
 $("estimateHomeFromStroke").addEventListener("click", () => {
   const estimate = strokeSizedHomeEstimate(readMachineEditor(currentMachineProfile()));
   if (!estimate) {

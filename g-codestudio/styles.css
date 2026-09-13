@@ -584,6 +584,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .machine-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .machine-form-grid label { display: flex; min-width: 0; flex-direction: column; gap: 6px; color: var(--muted); font-size: 9px; font-weight: 750; letter-spacing: .04em; }
 .machine-form-grid label.wide { grid-column: 1 / -1; }
+#machineCssUnitsReview { grid-column: 1 / -1; color: var(--muted); font-size: 11px; line-height: 1.5; }
+#machineCssUnitsReview label { flex-direction: row; align-items: center; font-size: 11px; }
+#machineCssUnitsReview input { flex: 0 0 16px; width: 16px; height: 16px; padding: 0; }
 .machine-form-grid input, .machine-form-grid select, .machine-form-grid textarea { width: 100%; min-width: 0; color: var(--text); border: 1px solid var(--border); border-radius: 7px; outline: 0; background: #071012; font-size: 11px; }
 .machine-form-grid input, .machine-form-grid select { height: 34px; padding: 0 9px; }
 .machine-form-grid textarea { padding: 9px; resize: vertical; line-height: 1.45; }

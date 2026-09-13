@@ -1,5 +1,6 @@
 import {millSegmentLengthMm} from "./mill-gcode.mjs";
 import {programmedSpindleRpm} from "./spindle-feed.mjs";
+import {latheMotionGeometry, latheCssSeconds} from "./lathe-motion-time.mjs";
 
 const EPSILON = 1e-9;
 export const LEGACY_RAPID_RATE_IPM = 400;
@@ -59,14 +60,10 @@ function rapidTiming(segment, {xScale, rapidXMax, rapidYMax, rapidZMax, rapidCMa
   return {seconds: minutes * 60, assumed: assumedX || assumedZ, assumedX, assumedZ};
 }
 
-function cssRpm(segment, point, xScale) {
-  return programmedSpindleRpm(segment, point, xScale).rpm;
-}
-
 function cuttingTiming(segment, xScale) {
   if (segment.verificationBlocked || segment.liveToolBlocked) return null;
   // Compensated motion length and programmed CSS diameter are different
-  // curves. Their time integral is not modeled by the legacy point estimator.
+  // curves. A jointly parameterized time integral is not yet qualified.
   if (segment.programmedGeometry && segment.spindleMode === "css" && segment.feedMode === "per-revolution") return null;
   if (segment.threading) {
     const thread = segment.threading;
@@ -95,6 +92,28 @@ function cuttingTiming(segment, xScale) {
     if (!Number.isFinite(length)) return null;
     return {seconds: (length / unitScale) / segment.feed * 60, assumed: false};
   }
+  // Ordinary native turning lines/arcs use their analytic geometry. Other
+  // established live-tool paths retain their separate Cartesian path contract.
+  if (segment.coordinateMode !== "g112-face" && segment.machiningMode !== "mill") {
+    const curve = latheMotionGeometry(segment, xScale);
+    if (!curve) return null;
+    const feedMm = segment.feed * unitScale;
+    if (!(feedMm > 0) || !Number.isFinite(feedMm)) return null;
+    let seconds;
+    let assumed = false;
+    if (segment.feedMode === "per-minute") seconds = curve.length / feedMm * 60;
+    else if (segment.feedMode === "per-revolution" && segment.spindleRunning === true) {
+      if (segment.spindleMode === "css") {
+        seconds = latheCssSeconds(segment, curve, feedMm);
+        assumed = !(segment.spindleLimit > 0);
+      } else if (segment.spindleMode === "rpm") {
+        const rpm = programmedSpindleRpm(segment, segment.start, curve.scale).rpm;
+        if (!(rpm > 0)) return null;
+        seconds = curve.length / feedMm / rpm * 60;
+      }
+    }
+    return Number.isFinite(seconds) && seconds >= 0 ? {seconds, assumed} : null;
+  }
   let minutes = 0;
   let assumed = false;
   for (const piece of pathPieces(segment, xScale)) {
@@ -108,7 +127,7 @@ function cuttingTiming(segment, xScale) {
     if (segment.spindleMode === "rpm") rpm = programmedSpindleRpm(segment, segment.start, xScale).rpm;
     else if (segment.spindleMode === "css") {
       const midpoint = {x: (piece.before.x + piece.after.x) / 2, z: (piece.before.z + piece.after.z) / 2};
-      rpm = cssRpm(segment, midpoint, xScale);
+      rpm = programmedSpindleRpm(segment, midpoint, xScale).rpm;
       if (!(segment.spindleLimit > 0)) assumed = true;
     }
     if (!(rpm > 0)) return null;
