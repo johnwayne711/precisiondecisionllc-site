@@ -92,8 +92,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.23";
-const APP_BUILD = 125;
+const APP_VERSION = "v0.3.24";
+const APP_BUILD = 126;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -4181,29 +4181,36 @@ function rotarySectionSummary(stock) {
 }
 
 /**
- * Spindle angle for machine-frame display at the current playback position:
- * the commanded B of the last visible rotary-indexed segment, signed by the
- * profile's rotary sense (positive B counterclockwise from the free end
- * unless declared clockwise). Null when no rotary angle is known.
+ * Fixed spindle angle for machine-frame display. The part is drawn once, as
+ * it sits at the mid-range of the program's commanded rotary indexes (the
+ * cutting passes when there are any), with +X toward the turret; it does not
+ * turn during playback, the tool moves around it instead. The angle is
+ * signed by the profile's rotary sense (positive B counterclockwise from the
+ * free end unless declared clockwise).
  */
-function visibleSpindleRotation() {
-  const visible = state.parsed.segments.slice(0, state.visibleBlocks);
-  const segment = [...visible].reverse().find((candidate) => (
-    candidate?.coordinateMode === "rotary-indexed" && Number.isFinite(candidate.rotaryAngleDegrees)
-  ));
-  if (!segment) return {degrees: 0, known: false, senseKnown: true};
+function displaySpindleRotation() {
+  const segments = state.parsed.segments || [];
+  const rotary = segments.filter((segment) => segment?.coordinateMode === "rotary-indexed" && Number.isFinite(segment.rotaryAngleDegrees));
+  if (!rotary.length) return {degrees: 0, referenceB: null, known: false, senseKnown: true};
+  const cutting = rotary.filter((segment) => !isRapidMotion(segment));
+  const pool = cutting.length ? cutting : rotary;
+  const angles = pool.map((segment) => segment.rotaryAngleDegrees);
+  const referenceB = (Math.min(...angles) + Math.max(...angles)) / 2;
+  const sense = pool[0].rotarySense === -1 ? -1 : 1;
   return {
-    degrees: segment.rotaryAngleDegrees * (segment.rotarySense === -1 ? -1 : 1),
+    degrees: referenceB * sense,
+    referenceB,
     known: true,
-    senseKnown: segment.rotarySenseKnown === true,
+    senseKnown: pool.every((segment) => segment.rotarySenseKnown === true),
   };
 }
 
 function faceViewFrameOptions() {
-  const rotation = visibleSpindleRotation();
+  const rotation = displaySpindleRotation();
   const profile = currentMachineProfile();
   return {
     spindleRotationDegrees: rotation.degrees,
+    referenceB: rotation.referenceB,
     turretSide: profile?.turretSide === "front" ? "front" : (profile?.turretSide === "rear" ? "rear" : "unknown"),
     rotarySenseKnown: rotation.senseKnown,
   };
@@ -6930,7 +6937,8 @@ function drawFace(rect) {
       : "FACE VIEW · SIDE-MILL SECTION PARTIAL";
     const frame = faceViewFrameOptions();
     const frameNote = `${frame.turretSide === "unknown" ? " Turret side is not declared; drawn as a rear turret." : ""}${frame.rotarySenseKnown ? "" : " Positive B is assumed counterclockwise from the free end (right-hand rule); declare the rotary direction in Setup to confirm."}`;
-    faceCopy.textContent = `${sectionSummary.details.join(". ")}. The part is shown turned to the current B with the tool fixed on the turret side.${frameNote} Exact ray entries per pass at ${(360 / (stock.rotarySections.angleSamples || 3600)).toFixed(2)}°; holder, turret and drive engagement remain path-only.`;
+    const referenceLabel = Number.isFinite(frame.referenceB) ? ` The part is shown fixed as it sits at B${frame.referenceB.toFixed(2)} (mid-range of the indexes) with +X toward the turret; the tool moves around it.` : "";
+    faceCopy.textContent = `${sectionSummary.details.join(". ")}.${referenceLabel}${frameNote} Exact ray entries per pass at ${(360 / (stock.rotarySections.angleSamples || 3600)).toFixed(2)}°; holder, turret and drive engagement remain path-only.`;
   } else if (liveSummary.status === LIVE_STOCK_STATUS.MODELED) {
     faceHeading.textContent = "FACE VIEW · AXIAL BORE MODELED";
     faceCopy.textContent = `${liveSummary.label}. Circle diameter and depth come from the assigned cutter and exact plunge; holder and collision remain path-only.`;
