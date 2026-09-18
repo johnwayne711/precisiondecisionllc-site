@@ -141,7 +141,7 @@ export function renderLiveFace2d(context, {
   cutterRadius = 0,
   cutterCenter = null,
   spindleRotationDegrees = 0,
-  referenceB = null,
+  commandedB = null,
   turretSide = "rear",
   rotarySenseKnown = true,
   lengthScale = 1,
@@ -280,8 +280,8 @@ export function renderLiveFace2d(context, {
   // free end. A front turret puts +X on the left and +Y down.
   const front = turretSide === "front";
   const turretLabel = turretSide === "rear" ? "TURRET REAR" : front ? "TURRET FRONT" : "TURRET SIDE UNKNOWN · DRAWN AS REAR";
-  const rotationLabel = Number.isFinite(referenceB)
-    ? ` · PART FIXED AT B${referenceB.toFixed(2)}${rotarySenseKnown ? "" : " (+B: CUTTER WALKS CW, ASSUMED)"}`
+  const rotationLabel = Number.isFinite(commandedB)
+    ? ` · SPINDLE AT B${commandedB.toFixed(2)} · TOOL FIXED${rotarySenseKnown ? "" : " (+B CCW ASSUMED)"}`
     : "";
   context.fillStyle = "rgba(180, 205, 208, .76)";
   context.font = '9px "Cascadia Code", Consolas, monospace';

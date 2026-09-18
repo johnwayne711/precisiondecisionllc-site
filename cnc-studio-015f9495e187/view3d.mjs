@@ -969,12 +969,36 @@ export function toolpathStyleForSegment(segment, {pending = false} = {}) {
   };
 }
 
-function drawToolpaths(context, segments, visibleCount, xScale, orientationSign, project) {
+/**
+ * A segment is part-frame geometry when its points carry a spindle angle (a
+ * rotary-indexed or C-axis move) or programmed face coordinates: it turns
+ * with the spindle in the machine picture. Every other segment is the fixed
+ * tool's own motion and stays on the turret side.
+ */
+export function segmentPartFrame(segment) {
+  if (segment?.coordinateMode === "g112-face") return true;
+  const points = Array.isArray(segment?.points) && segment.points.length
+    ? segment.points
+    : [segment?.start, segment?.end].filter(Boolean);
+  return points.some((point) => typeof point?.c === "number" && Number.isFinite(point.c));
+}
+
+function frameProjectors(projectorsOrProject) {
+  if (typeof projectorsOrProject === "function") return {machine: projectorsOrProject, part: projectorsOrProject};
+  return projectorsOrProject;
+}
+
+function segmentProjector(segment, projectors) {
+  return segmentPartFrame(segment) ? projectors.part : projectors.machine;
+}
+
+function drawToolpaths(context, segments, visibleCount, xScale, orientationSign, projectorsOrProject) {
+  const projectors = frameProjectors(projectorsOrProject);
   for (const segment of segments) {
     drawPolyline(
       context,
       segmentWorldPoints(segment, xScale, orientationSign),
-      project,
+      segmentProjector(segment, projectors),
       toolpathStyleForSegment(segment, {pending: true}),
     );
   }
@@ -982,19 +1006,20 @@ function drawToolpaths(context, segments, visibleCount, xScale, orientationSign,
     drawPolyline(
       context,
       segmentWorldPoints(segment, xScale, orientationSign),
-      project,
+      segmentProjector(segment, projectors),
       toolpathStyleForSegment(segment),
     );
   }
-  drawCurrentMarker(context, segments, visibleCount, xScale, orientationSign, project);
+  drawCurrentMarker(context, segments, visibleCount, xScale, orientationSign, projectors);
 }
 
-function drawCurrentMarker(context, segments, visibleCount, xScale, orientationSign, project) {
+function drawCurrentMarker(context, segments, visibleCount, xScale, orientationSign, projectorsOrProject) {
   if (!visibleCount) return;
+  const projectors = frameProjectors(projectorsOrProject);
   const finalSegment = segments[Math.min(visibleCount, segments.length) - 1];
   const point = segmentWorldPoints(finalSegment, xScale, orientationSign).at(-1);
   if (!point) return;
-  const marker = project(point);
+  const marker = segmentProjector(finalSegment, projectors)(point);
   context.fillStyle = "#ffffff";
   context.shadowColor = "#56e39f";
   context.shadowBlur = 10;
@@ -1010,11 +1035,12 @@ function drawCurrentMarker(context, segments, visibleCount, xScale, orientationS
  * the remaining surface paints after that surface and a pass still inside
  * the material stays hidden behind it.
  */
-function toolpathPrimitives(segments, visibleCount, xScale, orientationSign, project) {
+function toolpathPrimitives(segments, visibleCount, xScale, orientationSign, projectorsOrProject) {
+  const projectors = frameProjectors(projectorsOrProject);
   const primitives = [];
   const add = (segment, pending) => {
     const style = toolpathStyleForSegment(segment, {pending});
-    const screen = segmentWorldPoints(segment, xScale, orientationSign).map(project);
+    const screen = segmentWorldPoints(segment, xScale, orientationSign).map(segmentProjector(segment, projectors));
     for (let index = 1; index < screen.length; index += 1) {
       const a = screen[index - 1];
       const b = screen[index];
@@ -1246,9 +1272,10 @@ function spindleRotatedProjector(project, spindleRotationDegrees, orientationSig
 }
 
 /**
- * Part-frame display rotation: the program's fixed spindle angle plus the
- * half turn that puts a declared front turret on the operator's side, the
- * same frame the Face view uses (D-057).
+ * Part-frame display rotation: the spindle's current commanded angle plus the
+ * half turn of a declared front turret. The spindle positions the part on
+ * each B block while the tool stays on the turret side, so the part-frame
+ * picture turns during playback.
  */
 export function machinePictureRotation(spindleRotationDegrees = 0, turretSide = "rear") {
   return (Number(spindleRotationDegrees) || 0) + (turretSide === "front" ? 180 : 0);
@@ -1261,6 +1288,7 @@ export function renderLathe3d(context, {
   spindleRotationDegrees = 0,
   turretSide = "rear",
   toolBodies = null,
+  toolBodiesFrame = "part",
   toolBodiesLabel = null,
   toolBodiesNotice = null,
   transparent = true,
@@ -1282,14 +1310,18 @@ export function renderLathe3d(context, {
   // fixed quarter turn about the spindle axis maps them into that picture.
   const machineProject = (point) => scene.project({x: point.x, y: point.z, z: -point.y});
   const partProject = spindleRotatedProjector(machineProject, machinePictureRotation(spindleRotationDegrees, turretSide), orientationSign);
+  // Part-frame geometry (stock features, live paths) turns with the spindle;
+  // the fixed tool's own motion and a turning tool stay on the turret side.
+  const projectors = {machine: machineProject, part: partProject};
+  const toolProject = toolBodiesFrame === "machine" ? machineProject : partProject;
   const bodies = Array.isArray(toolBodies) ? toolBodies : [];
   const shownCount = Math.min(visibleCount, segments.length);
   drawAxes(context, machineProject, scene.bounds, stock?.radius);
   if (transparent) {
     drawStockSurface(context, stock, orientationSign, partProject, camera, quality);
     drawAxialBores(context, stock, orientationSign, partProject, quality);
-    if (showToolpaths) drawToolpaths(context, segments, shownCount, xScale, orientationSign, partProject);
-    if (bodies.length) drawToolBodiesTransparent(context, bodies, partProject, scene.scale);
+    if (showToolpaths) drawToolpaths(context, segments, shownCount, xScale, orientationSign, projectors);
+    if (bodies.length) drawToolBodiesTransparent(context, bodies, toolProject, scene.scale);
   } else {
     // Solid picture: every surface, bore, toolpath piece and tool-body piece
     // takes part in one painter's sort so nearer material hides what is
@@ -1301,12 +1333,12 @@ export function renderLathe3d(context, {
     if (stockResult.error) drawStockBlocked(context, stockResult.error);
     const primitives = stockResult.facets.map((facet) => ({kind: "facet", screen: facet.screen, depth: facet.depth, light: facet.light}));
     primitives.push(...axialBorePrimitives(stock, orientationSign, partProject, quality));
-    if (showToolpaths) primitives.push(...toolpathPrimitives(segments, shownCount, xScale, orientationSign, partProject));
-    if (bodies.length) primitives.push(...toolBodyPrimitives(bodies, partProject, scene.scale, {cell}));
+    if (showToolpaths) primitives.push(...toolpathPrimitives(segments, shownCount, xScale, orientationSign, projectors));
+    if (bodies.length) primitives.push(...toolBodyPrimitives(bodies, toolProject, scene.scale, {cell}));
     primitives.sort((a, b) => a.depth - b.depth);
     paintSolidPrimitives(context, primitives);
     for (const points of stockResult.outlines) drawPolyline(context, points, partProject, {color: "#7ce5dc", width: 1, alpha: 0.7});
-    if (showToolpaths) drawCurrentMarker(context, segments, shownCount, xScale, orientationSign, partProject);
+    if (showToolpaths) drawCurrentMarker(context, segments, shownCount, xScale, orientationSign, projectors);
   }
 
   context.font = '9px "Cascadia Code", Consolas, monospace';

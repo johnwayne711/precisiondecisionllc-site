@@ -97,8 +97,8 @@ import {
 import {buildToolBodies3d} from "./tool-bodies-3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.29";
-const APP_BUILD = 131;
+const APP_VERSION = "v0.3.30";
+const APP_BUILD = 132;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -4198,36 +4198,34 @@ function rotarySectionSummary(stock) {
 }
 
 /**
- * Fixed spindle angle for machine-frame display. The part is drawn once, as
- * it sits at the mid-range of the program's commanded rotary indexes (the
- * cutting passes when there are any), with +X toward the turret; it does not
- * turn during playback, the tool moves around it instead. The angle is
- * signed by the profile's rotary sense (positive B counterclockwise from the
- * free end unless declared clockwise).
+ * Spindle angle for the machine picture at the current playback position.
+ * The main spindle positions the part on each B block (owner's coworker,
+ * 2026-09-18) while the live tool stays on the turret side, so the part-frame
+ * geometry turns by the commanded B of the last visible rotary-indexed
+ * segment: before the first index the part sits at B0, after the last it
+ * stays at that index. The angle is signed by the profile's rotary sense
+ * (positive B counterclockwise from the free end unless declared clockwise).
  */
-function displaySpindleRotation() {
-  const segments = state.parsed.segments || [];
-  const rotary = segments.filter((segment) => segment?.coordinateMode === "rotary-indexed" && Number.isFinite(segment.rotaryAngleDegrees));
-  if (!rotary.length) return {degrees: 0, referenceB: null, known: false, senseKnown: true};
-  const cutting = rotary.filter((segment) => !isRapidMotion(segment));
-  const pool = cutting.length ? cutting : rotary;
-  const angles = pool.map((segment) => segment.rotaryAngleDegrees);
-  const referenceB = (Math.min(...angles) + Math.max(...angles)) / 2;
-  const sense = pool[0].rotarySense === -1 ? -1 : 1;
+function visibleSpindleRotation() {
+  const visible = state.parsed.segments.slice(0, state.visibleBlocks);
+  const segment = [...visible].reverse().find((candidate) => (
+    candidate?.coordinateMode === "rotary-indexed" && Number.isFinite(candidate.rotaryAngleDegrees)
+  ));
+  if (!segment) return {degrees: 0, commandedB: null, known: false, senseKnown: true};
   return {
-    degrees: referenceB * sense,
-    referenceB,
+    degrees: segment.rotaryAngleDegrees * (segment.rotarySense === -1 ? -1 : 1),
+    commandedB: segment.rotaryAngleDegrees,
     known: true,
-    senseKnown: pool.every((segment) => segment.rotarySenseKnown === true),
+    senseKnown: segment.rotarySenseKnown === true,
   };
 }
 
 function faceViewFrameOptions() {
-  const rotation = displaySpindleRotation();
+  const rotation = visibleSpindleRotation();
   const profile = currentMachineProfile();
   return {
     spindleRotationDegrees: rotation.degrees,
-    referenceB: rotation.referenceB,
+    commandedB: rotation.commandedB,
     turretSide: profile?.turretSide === "front" ? "front" : (profile?.turretSide === "rear" ? "rear" : "unknown"),
     rotarySenseKnown: rotation.senseKnown,
   };
@@ -6615,7 +6613,12 @@ function toolBodies3dForDisplay({interactive = false} = {}) {
   const point = count > 0 ? segment?.end : segment?.start;
   const faceCoordinates = segment?.coordinateMode === "g112-face";
   const tangent = Number.isFinite(Number(point?.y)) ? Number(point.y) : 0;
-  const spindleAngleDegrees = !faceCoordinates && Number.isFinite(Number(point?.c)) ? Number(point.c) : 0;
+  const rotaryPoint = Number.isFinite(Number(point?.c));
+  const spindleAngleDegrees = !faceCoordinates && rotaryPoint ? Number(point.c) : 0;
+  // A live cutter is placed in the part frame (its part-frame angle plus the
+  // spindle rotation lands it on the turret side); a turning tool is
+  // machine-frame motion and must not turn with the part.
+  const frame = faceCoordinates || rotaryPoint ? "part" : "machine";
   const profile = currentMachineProfile();
   // Profile lengths are stored in the machine's units; the 3D bodies are mm.
   const profileLengthMm = (field) => {
@@ -6638,6 +6641,7 @@ function toolBodies3dForDisplay({interactive = false} = {}) {
     : `${built.turretStations}-STATION TURRET Ø${Math.round(turret.diameterMm)} × ${Math.round(turret.thicknessMm)} mm FROM PROFILE`;
   return {
     bodies: built.bodies,
+    frame,
     label: `${display.toolKey} · ${turretLabel}`,
     notice: turret?.nominal
       ? "TOOL · HOLDER · TURRET ARE ILLUSTRATIVE · NOT DIMENSIONAL · NO CLEARANCE CLAIM"
@@ -7600,6 +7604,7 @@ function draw3d(rect) {
     spindleRotationDegrees: frame.spindleRotationDegrees,
     turretSide: frame.turretSide,
     toolBodies: toolDisplay?.bodies || null,
+    toolBodiesFrame: toolDisplay?.frame || "part",
     toolBodiesLabel: toolDisplay?.label || null,
     toolBodiesNotice: toolDisplay?.notice || null,
     transparent: elements.transparencyToggle ? elements.transparencyToggle.checked : true,
@@ -7647,9 +7652,11 @@ function drawFace(rect) {
       ? "FACE VIEW · SIDE-MILL SECTION MODELED"
       : "FACE VIEW · SIDE-MILL SECTION PARTIAL";
     const frame = faceViewFrameOptions();
-    const frameNote = `${frame.turretSide === "unknown" ? " Turret side is not declared; drawn as a rear turret." : ""}${frame.rotarySenseKnown ? "" : " For +B the cutter is assumed to walk clockwise around the part (right-hand rule); set the direction in Setup to confirm."}`;
-    const referenceLabel = Number.isFinite(frame.referenceB) ? ` The part is shown fixed as it sits at B${frame.referenceB.toFixed(2)} (mid-range of the indexes) with +X toward the turret; the tool moves around it.` : "";
-    faceCopy.textContent = `${sectionSummary.details.join(". ")}.${referenceLabel}${frameNote} Exact ray entries per pass at ${(360 / (stock.rotarySections.angleSamples || 3600)).toFixed(2)}°; holder, turret and drive engagement remain path-only.`;
+    const frameNote = `${frame.turretSide === "unknown" ? " Turret side is not declared; drawn as a rear turret." : ""}${frame.rotarySenseKnown ? "" : " Positive B is assumed to turn the spindle counterclockwise as seen from the free end (right-hand rule about +Z); declare the direction in Setup to confirm."}`;
+    const positionLabel = Number.isFinite(frame.commandedB)
+      ? ` The spindle positions the part on each B block (now at B${frame.commandedB.toFixed(2)}); the tool stays fixed on the turret side.`
+      : " The spindle positions the part on each B block; the tool stays fixed on the turret side.";
+    faceCopy.textContent = `${sectionSummary.details.join(". ")}.${positionLabel}${frameNote} Exact ray entries per pass at ${(360 / (stock.rotarySections.angleSamples || 3600)).toFixed(2)}°; holder, turret and drive engagement remain path-only.`;
   } else if (liveSummary.status === LIVE_STOCK_STATUS.MODELED) {
     faceHeading.textContent = "FACE VIEW · AXIAL BORE MODELED";
     faceCopy.textContent = `${liveSummary.label}. Circle diameter and depth come from the assigned cutter and exact plunge; holder and collision remain path-only.`;
@@ -8063,7 +8070,7 @@ function updateStats() {
       info: true,
       requiresAttention: true,
       code: "rotary-sense-assumed",
-      message: "For +B the cutter is assumed to walk clockwise around the part as seen from the free end (the part or spindle turning counterclockwise, right-hand rule about +Z). If on your machine the cutter walks the other way, set it in Setup → Live tool, rotary & extra axes; the flat's dimensions do not change, only which way the passes are laid out.",
+      message: "Positive B is assumed to turn the spindle counterclockwise as seen from the free end (right-hand rule about +Z). If your machine turns the other way, declare it in Setup → Live tool, rotary & extra axes; the flat's dimensions do not change, only which way the part is shown turning.",
     });
   }
   if (analyzedSectionSummary.airOnly) {
