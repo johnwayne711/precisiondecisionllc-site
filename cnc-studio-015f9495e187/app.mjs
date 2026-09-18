@@ -45,9 +45,10 @@ import {graphicsQualityPreset, renderGraphicsQualityPreset} from "./graphics-qua
 import {createFrameScheduler} from "./render-scheduler.mjs";
 import {
   buildToolAssembly2d, buildToolAssemblyDisplay2d, DEFAULT_TOOL_ASSEMBLY_2D, listSelectableToolAssemblies2d,
-  resolveAssignableToolAssembly2d, TOOL_ASSEMBLY_2D_STATUS, toolAssembly2dById,
+  registerDeclaredCutterAssemblies, resolveAssignableToolAssembly2d, TOOL_ASSEMBLY_2D_STATUS, toolAssembly2dById,
   toolPhysicalReferencePointForExecution,
 } from "./tool-assembly.mjs";
+import {normalizeDeclaredCutters, validateDeclaredCutter} from "./declared-cutters.mjs";
 import {
   TOOL_LIBRARY_CATALOG, catalogDiamondInsertOutline2d, listToolLibraryAssemblies,
   toolLibraryAssemblyById, toolLibraryAssemblyDetail,
@@ -55,6 +56,8 @@ import {
 import {LIVE_TOOL_LIBRARY_CATALOG, listLiveToolLibraryRecords} from "./live-tool-library.mjs";
 import {renderLiveFace2d} from "./live-view.mjs";
 import {buildAxialFlatBoreStock, LIVE_STOCK_STATUS, summarizeAxialFlatBoreStock} from "./live-stock.mjs";
+import {buildRotarySectionStock, ROTARY_SECTION_STATUS, summarizeRotarySectionStock} from "./live-section-stock.mjs";
+import {liveFacePoint} from "./live-view.mjs";
 import {
   MILLING_TOOL_LIBRARY_CATALOG, listMillingToolLibraryRecords, millingToolLibraryRecordById,
 } from "./milling-tool-library.mjs";
@@ -89,8 +92,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.19";
-const APP_BUILD = 121;
+const APP_VERSION = "v0.3.21";
+const APP_BUILD = 123;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -159,6 +162,71 @@ M155
 M30
 %`;
 
+// Owner-sourced Hardinge Conquest T42 / Fanuc 18-T live-tool syntax with
+// synthetic numbers: a 0.030 in flat on a 0.750 in bar from nine radial
+// passes of an axial 0.250 in square end mill indexed 5 degrees apart.
+// Every X keeps the cutter tangent to the plane 0.345 in from the axis:
+// X = 2 * (0.345 + 0.125) / cos(B - 90).
+const liveFlatSampleProgram = `%
+O1101 (G-CODE STUDIO SAMPLE - HARDINGE ROTARY-INDEXED SIDE-MILL FLAT)
+(OWNER-SOURCED FANUC 18-T LIVE-TOOL SYNTAX - AXIAL .250 SQUARE END MILL)
+(FLAT .030 DEEP ON .750 BAR - 9 PASSES AT 5 DEG - OUTER PAIR CLEARS BAR - Z0 TO Z-.250)
+G30 U0 W0
+G54
+T1111
+G98
+G50 S2000
+G00 X1.05 Z1.0
+B110.
+Z0.1
+G97 S2500 M54
+G01 Z-.25 F15.
+X1.0003 F4.
+X1.02 F50.
+G00 B105.
+G01 X.9732 F4.
+X1.02 F50.
+G00 B100.
+G01 X.9545 F4.
+X1.02 F50.
+G00 B95.
+G01 X.9436 F4.
+X1.02 F50.
+G00 B90.
+G01 X.940 F4.
+X1.02 F50.
+G00 B85.
+G01 X.9436 F4.
+X1.02 F50.
+G00 B80.
+G01 X.9545 F4.
+X1.02 F50.
+G00 B75.
+G01 X.9732 F4.
+X1.02 F50.
+G00 B70.
+G01 X1.0003 F4.
+X1.05 F50.
+G00 Z1.0
+M55
+G30 U0 W0 T0
+M30
+%`;
+
+const LIVE_FLAT_SAMPLE_CUTTER = Object.freeze({
+  id: "declared-cutter:sample-flat-square-end-mill",
+  revision: 1,
+  name: "Sample .250 4FL square end mill",
+  units: "inch",
+  cutterDiameter: 0.25,
+  lengthOfCut: 0.75,
+  shankDiameter: 0.25,
+  overallLength: 2.5,
+  flutes: 4,
+  centerCutting: true,
+  declaredAt: "2026-09-17T00:00:00.000Z",
+});
+
 const millSampleProgram = `%
 O1001 (G-CODE STUDIO 3-AXIS MILL PATH SAMPLE)
 G17 G20 G40 G49 G80 G90 G91.1 G94
@@ -189,6 +257,7 @@ function isExactBundledSample(source, bundledOrigin = false) {
     || isExactBundledProgram(source, stepSampleProgram, bundledOrigin)
     || isExactBundledProgram(source, dxfSampleProgram, bundledOrigin)
     || isExactBundledProgram(source, liveBoreSampleProgram, bundledOrigin)
+    || isExactBundledProgram(source, liveFlatSampleProgram, bundledOrigin)
     || isExactBundledProgram(source, millSampleProgram, bundledOrigin);
 }
 
@@ -212,6 +281,23 @@ const DEFAULT_MACHINE_PROFILES = [
     liveToolMaxRpm: null, haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown", liveToolEvidence: "",
     toolChangeX: 0, toolChangeZ: 0, safeIndexX: 0, safeIndexZ: 0, turretStations: 12,
     notes: "BEST-EFFORT DRAFT — NOT VERIFIED. Travel and rapid estimates come from Hardinge T-Series brochure 1312-1E; applicability to this older Conquest is unconfirmed. The 12-station turret is a guess from the 10/12-station options in Conquest parts list PL-60A. Assumes machine reference X0/Z0, negative machine travel, diameter-mode plotted home X12.74/Z16, and independent-axis rapid motion. Check every value at the machine before relying on it.",
+    updatedAt: null,
+  },
+  {
+    // Same draft machine facts as the Hardinge template plus the owner-sourced
+    // Fanuc 18-T live-tool dialect. Kept separate so generic-style programs on
+    // the plain Hardinge profile keep their G90/G91/G94/G95 meanings.
+    id: "hardinge-t42-live-tool-syntax", name: "Hardinge Conquest T42 · Fanuc 18-T live tool (owner-sourced)", manufacturer: "Hardinge",
+    model: "Conquest T42", serialNumber: "", controlMake: "GE Fanuc", controlModel: "18-T",
+    status: "draft", templateRevision: 1, units: "inch", xProgramming: "diameter", orientation: "left",
+    xTravelMin: -6.37, xTravelMax: 0, zTravelMin: -16, zTravelMax: 0, homeX: 0, homeZ: 0,
+    startMode: "home", startX: 12.74, startZ: 16, rapidBehavior: "dogleg", rapidXMax: 945, rapidZMax: 1200,
+    liveToolDialect: "hardinge-conquest-fanuc-18t", liveToolCapability: "equipped", cAxisCapability: "available",
+    yAxisCapability: "unknown", cAxisEngagement: "automatic", rapidYMax: null, rapidCMax: null,
+    liveToolMaxRpm: null, haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown",
+    liveToolEvidence: "Owner program N1101 (OPERATION - 9), 2026-09-17: M54 (LIVE TOOL ON COOLANT ON), M55 (LIVE TOOL OFF COOLANT OFF), absolute B spindle index in degrees, G30 U0 W0 home, G98 inch/min, G97 S with M54 as live RPM. No Hardinge programming manual retained.",
+    toolChangeX: 0, toolChangeZ: 0, safeIndexX: 0, safeIndexZ: 0, turretStations: 12,
+    notes: "DRAFT LIVE-TOOL SYNTAX PROFILE — NOT VERIFIED. Machine facts repeat the Hardinge Conquest T42 draft (brochure 1312-1E estimates, parts list PL-60A turret guess, plotted home X12.74/Z16). Live-tool syntax is owner-program-sourced: M54/M55 live tool on/off (post reports coolant with them), absolute B spindle index in degrees, S routed to the live spindle with M54 or while it runs, G30 U0 W0 second-reference return, Fanuc G-code system A (G98/G99 feed modes; G90/G92/G94 are turning cycles). Automatic spindle positioning-mode engagement on a B word is assumed and disclosed per program. Live-tool RPM limit and B rapid rate are unknown. Check every value at the machine before relying on it.",
     updatedAt: null,
   },
   {
@@ -379,7 +465,7 @@ const state = {
   componentGeometry: [], geometryHover: null, geometrySelection: null,
   dimensions: [], dimensionMode: false,
   showTool2d: false,
-  toolAssignments: {}, toolAssignmentRevision: 0, toolAssignmentScope: null,
+  toolAssignments: {}, toolAssignmentRevision: 0, toolAssignmentScope: null, declaredCutters: [],
   toolAssignmentDocumentIdentity: null, programEditOrigin: null, bundledSample: false,
   programIdentity: createProgramIdentity(sampleProgram, {fileName: "sample-g71-rough.nc", origin: "sample"}),
   bundledStepReference: false,
@@ -553,7 +639,7 @@ function programLanguageContext() {
   const profile = currentMachineProfile();
   return {
     machineType: isMillMode() ? "mill" : "lathe",
-    dialect: profile?.liveToolDialect === "haas-lathe-ngc" ? "haas-lathe-ngc" : "generic",
+    dialect: ["haas-lathe-ngc", "hardinge-conquest-fanuc-18t"].includes(profile?.liveToolDialect) ? profile.liveToolDialect : "generic",
     spindleGearContract: sl75SpindleGearContract(profile),
     optionalStopEnabled: elements.optionalStop.checked,
   };
@@ -1056,6 +1142,7 @@ function persistSession() {
     programIdentity: state.programIdentity,
     program: elements.input.value,
     toolAssignments: toolAssignmentsForPersistence(state.toolAssignments),
+    declaredCutters: state.declaredCutters,
     latheControllerSettings: state.latheControllerSettings || null,
     toolAssignmentScope: state.toolAssignmentScope,
     bundledSample: isExactBundledSample(elements.input.value, state.bundledSample),
@@ -1085,12 +1172,14 @@ function restoreSession(saved) {
     state.programIdentity = restoredProgramIdentity(saved.program, saved, {
       "sample-g71-rough.nc": sampleProgram, "sample-g71-solid-match.nc": stepSampleProgram,
       "sample-g71-dxf-match.nc": dxfSampleProgram, "sample-live-bore.nc": liveBoreSampleProgram,
-      "sample-3-axis-mill.nc": millSampleProgram,
+      "sample-live-flat.nc": liveFlatSampleProgram, "sample-3-axis-mill.nc": millSampleProgram,
     });
     renderProgramIdentity();
     state.bundledSample = isExactBundledSample(saved.program, saved.bundledSample === true);
     state.bundledStepReference = saved.bundledStepReference === true
       && isExactBundledProgram(saved.program, stepSampleProgram, state.bundledSample);
+    state.declaredCutters = normalizeDeclaredCutters(saved.declaredCutters);
+    registerDeclaredCutterAssemblies(state.declaredCutters);
     if (saved.toolAssignments && typeof saved.toolAssignments === "object" && !Array.isArray(saved.toolAssignments)) {
       state.toolAssignments = Object.fromEntries(Object.entries(saved.toolAssignments).filter(([key, assignment]) => (
         /^T[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/i.test(key)
@@ -1401,6 +1490,43 @@ function loadLiveBoreSample() {
   updateTransport({scrollProgram: true});
   fitView();
   elements.status.textContent = "Axial live-tool bore demo · final stock shown";
+  persistSession();
+}
+
+function loadLiveFlatSample() {
+  elements.machineMode.value = "lathe";
+  applyMachineModeUi();
+  const machineId = "hardinge-t42-live-tool-syntax";
+  if ([...elements.machine.options].some((option) => option.value === machineId)) elements.machine.value = machineId;
+  elements.orientation.value = "left";
+  elements.xMode.value = "diameter";
+  elements.programUnits.value = "machine";
+  applyDisplayUnits("inch");
+  $("stockPilotBore").value = "0";
+  elements.stockDiameter.value = "0.75";
+  elements.stockLength.value = "2.50";
+  elements.stockGripLength.value = "0.50";
+  elements.stockStickout.value = "2.00";
+  elements.stockFrontZ.value = "0";
+  elements.chuckFaceZ.value = "-2.00";
+  elements.jawDiameter.value = "2.75";
+  elements.clearance.value = "0.12";
+  elements.stockToggle.checked = true;
+  elements.toolpathToggle.checked = true;
+  restoreStockSetupFromLegacyControls();
+  refreshUnitUi();
+  updateProgramUnitsHint(currentMachineProfile());
+  if (!state.declaredCutters.some((record) => record.id === LIVE_FLAT_SAMPLE_CUTTER.id)) {
+    state.declaredCutters = [...state.declaredCutters, LIVE_FLAT_SAMPLE_CUTTER];
+  }
+  registerDeclaredCutterAssemblies(state.declaredCutters);
+  loadProgram("sample-live-flat.nc", liveFlatSampleProgram, {bundledSample: true});
+  state.programLine = state.parsed.sourceLines || programLineCount();
+  state.visibleBlocks = state.parsed.segments.length;
+  setGraphicsDimension("face");
+  updateTransport({scrollProgram: true});
+  fitView();
+  elements.status.textContent = "Rotary-indexed side-milling flat demo · final section shown";
   persistSession();
 }
 
@@ -3821,6 +3947,28 @@ function updateStockRemovedStatus(stock, fallback = null) {
     output.title = `${liveSummary.label}. Turning and live-bore percentages are reported separately against the original cylindrical stock; no cutter-holder collision claim is included.`;
     return;
   }
+  const sectionSummary = rotarySectionSummary(stock);
+  if (sectionSummary.airOnly) {
+    output.textContent = `${removed} TURN · LIVE CUTS CLEAR OF STOCK`;
+    output.className = "warning-value";
+    output.title = `${sectionSummary.label}. ${sectionSummary.details.join(" ")}`;
+    return;
+  }
+  if (sectionSummary.status === ROTARY_SECTION_STATUS.NONE && hasLiveToolCut()
+    && state.parsed.segments.some((segment) => segment.coordinateMode === "rotary-indexed" && !isRapidMotion(segment))) {
+    output.textContent = `${removed} · LIVE PENDING`;
+    output.className = "warning-value";
+    output.title = "Rotary-indexed live cuts have not executed yet at this playback position; step forward or play to the cuts for the side-milling section result.";
+    return;
+  }
+  if (sectionSummary.status === ROTARY_SECTION_STATUS.MODELED || sectionSummary.status === ROTARY_SECTION_STATUS.PARTIAL) {
+    const sectionPercent = `≈${Math.max(0, Number(stock.sectionRemovedPercent) || 0).toFixed(2)}%`;
+    const partial = sectionSummary.status === ROTARY_SECTION_STATUS.PARTIAL;
+    output.textContent = `${removed} TURN · ${sectionPercent} LIVE SIDE MILL${partial ? " · PARTIAL" : ""}`;
+    output.className = partial || sectionSummary.collisionFlags ? "warning-value" : "live-value";
+    output.title = `${sectionSummary.label}. ${sectionSummary.details.join(" ")} Side-milling volume is integrated from the sampled section (≈) and reported separately from turning; cutter/holder/turret clearance is not claimed.${sectionSummary.collisionFlags ? ` ${sectionSummary.collisionFlags} rapid or index move passes through remaining stock.` : ""}`;
+    return;
+  }
   if (hasLiveToolCut() || liveSummary.status === LIVE_STOCK_STATUS.PATH_ONLY) {
     output.textContent = `${removed} · PATH ONLY`;
     output.className = "warning-value";
@@ -4001,13 +4149,41 @@ function stockWithLiveBores(stock, visibleCount, visibleSourceLine = state.progr
     unresolvedOperations: state.parsed.liveToolAttempts || [],
     visibleSourceLine,
   });
+  const rotarySections = buildRotarySectionStock(state.parsed.segments, {
+    stock,
+    visibleCount,
+    cutterResolver: resolvedCuttingModel,
+    xScale: xScale(),
+  });
   const initialVolume = Math.PI * stock.radius * stock.radius * stock.length;
   return {
     ...stock,
     axialBores: liveStock.axialBores,
     liveStock,
     liveRemovedPercent: initialVolume > 0 ? liveStock.removedVolume / initialVolume * 100 : 0,
+    rotarySections,
+    sectionRemovedPercent: initialVolume > 0 ? rotarySections.removedVolume / initialVolume * 100 : 0,
   };
+}
+
+function rotarySectionSummary(stock) {
+  return summarizeRotarySectionStock(stock?.rotarySections, {
+    lengthScale: unitScale(),
+    lengthUnit: unitName(),
+    lengthDecimals: elements.displayUnits.value === "inch" ? 4 : 3,
+  });
+}
+
+/** Face-plane centre of the live cutter at the last visible live segment. */
+function visibleLiveCutterState(stock) {
+  const visible = state.parsed.segments.slice(0, state.visibleBlocks);
+  const segment = [...visible].reverse().find((candidate) => candidate?.coordinateMode === "rotary-indexed");
+  if (!segment) return null;
+  const model = resolvedCuttingModel(segment.toolKey);
+  const radius = Number(model?.diameter) > 0 ? Number(model.diameter) / 2 : 0;
+  const center = liveFacePoint(segment, segment.end, xScale());
+  void stock;
+  return {radius, center};
 }
 
 function stockProfileFor(
@@ -4211,7 +4387,31 @@ function drawKeepout() {
   ctx.setLineDash([]);
 }
 
+function drawRotarySectionMarkers2d(stock) {
+  const feature = stock?.rotarySections?.feature;
+  if (!feature || !(feature.planeDistance > 0)) return;
+  const radius = feature.planeDistance / xScale();
+  const a = worldToScreen({z: feature.zTip, x: radius});
+  const b = worldToScreen({z: feature.zTop, x: radius});
+  ctx.save();
+  ctx.strokeStyle = "#7ce5dc";
+  ctx.lineWidth = 1.2;
+  ctx.setLineDash([6, 3]);
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(180, 229, 226, .9)";
+  ctx.font = '9px "Cascadia Code", Consolas, monospace';
+  const decimals = elements.displayUnits.value === "inch" ? 4 : 3;
+  ctx.fillText(`SIDE-MILL FLAT R${formatDistance(feature.planeDistance, decimals)} @ B${feature.normalAngleDegrees.toFixed(1)} (${formatDistance(feature.depthBelowOd, decimals)} deep)`,
+    Math.min(a.x, b.x), Math.min(a.y, b.y) - 6);
+  ctx.restore();
+}
+
 function drawAxialBoreSections2d(stock) {
+  drawRotarySectionMarkers2d(stock);
   for (const bore of stock?.axialBores || []) {
     const offset = Math.abs(Number(bore.centerY) || 0);
     const radius = Number(bore.radius) || 0;
@@ -4587,6 +4787,54 @@ function toolChoiceLabel(definition) {
   return `${definition.name} · ${status} · ${definition.cuttingModel?.mode === "nominal-lathe" ? "NOMINAL CUTTING MODEL" : definition.displayOnly ? "DISPLAY ONLY — NO STOCK REMOVAL" : definition.geometryKind === "axial-milling-cutter" ? "CUTTER ONLY" : "2D OUTLINE"}`;
 }
 
+// Operator-declared square end mill dialog. The declared record is stored with
+// the remembered job and assigned to one exact T call; it never claims
+// manufacturer identity or holder/collision authority.
+function openDeclaredCutterDialog(toolKey) {
+  const dialog = $("declaredCutterDialog");
+  const form = $("declaredCutterForm");
+  form.reset();
+  form.dataset.toolKey = toolKey;
+  $("declaredCutterToolKey").textContent = toolKey;
+  const status = $("declaredCutterStatus");
+  status.textContent = "";
+  status.className = "";
+  const suggestedUnits = elements.displayUnits.value === "inch" ? "inch" : "mm";
+  form.elements.namedItem("units").value = suggestedUnits;
+  const header = toolCallsForKey(toolKey).flatMap((call) => call.comments || []).map((comment) => comment.text).find(Boolean);
+  if (header) form.elements.namedItem("name").value = header.slice(0, 60);
+  dialog.showModal();
+}
+
+function saveDeclaredCutterFromDialog(event) {
+  event.preventDefault();
+  const form = $("declaredCutterForm");
+  const toolKey = form.dataset.toolKey;
+  const status = $("declaredCutterStatus");
+  const read = (name) => form.elements.namedItem(name).value;
+  const {record, errors} = validateDeclaredCutter({
+    name: read("name"), units: read("units"), cutterDiameter: read("cutterDiameter"), lengthOfCut: read("lengthOfCut"),
+    shankDiameter: read("shankDiameter"), overallLength: read("overallLength"), flutes: read("flutes"),
+    centerCutting: read("centerCutting"),
+  });
+  if (!record) {
+    status.textContent = errors[0];
+    status.className = "danger-value";
+    return;
+  }
+  state.declaredCutters = [...state.declaredCutters.filter((entry) => entry.id !== record.id), record];
+  const definitions = registerDeclaredCutterAssemblies(state.declaredCutters);
+  const definition = definitions.find((entry) => entry.id === record.id) || null;
+  if (toolKey && definition) {
+    state.toolAssignments[toolKey] = createVersionedToolAssignment(definition, {
+      tipDatum: definition.cuttingModel?.tipDatum || null,
+      axialDirection: definition.cuttingModel?.axialDirection || null,
+    });
+  }
+  $("declaredCutterDialog").close();
+  invalidateToolAssignments();
+}
+
 function selectField(labelText, values, selected, placeholder, onChange, accessibleName = labelText) {
   const label = document.createElement("label");
   label.textContent = labelText;
@@ -4789,6 +5037,15 @@ function renderProgramToolAssignments() {
     browseLibrary.textContent = selectedDefinition ? "Browse / change in Tool Library" : "Choose from Tool Library";
     browseLibrary.addEventListener("click", () => openToolLibrary(toolKey, assignmentRef?.id || null));
     controls.append(browseLibrary);
+    if (!isMillMode()) {
+      const declareCutter = document.createElement("button");
+      declareCutter.type = "button";
+      declareCutter.className = "program-tool-browse";
+      declareCutter.textContent = "Declare square end mill…";
+      declareCutter.title = "Enter the exact diameter, length of cut, shank and overall length of a live-tool end mill that is not in the library. Used for rotary-indexed side milling.";
+      declareCutter.addEventListener("click", () => openDeclaredCutterDialog(toolKey));
+      controls.append(declareCutter);
+    }
 
     const definition = selectedDefinition;
     if (definition?.mountingRequired) {
@@ -4924,15 +5181,20 @@ function renderProgramToolAssignments() {
     confirmation.disabled = !requiredConfigurationComplete;
     confirmation.setAttribute("aria-pressed", String(assignment.confirmed === true));
     const cutterOnly = definition?.geometryKind === "axial-milling-cutter";
+    const declaredCutter = definition?.cuttingModel?.dimensionSource === "operator-declared";
     const unconfirmedLabel = nominal ? "Confirm nominal cutter, datum and installed setup."
       : definition?.displayOnly
       ? "Confirm display placement only — stock removal unavailable."
+      : declaredCutter
+      ? "Confirm these declared dimensions match the mounted cutter (tip = programmed Z reference)."
       : cutterOnly
       ? "Confirm exact cutter and flat-tip program reference for bounded axial-bore demo."
       : "Confirm mounted holder, insert, hand, and programmed reference convention.";
     const confirmedLabel = nominal ? "Nominal cutting setup confirmed — click to clear."
       : definition?.displayOnly
       ? "Display placement confirmed — stock removal still unavailable."
+      : declaredCutter
+      ? "Declared cutter confirmed — click to clear confirmation."
       : cutterOnly
       ? "Cutter and flat-tip reference confirmed — click to clear confirmation."
       : "Mounted setup confirmed — click to clear confirmation.";
@@ -6606,6 +6868,10 @@ function drawFace(rect) {
     stockFaceIntervals: stock && hasStockCavities(stock) ? stockMaterialIntervals(stock, Math.max(0,
       Math.min(stock.columns - 1, Math.floor((stock.materialEndZ - stock.startZ) / (stock.length / (stock.columns - 1)))))) : null,
     axialBores: stock?.axialBores || [],
+    rotarySections: stock?.rotarySections?.sections || [],
+    sectionFaceZ: stock ? stock.materialEndZ : null,
+    cutterRadius: stock ? (visibleLiveCutterState(stock)?.radius || 0) : 0,
+    cutterCenter: stock ? (visibleLiveCutterState(stock)?.center || null) : null,
     lengthScale: unitScale(),
     lengthUnit: unitName(),
     lengthDecimals: elements.displayUnits.value === "inch" ? 4 : 3,
@@ -6613,7 +6879,16 @@ function drawFace(rect) {
   const faceHeading = elements.faceViewStatus.querySelector("strong");
   const faceCopy = elements.faceViewStatus.querySelector("span");
   const liveSummary = summarizeAxialFlatBoreStock(stock?.liveStock);
-  if (liveSummary.status === LIVE_STOCK_STATUS.MODELED) {
+  const sectionSummary = rotarySectionSummary(stock);
+  if (sectionSummary.airOnly) {
+    faceHeading.textContent = "FACE VIEW · LIVE CUTS CLEAR OF STOCK";
+    faceCopy.textContent = `${sectionSummary.label}. ${sectionSummary.details.join(". ")}.`;
+  } else if (sectionSummary.status === ROTARY_SECTION_STATUS.MODELED || sectionSummary.status === ROTARY_SECTION_STATUS.PARTIAL) {
+    faceHeading.textContent = sectionSummary.status === ROTARY_SECTION_STATUS.MODELED
+      ? "FACE VIEW · SIDE-MILL SECTION MODELED"
+      : "FACE VIEW · SIDE-MILL SECTION PARTIAL";
+    faceCopy.textContent = `${sectionSummary.details.join(". ")}. Exact ray entries per pass at ${(360 / (stock.rotarySections.angleSamples || 3600)).toFixed(2)}°; holder, turret and drive engagement remain path-only.`;
+  } else if (liveSummary.status === LIVE_STOCK_STATUS.MODELED) {
     faceHeading.textContent = "FACE VIEW · AXIAL BORE MODELED";
     faceCopy.textContent = `${liveSummary.label}. Circle diameter and depth come from the assigned cutter and exact plunge; holder and collision remain path-only.`;
   } else if (stock && hasStockCavities(stock)) {
@@ -6910,7 +7185,10 @@ function updateStats() {
   const segments = state.parsed.segments;
   const verifiedSegments = segments.filter((segment) => !segment.verificationBlocked && !segment.liveToolBlocked);
   const rapid = verifiedSegments.filter((segment) => segment.type === "rapid").reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
-  const cut = verifiedSegments.filter((segment) => !isRapidMotion(segment) && !isLiveToolSegment(segment)).reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
+  // Rotary-indexed live cuts are physical X/Z feed distance at a fixed B;
+  // G112 virtual-XY paths keep their separate contract and stay excluded.
+  const cut = verifiedSegments.filter((segment) => !isRapidMotion(segment)
+    && (!isLiveToolSegment(segment) || segment.coordinateMode === "rotary-indexed")).reduce((sum, segment) => sum + segmentLength(segment, xScale()), 0);
   const bounds = programBounds(segments, xScale());
   const collisionEvaluation = evaluateCollisions(segments, {
     ...collisionOptions(),
@@ -6999,8 +7277,37 @@ function updateStats() {
   updateToolRotationAlert();
   const analyzedLiveStock = analyzedStock?.liveStock || null;
   const analyzedLiveSummary = summarizeAxialFlatBoreStock(analyzedLiveStock);
+  const analyzedSections = analyzedStock?.rotarySections || null;
+  const analyzedSectionSummary = rotarySectionSummary(analyzedStock);
   const firstLiveCut = liveToolOperations().find((operation) => !operation.rapid);
-  if (firstLiveCut) {
+  if (analyzedSections?.warnings?.length) {
+    const seen = new Set();
+    for (const warning of analyzedSections.warnings) {
+      const key = `${warning.code}|${warning.line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      notes.unshift({line: warning.line, code: warning.code, message: warning.message,
+        ...(warning.danger ? {danger: true} : {verificationBlocked: true})});
+    }
+  }
+  if (analyzedSectionSummary.airOnly) {
+    notes.unshift({
+      line: firstLiveCut?.line || null,
+      info: true,
+      requiresAttention: true,
+      code: "live-section-air-cuts",
+      message: `${analyzedSectionSummary.label}: no stock was removed. Check the stock diameter and front Z against the program if a cut was expected.`,
+    });
+  } else if (analyzedSectionSummary.status === ROTARY_SECTION_STATUS.MODELED || analyzedSectionSummary.status === ROTARY_SECTION_STATUS.PARTIAL) {
+    const firstPass = analyzedSections.passes[0];
+    notes.unshift({
+      line: firstPass?.line || firstLiveCut?.line || null,
+      info: true,
+      routine: true,
+      code: "live-section-modeled",
+      message: `Rotary-indexed side milling modeled — ${analyzedSectionSummary.label}. ${analyzedSectionSummary.details.join(". ")}. Cutter/holder/turret clearance and drive engagement remain PATH ONLY.`,
+    });
+  } else if (firstLiveCut) {
     if (analyzedLiveSummary.status === LIVE_STOCK_STATUS.MODELED) {
       const [firstBore] = analyzedLiveStock.axialBores;
       const boreLine = firstBore?.sourceLines?.[0] || firstLiveCut.line || null;
@@ -7014,10 +7321,13 @@ function updateStats() {
         message: `Axial bore stock removal modeled${boreDetail}. Cutter-holder collision remains PATH ONLY.`,
       });
     } else {
+      const rotaryCut = state.parsed.segments.find((segment) => segment.coordinateMode === "rotary-indexed" && !isRapidMotion(segment));
       notes.unshift({
         line: firstLiveCut.line || null,
         verificationBlocked: true,
-        message: "Live-tool stock removal is PATH ONLY: the programmed centerline is displayed, but this operation is outside the bounded axial-bore model.",
+        message: rotaryCut
+          ? `Rotary-indexed live-tool stock removal is PATH ONLY until a confirmed square end mill is assigned to ${rotaryCut.toolKey || "the live tool"} (Program tools → Declare square end mill…); the programmed centerlines are displayed.`
+          : "Live-tool stock removal is PATH ONLY: the programmed centerline is displayed, but this operation is outside the bounded axial-bore model.",
       });
     }
   }
@@ -7265,7 +7575,15 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
     const nextDocumentIdentity = programToolDocumentIdentity(elements.input.value, {
       fileName: currentProgramFileName(),
     });
-    if (plotOptions.initialPosition) {
+    // Only claim the plotted start when the first drawn motion actually
+    // departs from it; an unresolved reference return (G30 to an unknown
+    // second reference) or unknown-start rapid must not be described as HOME.
+    const firstSegment = state.parsed.segments[0];
+    const departsFromPlottedStart = Boolean(plotOptions.initialPosition) && Boolean(firstSegment)
+      && Number.isFinite(firstSegment.start?.x) && Number.isFinite(firstSegment.start?.z)
+      && Math.abs(firstSegment.start.x - plotOptions.initialPosition.x) < 1e-9
+      && Math.abs(firstSegment.start.z - plotOptions.initialPosition.z) < 1e-9;
+    if (departsFromPlottedStart) {
       const source = String(plotOptions.initialPositionMode || "custom").replaceAll("-", " ").toUpperCase();
       state.parsed.warnings.unshift({
         line: null,
@@ -7319,6 +7637,21 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
         confirmed: true,
         confirmationSource: "bundled-sample",
       };
+    }
+    if (isExactBundledProgram(elements.input.value, liveFlatSampleProgram, state.bundledSample)
+      && (state.parsed.executableToolCalls || []).some((call) => call.key === "T1111")) {
+      if (!state.declaredCutters.some((record) => record.id === LIVE_FLAT_SAMPLE_CUTTER.id)) {
+        state.declaredCutters = [...state.declaredCutters, LIVE_FLAT_SAMPLE_CUTTER];
+        registerDeclaredCutterAssemblies(state.declaredCutters);
+      }
+      const cutter = resolveAssignableToolAssembly2d({id: LIVE_FLAT_SAMPLE_CUTTER.id, revision: LIVE_FLAT_SAMPLE_CUTTER.revision});
+      if (cutter) {
+        state.toolAssignments.T1111 ||= {
+          ...createVersionedToolAssignment(cutter),
+          confirmed: true,
+          confirmationSource: "bundled-sample",
+        };
+      }
     }
     if (isExactBundledProgram(elements.input.value, liveBoreSampleProgram, state.bundledSample)
       && (state.parsed.executableToolCalls || []).some((call) => call.key === "T0202")) {
@@ -7652,6 +7985,12 @@ elements.machineForm.elements.namedItem("liveToolDialect").addEventListener("cha
 });
 elements.machineForm.elements.namedItem("status").addEventListener("change", (event) => updateMachineStatusBadge(event.target.value));
 $("closeMachineButton").addEventListener("click", () => elements.machineDialog.close());
+$("declaredCutterForm").addEventListener("submit", saveDeclaredCutterFromDialog);
+$("declaredCutterClose").addEventListener("click", () => $("declaredCutterDialog").close());
+$("declaredCutterCancel").addEventListener("click", () => $("declaredCutterDialog").close());
+$("declaredCutterDialog").addEventListener("click", (event) => {
+  if (event.target === $("declaredCutterDialog")) $("declaredCutterDialog").close();
+});
 $("cancelMachineButton").addEventListener("click", () => elements.machineDialog.close());
 elements.machineDialog.addEventListener("click", (event) => {
   if (event.target === elements.machineDialog) elements.machineDialog.close();
@@ -7685,9 +8024,10 @@ elements.machineMode.addEventListener("change", () => {
 $("plotButton").addEventListener("click", () => { plotProgram(); persistSession(); });
 $("loadSampleButton").addEventListener("click", () => loadProgram("sample-g71-rough.nc", sampleProgram, {bundledSample: true, machineMode: "lathe"}));
 $("loadLiveBoreSampleButton").addEventListener("click", loadLiveBoreSample);
+$("loadLiveFlatSampleButton").addEventListener("click", loadLiveFlatSample);
 $("loadMillSampleButton").addEventListener("click", loadMillSample);
 $("loadStepSampleButton").addEventListener("click", loadStepSample);
-for (const id of ["loadSampleButton", "loadLiveBoreSampleButton", "loadMillSampleButton", "loadStepSampleButton"]) {
+for (const id of ["loadSampleButton", "loadLiveBoreSampleButton", "loadLiveFlatSampleButton", "loadMillSampleButton", "loadStepSampleButton"]) {
   $(id).addEventListener("click", () => $("sampleProgramMenu").removeAttribute("open"));
 }
 elements.loadDxfReferenceDemo.addEventListener("click", loadDxfSample);

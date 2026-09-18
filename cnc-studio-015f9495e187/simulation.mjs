@@ -684,7 +684,7 @@ export function evaluateCollisions(segments, options = {}) {
       line: motion?.line || null,
       toolKey: null,
       code: "c-axis-collision-unsupported",
-      message: "Standalone C-axis motion is retained for timing and comparison, but collision clearance is PATH ONLY.",
+      message: `Standalone ${motion?.axis === "B" ? "B" : "C"}-axis motion is retained for timing and comparison, but collision clearance is PATH ONLY.`,
     };
     const key = `${warning.code}|${warning.line}|${warning.toolKey}`;
     if (!warningKeys.has(key)) {

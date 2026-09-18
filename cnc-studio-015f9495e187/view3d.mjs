@@ -684,10 +684,150 @@ function drawCardinalStockSilhouette(context, rings, project, radialAxis) {
   }
 }
 
+/**
+ * Stock with rotary-indexed live-tool sections: the axisymmetric contour is
+ * revolved as usual, but inside each modeled section interval the surface
+ * radius at every angle is capped by the section's sampled radial function.
+ * Section boundaries receive an explicit annular step face. Facets are
+ * painter-sorted like the plain surface; this is display geometry only.
+ */
+function sectionRadiusAt(section, angle) {
+  const samples = section.radii.length;
+  const index = ((Math.round(angle / (Math.PI * 2) * samples) % samples) + samples) % samples;
+  return section.radii[index];
+}
+
+function contourRadiusAt(contour, z) {
+  if (!contour.length) return 0;
+  if (z <= contour[0].z) return contour[0].radius;
+  for (let index = 1; index < contour.length; index += 1) {
+    const before = contour[index - 1];
+    const after = contour[index];
+    if (z <= after.z) {
+      const span = after.z - before.z;
+      const t = span > 1e-12 ? (z - before.z) / span : 1;
+      return before.radius + (after.radius - before.radius) * t;
+    }
+  }
+  return contour.at(-1).radius;
+}
+
+function drawRotarySectionedStock(context, stock, orientationSign, project, quality) {
+  const sections = stock.rotarySections.sections;
+  const contour = stockContourPoints(stock, {maximumPoints: quality.axialRings});
+  if (!contour.length) return;
+  const boundaries = new Set(contour.map((point) => point.z));
+  for (const section of sections) {
+    boundaries.add(section.startZ);
+    boundaries.add(section.endZ);
+  }
+  const zs = [...boundaries].filter((z) => z >= contour[0].z - 1e-12 && z <= contour.at(-1).z + 1e-12).sort((a, b) => a - b);
+  const sectionAt = (z) => sections.find((section) => z > section.startZ + 1e-12 && z < section.endZ - 1e-12) || null;
+  const coarseSlices = Math.max(24, quality.radialSlices || 48);
+  const fineSlices = quality.id === "interactive-preview" ? 180 : 720;
+  const facets = [];
+  const pushQuad = (world, light) => {
+    const screen = world.map(project);
+    facets.push({screen, depth: screen.reduce((sum, point) => sum + point.depth, 0) / screen.length, light});
+  };
+  const shade = (angle) => clamp(0.38 + Math.cos(angle - 0.7) * 0.28 + Math.sin(angle) * 0.12, 0.12, 0.82);
+  const ringRadius = (z, section, angle) => {
+    const base = contourRadiusAt(contour, z);
+    return section ? Math.min(base, sectionRadiusAt(section, angle)) : base;
+  };
+  for (let index = 1; index < zs.length; index += 1) {
+    const z0 = zs[index - 1];
+    const z1 = zs[index];
+    if (z1 - z0 <= 1e-12) continue;
+    const section = sectionAt((z0 + z1) / 2);
+    const slices = section ? fineSlices : coarseSlices;
+    for (let slice = 0; slice < slices; slice += 1) {
+      const angle0 = slice / slices * Math.PI * 2;
+      const angle1 = (slice + 1) / slices * Math.PI * 2;
+      const r00 = ringRadius(z0, section, angle0);
+      const r10 = ringRadius(z1, section, angle0);
+      const r11 = ringRadius(z1, section, angle1);
+      const r01 = ringRadius(z0, section, angle1);
+      pushQuad([
+        {x: z0 * orientationSign, y: r00 * Math.cos(angle0), z: r00 * Math.sin(angle0)},
+        {x: z1 * orientationSign, y: r10 * Math.cos(angle0), z: r10 * Math.sin(angle0)},
+        {x: z1 * orientationSign, y: r11 * Math.cos(angle1), z: r11 * Math.sin(angle1)},
+        {x: z0 * orientationSign, y: r01 * Math.cos(angle1), z: r01 * Math.sin(angle1)},
+      ], shade((angle0 + angle1) / 2));
+    }
+    // Step faces where the section below/above this boundary differ.
+    for (const z of [z0, z1]) {
+      const lower = sectionAt(z - 1e-9);
+      const upper = sectionAt(z + 1e-9);
+      if (z !== z1 || lower === upper) continue;
+      for (let slice = 0; slice < fineSlices; slice += 1) {
+        const angle0 = slice / fineSlices * Math.PI * 2;
+        const angle1 = (slice + 1) / fineSlices * Math.PI * 2;
+        const a0 = ringRadius(z, lower, angle0);
+        const b0 = ringRadius(z, upper, angle0);
+        const a1 = ringRadius(z, lower, angle1);
+        const b1 = ringRadius(z, upper, angle1);
+        if (Math.abs(a0 - b0) < 1e-9 && Math.abs(a1 - b1) < 1e-9) continue;
+        pushQuad([
+          {x: z * orientationSign, y: a0 * Math.cos(angle0), z: a0 * Math.sin(angle0)},
+          {x: z * orientationSign, y: b0 * Math.cos(angle0), z: b0 * Math.sin(angle0)},
+          {x: z * orientationSign, y: b1 * Math.cos(angle1), z: b1 * Math.sin(angle1)},
+          {x: z * orientationSign, y: a1 * Math.cos(angle1), z: a1 * Math.sin(angle1)},
+        ], 0.55);
+      }
+    }
+  }
+  // End caps follow the section outline when a section reaches that end.
+  for (const [endIndex, z] of [zs[0], zs.at(-1)].entries()) {
+    const section = sectionAt(endIndex ? z - 1e-9 : z + 1e-9);
+    const slices = section ? fineSlices : coarseSlices;
+    for (let slice = 0; slice < slices; slice += 1) {
+      const angle0 = slice / slices * Math.PI * 2;
+      const angle1 = (slice + 1) / slices * Math.PI * 2;
+      const r0 = ringRadius(z, section, angle0);
+      const r1 = ringRadius(z, section, angle1);
+      const screen = [
+        {x: z * orientationSign, y: 0, z: 0},
+        {x: z * orientationSign, y: r0 * Math.cos(angle0), z: r0 * Math.sin(angle0)},
+        {x: z * orientationSign, y: r1 * Math.cos(angle1), z: r1 * Math.sin(angle1)},
+      ].map(project);
+      facets.push({screen, depth: screen.reduce((sum, point) => sum + point.depth, 0) / 3, light: endIndex ? 0.62 : 0.45, cap: true});
+    }
+  }
+  facets.sort((a, b) => a.depth - b.depth);
+  for (const facet of facets) {
+    context.beginPath();
+    facet.screen.forEach((point, index) => {
+      if (index) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y);
+    });
+    context.closePath();
+    const green = Math.round(105 + facet.light * 55);
+    const blue = Math.round(120 + facet.light * 72);
+    context.fillStyle = `rgba(38, ${green}, ${blue}, .5)`;
+    context.fill();
+  }
+  // Outline each modeled section at its Z bounds so the feature reads clearly.
+  for (const section of sections) {
+    for (const z of [section.startZ, section.endZ]) {
+      const points = [];
+      for (let slice = 0; slice <= fineSlices; slice += 1) {
+        const angle = slice / fineSlices * Math.PI * 2;
+        const radius = ringRadius(z, section, angle);
+        points.push({x: z * orientationSign, y: radius * Math.cos(angle), z: radius * Math.sin(angle)});
+      }
+      drawPolyline(context, points, project, {color: "#7ce5dc", width: 1, alpha: 0.7});
+    }
+  }
+}
+
 function drawStockSurface(context, stock, orientationSign, project, camera, quality) {
   if (!stock?.radius || !stock?.length) return;
   if (hasStockCavities(stock)) {
     drawSectionStock(context, stock, orientationSign, project, quality);
+    return;
+  }
+  if (stock.rotarySections?.sections?.length) {
+    drawRotarySectionedStock(context, stock, orientationSign, project, quality);
     return;
   }
   const cardinalView = cardinalStockView(camera);

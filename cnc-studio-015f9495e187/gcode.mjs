@@ -14,6 +14,11 @@ const CONTROL_FLOW_M_CODES = new Set([96, 97, 98, 99]);
 const COMMON_MODELED_M_CODES = new Set([0, 1, 2, 3, 4, 5, 8, 9, 30, ...CONTROL_FLOW_M_CODES]);
 const GENERIC_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 133, 134, 135, 154, 155]);
 const HAAS_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 23, 24, 133, 134, 135, 154, 155]);
+// Owner-sourced Hardinge Conquest T42 / Fanuc 18-T live-tool slice: M54 live
+// tool on (+coolant), M55 live tool off (+coolant). See machine-semantics.mjs.
+const HARDINGE_DIALECT = "hardinge-conquest-fanuc-18t";
+const HARDINGE_MODELED_M_CODES = new Set([...COMMON_MODELED_M_CODES, 54, 55]);
+const ROTARY_INDEX_SAMPLE_DEGREES = 2;
 const HAAS_UNSUPPORTED_GROUP_01_MOTIONS = new Set([90, 92, 94]);
 const HAAS_UNSUPPORTED_GROUP_09_CYCLES = new Set([81, 82, 83, 84, 85, 86, 87, 88, 89, 95]);
 const HAAS_DEFAULT_TO_FLOAT_ADDRESSES = new Set(["X", "Y", "Z", "A", "B", "C", "D", "E", "I", "J", "K", "U", "W"]);
@@ -585,13 +590,17 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
   const unsupportedAddresses = [...record.byLetter.keys()].filter((letter) => (
     !MODELED_PROGRAM_ADDRESSES.has(letter)
     && !(state.liveToolDialect === "haas-lathe-ngc" && ["A", "B", "E", "V"].includes(letter))
+    && !(isHardinge(state) && letter === "B")
   ));
   if (unsupportedAddresses.length) {
+    const hardingeHint = state.liveToolDialect === "unconfigured" && unsupportedAddresses.includes("B")
+      ? " For a Hardinge Conquest T42 / Fanuc 18-T spindle index, select the owner-sourced Hardinge live-tool dialect in the machine setup."
+      : "";
     warningOnce(warnings, {
       line: record.line,
       code: "unsupported-program-address",
       verificationBlocked: true,
-      message: `${unsupportedAddresses.join("/")} address semantics are not modeled; execution is blocked instead of dropping the word.`,
+      message: `${unsupportedAddresses.join("/")} address semantics are not modeled; execution is blocked instead of dropping the word.${hardingeHint}`,
     });
     if (stopExecution) invalidateExecutionState(state);
     return false;
@@ -662,7 +671,7 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
   }
   const modeledMCodes = state.liveToolDialect === "haas-lathe-ngc"
     ? HAAS_MODELED_M_CODES
-    : GENERIC_MODELED_M_CODES;
+    : (isHardinge(state) ? HARDINGE_MODELED_M_CODES : GENERIC_MODELED_M_CODES);
   const gearCodes = mCodes.filter(code => commandedSpindleGear(state.spindleGearContract, code, state.liveToolDialect) !== null);
   const invalidGearLexeme = mCodes.findIndex((code, index) => gearCodes.includes(code)
     && !/^\+?0*4[123]$/.test(mLexemes[index] || ""));
@@ -700,7 +709,7 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
       && state.liveToolDialect !== "haas-lathe-ngc";
     const liveSpecific = state.liveToolDialect === "haas-lathe-ngc"
       ? [14, 15, 19].includes(unsupportedMCode)
-      : [133, 134, 135, 154, 155].includes(unsupportedMCode);
+      : (!isHardinge(state) && [133, 134, 135, 154, 155].includes(unsupportedMCode));
     warningOnce(warnings, {
       line: record.line,
       code: liveSpecific
@@ -710,7 +719,7 @@ function validateHaasRecordAddresses(record, state, warnings, {stopExecution = f
       message: liveSpecific && state.liveToolDialect !== "haas-lathe-ngc"
         ? `M${unsupportedMCode} is machine-builder-specific and cannot be interpreted until a live-tool controller dialect is configured.`
         : retainBlockedPreview
-          ? `M${unsupportedMCode} is not modeled for the selected controller; downstream X/Z commands are shown only as a dashed, motion-colored PATH ONLY preview. Execution, timing, stock, comparison, and clearance remain blocked.`
+          ? `M${unsupportedMCode} is not modeled for the selected controller; downstream X/Z commands are shown only as a dashed, motion-colored PATH ONLY preview. Execution, timing, stock, comparison, and clearance remain blocked.${state.liveToolDialect === "unconfigured" && (unsupportedMCode === 54 || unsupportedMCode === 55) ? " For Hardinge Conquest T42 / Fanuc 18-T live tooling, select the owner-sourced Hardinge live-tool dialect in the machine setup." : ""}`
           : `M${unsupportedMCode} is not modeled for the selected controller; its machine-state or control-flow effects are unknown, so execution is blocked.`,
     });
     if (retainBlockedPreview) {
@@ -817,6 +826,15 @@ function hasG(record, wanted) {
   return (record.byLetter.get("G") || []).some((code) => code === wanted);
 }
 
+function hasM(record, wanted) {
+  return (record.byLetter.get("M") || []).some((code) => code === wanted);
+}
+
+function isHardinge(state) {
+  return state.liveToolDialect === HARDINGE_DIALECT;
+}
+
+
 function hasProgramEnd(record) {
   return (record.byLetter.get("M") || []).some((code) => code === 2 || code === 30);
 }
@@ -903,7 +921,7 @@ function beginBlockedPathPreview(state, record, issue = "unsupported-controller-
 }
 
 function noteLiveToolAttempt(record, state, motion = state.motion) {
-  if (!["X", "Y", "Z", "U", "W", "C", "H"].some((letter) => record.byLetter.has(letter))) return;
+  if (!["X", "Y", "Z", "U", "W", "C", "H", "B"].some((letter) => record.byLetter.has(letter))) return;
   const explicitMotion = (record.byLetter.get("G") || []).find((code) => MOTION_CODES.has(code));
   const resolvedMotion = explicitMotion === undefined ? motion : MOTION_CODES.get(explicitMotion);
   const exactSupportedMotion = resolvedMotion === "rapid" || resolvedMotion === "linear";
@@ -929,7 +947,7 @@ function invalidateUnsupportedPosition(record, state) {
     state.z = null;
     state.zUncertaintyMm = null;
   }
-  if (record.byLetter.has("C") || record.byLetter.has("H")) {
+  if (record.byLetter.has("C") || record.byLetter.has("H") || (isHardinge(state) && record.byLetter.has("B"))) {
     state.cAxisPosition = null;
     state.cAxisPositionUncertaintyDegrees = null;
   }
@@ -1186,6 +1204,37 @@ function updateModalState(record, state, warnings) {
     else if (state.liveToolDialect === "haas-lathe-ngc" && code === 391) {
       if (!modalConflict) state.absolute = false;
     }
+    else if (isHardinge(state) && (state.liveToolDialectDefinition.unsupportedGroup01Cycles || []).includes(code)) {
+      // Fanuc lathe G-code system A: G90/G92/G94 are Group 01 turning cycles.
+      state.unsupportedGroup01MotionMode = `G${code}`;
+      state.blockCurrentMotionLine = record.line;
+      warningOnce(warnings, {
+        line: record.line,
+        code: `fanuc-g${code}-cycle-unsupported`,
+        verificationBlocked: true,
+        message: `G${code} is a Fanuc lathe Group 01 turning cycle, not a positioning command, and is not modeled; its modal motion is blocked until G00-G03 replaces it.`,
+      });
+    }
+    else if (isHardinge(state) && code === 91) {
+      state.blockCurrentMotionLine = record.line;
+      invalidateExecutionState(state);
+      warningOnce(warnings, {
+        line: record.line,
+        code: "fanuc-g91-position-mode-invalid",
+        verificationBlocked: true,
+        message: "G91 is not a Fanuc lathe G-code system A positioning command; use U/W incremental words. Execution is blocked.",
+      });
+    }
+    else if (isHardinge(state) && (state.liveToolDialectDefinition.unsupportedGroup09Cycles || []).includes(code)) {
+      state.unsupportedGroup09MotionMode = `G${code}`;
+      state.blockCurrentMotionLine = record.line;
+      warningOnce(warnings, {
+        line: record.line,
+        code: `fanuc-g${code}-cycle-unsupported`,
+        verificationBlocked: true,
+        message: `G${code} is a Fanuc canned cycle and is not modeled; its modal motion is blocked until G80 cancels it.`,
+      });
+    }
     else if (state.liveToolDialect !== "haas-lathe-ngc" && code === 90) state.absolute = true;
     else if (state.liveToolDialect !== "haas-lathe-ngc" && code === 91) state.absolute = false;
     else if (state.liveToolDialect === "haas-lathe-ngc" && code === 91) {
@@ -1265,7 +1314,7 @@ function updateModalState(record, state, warnings) {
     }
     else if (modeledHaasCodes.includes(code)) {
       // G112/G113 transitions are applied after all modal words in the block.
-    } else if (![4, 28, 54, 70, 71, 72].includes(code)) {
+    } else if (![4, 28, 54, 70, 71, 72].includes(code) && !(isHardinge(state) && code === 30)) {
       const verificationBlocked = state.liveToolDialect === "haas-lathe-ngc" || g112Context || hasMotionWords;
       if (verificationBlocked) state.blockCurrentMotionLine = record.line;
       if (state.liveToolDialect === "haas-lathe-ngc") invalidateExecutionState(state);
@@ -1276,7 +1325,9 @@ function updateModalState(record, state, warnings) {
         verificationBlocked,
         message: `G${code} is not modeled${state.liveToolDialect === "haas-lathe-ngc"
           ? "; its modal or coordinate effects are unknown, so execution is blocked"
-          : (verificationBlocked ? "; motion in this block is blocked" : "")}.`,
+          : (verificationBlocked ? "; motion in this block is blocked" : "")}.${code === 30 && state.liveToolDialect === "unconfigured"
+          ? " G30 second-reference returns are modeled by the owner-sourced Hardinge live-tool dialect; select it in the machine setup for a Hardinge Conquest T42 / Fanuc 18-T program."
+          : ""}`,
       });
     }
   }
@@ -1321,7 +1372,13 @@ function updateModalState(record, state, warnings) {
     state.feed = interpretedHaasFeedValue(record, state);
     state.feedIssue = Number.isFinite(state.feed) && state.feed > 0 ? null : "F must be a positive finite value.";
   }
-  const hasSpeed = record.byLetter.has("S") && !hasG(record, 50);
+  // Hardinge (owner-sourced): S in the M54 block, or while the live tool is
+  // known running, commands the live spindle rather than the main spindle.
+  const liveSpeedRouted = isHardinge(state)
+    && state.liveToolDialectDefinition.liveSpindleSpeedRouting === "s-with-live-on"
+    && record.byLetter.has("S") && !hasG(record, 50)
+    && (hasM(record, 54) || state.liveToolRunning === true);
+  const hasSpeed = record.byLetter.has("S") && !hasG(record, 50) && !liveSpeedRouted;
   if (previousSpeedMode !== state.spindleMode && !hasSpeed) {
     state.spindleSpeed = null;
     state.spindleSpeedIssue = "Re-enter S after changing spindle mode; its value cannot be reinterpreted between RPM and surface speed.";
@@ -1342,6 +1399,12 @@ function updateModalState(record, state, warnings) {
     if (hasG(record, 50)) {
       state.spindleLimit = lastWord(record, "S");
       state.spindleLimitIssue = Number.isFinite(state.spindleLimit) && state.spindleLimit > 0 ? null : "G50 RPM limit must be a positive finite value.";
+    } else if (liveSpeedRouted) {
+      const speed = lastWord(record, "S");
+      state.liveToolSpeed = Number.isFinite(speed) && speed > 0 ? speed : null;
+      state.liveToolSpeedSource = "s-with-live-on";
+      state.liveToolSpeedOverLimit = Number.isFinite(state.liveToolMaxRpm) && state.liveToolSpeed > state.liveToolMaxRpm;
+      if (state.liveToolRunning === true && state.liveToolSpeed === null) state.liveToolRunning = null;
     } else {
       state.spindleSpeed = lastWord(record, "S");
       state.spindleSpeedIssue = Number.isFinite(state.spindleSpeed) && state.spindleSpeed >= 0 ? null : "S must be a nonnegative finite value.";
@@ -1513,6 +1576,80 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
       state.threadChamferEnabled = code === 23;
       handled = true;
     }
+    if (isHardinge(state)) {
+      if (code === 54) {
+        // Owner-sourced: M54 starts the live spindle (and coolant). Its RPM is
+        // the S word routed in this block; direction is not documented.
+        handled = true;
+        state.liveToolDirection = "m54";
+        const capabilityReady = state.liveToolCapability === "equipped";
+        state.liveToolRunning = capabilityReady && state.liveToolSpeed > 0 ? true : null;
+        state.liveToolSpeedOverLimit = Number.isFinite(state.liveToolMaxRpm)
+          && state.liveToolSpeed > state.liveToolMaxRpm;
+        if (!capabilityReady) {
+          state.executionBlocked = true;
+          warningOnce(warnings, {
+            line: record.line,
+            code: "live-tool-capability-required",
+            verificationBlocked: true,
+            message: `M54 requires live-tool capability "equipped"; configured value is "${state.liveToolCapability}", so execution is blocked at this command.`,
+          });
+        }
+        if (!(state.liveToolSpeed > 0)) {
+          state.executionBlocked = true;
+          warningOnce(warnings, {
+            line: record.line,
+            code: "live-tool-rpm-required",
+            verificationBlocked: true,
+            message: "M54 needs a positive S live-spindle RPM in the same block (S is routed to the live spindle only with M54 or while it is known running); live-tool motion is blocked.",
+          });
+        }
+        if (state.liveToolSpeedOverLimit) {
+          state.executionBlocked = true;
+          warningOnce(warnings, {
+            line: record.line,
+            code: "live-tool-rpm-over-limit",
+            verificationBlocked: true,
+            message: `M54 commands ${state.liveToolSpeed} RPM, above the configured ${state.liveToolMaxRpm} RPM live-tool limit.`,
+          });
+        }
+        liveToolEvents.push({
+          line: record.line,
+          direction: state.liveToolDirection,
+          running: state.liveToolRunning,
+          speed: state.liveToolSpeed,
+          phase: "end-of-block",
+          command: "M54",
+        });
+      } else if (code === 55) {
+        handled = true;
+        state.liveToolRunning = false;
+        liveToolEvents.push({
+          line: record.line,
+          direction: state.liveToolDirection,
+          running: false,
+          speed: state.liveToolSpeed,
+          phase: "end-of-block",
+          command: "M55",
+        });
+      }
+      if ((code === 3 || code === 4) && state.cAxisEngaged === true) {
+        // A main-spindle start leaves spindle-positioning mode. The rotary
+        // position is no longer a program authority afterwards.
+        state.cAxisEngaged = false;
+        state.cAxisEngagementSource = "automatic";
+        state.cAxisPosition = null;
+        state.cAxisPositionUncertaintyDegrees = null;
+        state.turningMode = "turning";
+        cAxisEvents.push({
+          line: record.line,
+          engaged: false,
+          phase: "end-of-block",
+          command: `M${code}`,
+          reason: "main-spindle-start-leaves-positioning-mode",
+        });
+      }
+    }
     if (state.liveToolDialect !== "haas-lathe-ngc") {
       if (code === 8 || code === 9) {
         // Coolant state does not alter the bounded centerline geometry model.
@@ -1642,7 +1779,7 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
     state.spindleRunning = programStopCode === 0 && state.liveToolDialect === "haas-lathe-ngc"
       ? false
       : (state.spindleRunning === false ? false : null);
-    if (state.liveToolDialect === "haas-lathe-ngc" && state.liveToolRunning === true) {
+    if ((state.liveToolDialect === "haas-lathe-ngc" || isHardinge(state)) && state.liveToolRunning === true) {
       state.liveToolRunning = null;
       liveToolEvents.push({
         line: record.line,
@@ -1655,7 +1792,7 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
       });
     }
     if (programStopCode === 1
-      && state.liveToolDialect === "haas-lathe-ngc"
+      && (state.liveToolDialect === "haas-lathe-ngc" || isHardinge(state))
       && state.cAxisEngaged === true) {
       state.cAxisEngaged = null;
       state.cAxisEngagementSource = "unknown";
@@ -1677,7 +1814,7 @@ function applyEndOfBlockMState(record, state, warnings, liveToolEvents, cAxisEve
     state.cAxisEngaged = false;
     state.turningMode = "stopped";
     state.programEnded = true;
-    if (state.liveToolDialect === "haas-lathe-ngc") {
+    if (state.liveToolDialect === "haas-lathe-ngc" || isHardinge(state)) {
       liveToolEvents.push({
         line: record.line,
         direction: state.liveToolDirection,
@@ -1780,8 +1917,299 @@ function cAxisReadiness(record, state, warnings, {
   return issues;
 }
 
+// Hardinge (owner-sourced): B is the absolute spindle-index address in degrees.
+// Only a rapid, B-only block is modeled. The profile must declare automatic
+// positioning-mode engagement because no engage/disengage M-code is retained.
+function parseHardingeRotaryIndex(record, state, warnings, cAxisMotions) {
+  const hasB = record.byLetter.has("B");
+  const hasCH = record.byLetter.has("C") || record.byLetter.has("H");
+  if (!hasB && !hasCH) return {present: false, blocked: false};
+  const start = state.cAxisPosition;
+  const startUncertaintyDegrees = state.cAxisPositionUncertaintyDegrees;
+  const bAddress = hasB ? rotaryPositionAddress(record, "B", state) : null;
+  const end = bAddress && Number.isFinite(bAddress.value) ? bAddress.value : null;
+  const block = (issues) => {
+    const verificationIssues = [...new Set(issues)];
+    const event = {
+      line: record.line,
+      axis: "B",
+      type: state.motion === "rapid" ? "rapid-index" : "interpolated-index",
+      start: Number.isFinite(start) ? start : null,
+      end,
+      geometryUncertaintyDegrees: bAddress && Number.isFinite(bAddress.uncertaintyDegrees) ? bAddress.uncertaintyDegrees : null,
+      engaged: state.cAxisEngaged,
+      engagementSource: state.cAxisEngagementSource,
+      combinedWithLinearAxes: false,
+      blocked: true,
+      reason: verificationIssues[0] || "rotary-index-unresolved",
+      verificationIssues,
+    };
+    cAxisMotions?.push(event);
+    noteLiveToolAttempt(record, state);
+    invalidateUnsupportedPosition(record, state);
+    return {present: true, blocked: true, start, end, event};
+  };
+  if (hasCH) {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "rotary-address-unsupported",
+      verificationBlocked: true,
+      message: "C/H are not the modeled spindle-index address for the Hardinge dialect (B is); their semantics are unknown, so execution is blocked.",
+    });
+    return block(["rotary-address-unsupported"]);
+  }
+  if (end === null) {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "rotary-position-invalid",
+      verificationBlocked: true,
+      message: "B must be a finite absolute angle in degrees; the index is blocked.",
+    });
+    return block(["rotary-position-invalid"]);
+  }
+  if (state.motion !== "rapid") {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "direct-rotary-interpolation-unsupported",
+      verificationBlocked: true,
+      message: "Interpolated B motion (G01/G02/G03 with B) is not modeled; only a rapid G00 B index on its own block is supported.",
+    });
+    return block(["direct-rotary-interpolation-unsupported"]);
+  }
+  if (["X", "Z", "U", "W", "Y"].some((letter) => record.byLetter.has(letter))) {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "rotary-linear-rapid-combination-unresolved",
+      verificationBlocked: true,
+      message: "A B index combined with X/Z in one block has unconfigured axis coordination; put the B index on its own block so the sweep can be modeled.",
+    });
+    return block(["rotary-linear-rapid-combination-unresolved"]);
+  }
+  const issues = [];
+  const add = (code, message) => {
+    issues.push(code);
+    warningOnce(warnings, {line: record.line, code, verificationBlocked: true, message});
+  };
+  if (state.cAxisCapability !== "available") {
+    add("c-axis-capability-required", `B indexing requires rotary (C/B) capability "available"; configured value is "${state.cAxisCapability}".`);
+  }
+  if (state.cAxisEngagementMode !== "automatic") {
+    add("rotary-engagement-mode-required", "The Hardinge dialect models B indexing only when the machine profile declares automatic spindle positioning-mode engagement; no engage M-code is modeled for this control.");
+  }
+  if (state.spindleRunning === true) {
+    add("rotary-main-spindle-running", "B indexing is blocked while the main spindle is known running (M03/M04); the model does not know whether the control stops it automatically. Add M05 before indexing.");
+  }
+  if (issues.length) return block(issues);
+  if (state.spindleRunning === null && !state.rotaryModeAssumptionNoted) {
+    state.rotaryModeAssumptionNoted = true;
+    warnings.push({
+      line: record.line,
+      code: "rotary-mode-switch-assumed",
+      info: true,
+      requiresAttention: true,
+      message: "B index assumes the control switched the main spindle into positioning mode automatically; no M05 or mode command was seen before this block. Confirm this on the machine.",
+    });
+  }
+  state.cAxisEngaged = true;
+  state.cAxisEngagementSource = "automatic";
+  state.turningMode = "live-tool";
+  state.cAxisPosition = end;
+  state.cAxisPositionUncertaintyDegrees = bAddress.uncertaintyDegrees;
+  const event = {
+    line: record.line,
+    axis: "B",
+    type: "rapid-index",
+    start: Number.isFinite(start) ? start : null,
+    end,
+    geometryUncertaintyDegrees: bAddress.uncertaintyDegrees,
+    startUncertaintyDegrees: Number.isFinite(startUncertaintyDegrees) ? startUncertaintyDegrees : null,
+    engaged: true,
+    engagementSource: "automatic",
+    combinedWithLinearAxes: false,
+  };
+  cAxisMotions?.push(event);
+  return {present: true, blocked: false, start, end, event};
+}
+
+function rotaryIndexPoints(x, z, startDegrees, endDegrees) {
+  const delta = endDegrees - startDegrees;
+  const steps = Math.max(1, Math.ceil(Math.abs(delta) / ROTARY_INDEX_SAMPLE_DEGREES));
+  const points = [];
+  for (let index = 0; index <= steps; index += 1) {
+    points.push({x, z, c: index === steps ? endDegrees : startDegrees + delta * index / steps});
+  }
+  return points;
+}
+
+// Hardinge (owner-sourced) live-tool motion: X/Z moves while the spindle is
+// indexed by B. The programmed X keeps its ordinary diameter/radius meaning;
+// the tool centreline sits at polar (X, B) in the face plane. Arcs and
+// interpolated B remain PATH ONLY.
+function parseHardingeLiveRecord(record, state, xMode, warnings, cAxis) {
+  const hasX = record.byLetter.has("X");
+  const hasZ = record.byLetter.has("Z");
+  const rotaryKnown = Number.isFinite(state.cAxisPosition);
+  const xCoordinateScale = xMode === "diameter" ? 0.5 : 1;
+  const uncertaintyOf = (axisUncertainty) => physicalPointUncertaintyMm(axisUncertainty, xCoordinateScale);
+  if (!state.sawUnitMode) state.assumedUnitsUsed = true;
+  const baseSegment = (start, end, points, issues, extra = {}) => ({
+    type: state.motion, start, end, points, line: record.line, raw: record.raw.trim(), ...timingSnapshot(state),
+    toolKey: state.activeToolKey, toolCallLine: state.activeToolCallLine,
+    liveTool: true,
+    machiningMode: "live-tool",
+    coordinateMode: "rotary-indexed",
+    rotaryAxis: "B",
+    xCoordinateMode: xMode === "diameter" ? "diameter" : "radius",
+    plane: state.plane,
+    verificationBlocked: issues.length > 0,
+    verificationIssues: [...new Set(issues)],
+    ...extra,
+  });
+  if (!hasX && !hasZ) {
+    if (!cAxis.event || cAxis.blocked) return null;
+    const point = {x: state.x, z: state.z};
+    if (!Number.isFinite(cAxis.event.start)) {
+      warnings.push({
+        line: record.line,
+        code: "rotary-start-position-unknown",
+        info: true,
+        timingExcluded: true,
+        timingScope: "unknown-start-rapid",
+        message: `B index established ${cAxis.event.end} degrees; the incoming rotary motion from an unknown angle was not drawn and is omitted from Feed + Rapid time.`,
+      });
+      return null;
+    }
+    if (!isKnownPoint(point)) return null;
+    const issues = [];
+    if (Math.abs(cAxis.event.end - cAxis.event.start) > 180 + EPSILON) {
+      issues.push("rotary-index-direction-unresolved");
+      warningOnce(warnings, {
+        line: record.line,
+        code: "rotary-index-direction-unresolved",
+        verificationBlocked: true,
+        message: "A B index of more than 180 degrees has an unconfigured rollover/shortest-path direction; its sweep is retained only as a blocked path.",
+      });
+    }
+    const points = rotaryIndexPoints(point.x, point.z, cAxis.event.start, cAxis.event.end);
+    const uncertainty = uncertaintyOf({x: state.xUncertaintyMm, z: state.zUncertaintyMm});
+    return baseSegment(
+      {...point, c: cAxis.event.start}, {...point, c: cAxis.event.end}, points, issues,
+      {
+        type: "rapid",
+        rotaryIndex: {axis: "B", start: cAxis.event.start, end: cAxis.event.end,
+          uncertaintyDegrees: cAxis.event.geometryUncertaintyDegrees},
+        geometryUncertaintyMm: uncertainty,
+        coordinateUncertaintyMm: {
+          start: {x: (Number(state.xUncertaintyMm) || 0) * xCoordinateScale, z: Number(state.zUncertaintyMm) || 0},
+          end: {x: (Number(state.xUncertaintyMm) || 0) * xCoordinateScale, z: Number(state.zUncertaintyMm) || 0},
+        },
+      },
+    );
+  }
+  const cutting = state.motion !== "rapid";
+  if (state.motion === "arc-cw" || state.motion === "arc-ccw") {
+    warningOnce(warnings, {
+      line: record.line,
+      code: "live-tool-arc-unsupported",
+      verificationBlocked: true,
+      message: "G02/G03 X/Z arcs with the spindle indexed by B are contoured live-tool cuts that are not modeled; the move is blocked and the position is unresolved.",
+    });
+    noteLiveToolAttempt(record, state);
+    invalidateUnsupportedPosition(record, state);
+    return null;
+  }
+  const issues = [];
+  if (cutting && !rotaryKnown) {
+    issues.push("live-tool-rotary-position-unknown");
+    warningOnce(warnings, {
+      line: record.line,
+      code: "live-tool-rotary-position-unknown",
+      verificationBlocked: true,
+      message: "Live-tool cutting motion needs a known B index; command G00 B on its own block before cutting.",
+    });
+  }
+  if (cutting && state.liveToolRunning !== true) {
+    issues.push("live-tool-spindle-not-running");
+    warningOnce(warnings, {
+      line: record.line,
+      code: "live-tool-spindle-not-running",
+      verificationBlocked: true,
+      message: "X/Z cutting motion with the spindle indexed by B needs the live tool known running (M54 with a positive S); a stopped live tool cannot cut, and turning needs M03/M04 first.",
+    });
+  }
+  const start = {x: state.x, z: state.z};
+  const startAxisUncertainty = {x: state.xUncertaintyMm, z: state.zUncertaintyMm};
+  const xAddress = hasX ? scaledPositionAddress(record, "X", state) : null;
+  const zAddress = hasZ ? scaledPositionAddress(record, "Z", state) : null;
+  const resolvedX = resolvedPositionCoordinate(state.x, state.xUncertaintyMm, xAddress, state.absolute);
+  const resolvedZ = resolvedPositionCoordinate(state.z, state.zUncertaintyMm, zAddress, state.absolute);
+  const end = {x: resolvedX.value, z: resolvedZ.value};
+  const endAxisUncertainty = {x: resolvedX.uncertaintyMm, z: resolvedZ.uncertaintyMm};
+  state.x = end.x;
+  state.z = end.z;
+  state.xUncertaintyMm = endAxisUncertainty.x;
+  state.zUncertaintyMm = endAxisUncertainty.z;
+  if (!isKnownPoint(end)) {
+    if (!cutting) {
+      warnings.push({
+        line: record.line,
+        code: "rapid-position-incomplete",
+        info: true,
+        timingExcluded: true,
+        timingScope: "unknown-start-rapid",
+        message: "Rapid positioning is waiting for both X and Z to become known; any commanded travel from an unknown point is omitted from Feed + Rapid time.",
+      });
+    } else {
+      noteLiveToolAttempt(record, state);
+      warningOnce(warnings, {
+        line: record.line,
+        code: "live-cut-from-unknown-position",
+        verificationBlocked: true,
+        message: "Live-tool cutting motion has an incomplete X/Z endpoint and cannot establish a verified path; use a complete absolute G00 X/Z baseline.",
+      });
+    }
+    return null;
+  }
+  if (!isKnownPoint(start)) {
+    if (!cutting) {
+      warnings.push({
+        line: record.line,
+        code: "rapid-start-position-unknown",
+        info: true,
+        timingExcluded: true,
+        timingScope: "unknown-start-rapid",
+        message: `Position established at X${(end.x / state.scale).toFixed(4)} Z${(end.z / state.scale).toFixed(4)}; no invented approach was drawn, and the rapid from the unknown start is omitted from Feed + Rapid time.`,
+      });
+    } else {
+      noteLiveToolAttempt(record, state);
+      warningOnce(warnings, {
+        line: record.line,
+        code: "live-cut-from-unknown-position",
+        verificationBlocked: true,
+        message: "Live-tool cutting motion cannot establish a verified start; use a complete absolute G00 X/Z baseline first.",
+      });
+    }
+    return null;
+  }
+  if (distance(start, end) < EPSILON) return null;
+  const angle = rotaryKnown ? state.cAxisPosition : null;
+  const withAngle = (point) => (angle === null ? {...point} : {...point, c: angle});
+  const points = (state.motion === "rapid" ? rapidPath(start, end, state, xMode) : [start, end]).map(withAngle);
+  if (issues.length) noteLiveToolAttempt(record, state);
+  return baseSegment(withAngle(start), withAngle(end), points, issues, {
+    rotaryAngleDegrees: angle,
+    rotaryAngleUncertaintyDegrees: rotaryKnown ? state.cAxisPositionUncertaintyDegrees : null,
+    geometryUncertaintyMm: Math.max(uncertaintyOf(startAxisUncertainty), uncertaintyOf(endAxisUncertainty)),
+    coordinateUncertaintyMm: {
+      start: {x: (Number(startAxisUncertainty.x) || 0) * xCoordinateScale, z: Number(startAxisUncertainty.z) || 0},
+      end: {x: (Number(endAxisUncertainty.x) || 0) * xCoordinateScale, z: Number(endAxisUncertainty.z) || 0},
+    },
+  });
+}
+
 function parseDirectCAxis(record, state, warnings, cAxisMotions) {
   if (state.g112Active) return {present: false, blocked: false};
+  if (isHardinge(state)) return parseHardingeRotaryIndex(record, state, warnings, cAxisMotions);
   const hasC = record.byLetter.has("C");
   const hasH = record.byLetter.has("H");
   if (!hasC && !hasH) return {present: false, blocked: false};
@@ -2368,6 +2796,9 @@ function parseBasicRecord(record, state, xMode, warnings, {
 
   const cAxis = parseDirectCAxis(record, state, warnings, cAxisMotions);
   if (cAxis.blocked) return null;
+  if (isHardinge(state) && (state.cAxisEngaged === true || state.liveToolRunning === true)) {
+    return parseHardingeLiveRecord(record, state, xMode, warnings, cAxis);
+  }
   const hasX = record.byLetter.has("X") || (state.threadingActive && record.byLetter.has("U"));
   const hasZ = record.byLetter.has("Z") || (state.threadingActive && record.byLetter.has("W"));
   if (!hasX && !hasZ) {
@@ -2728,7 +3159,7 @@ function rapidSegment(start, end, record, state, xMode, stage) {
   };
 }
 
-function parseReferenceReturn(record, state, xMode, warnings) {
+function parseReferenceReturn(record, state, xMode, warnings, code = "G28") {
   const unsupportedAxes = ["X", "Z"].filter(letter => record.byLetter.has(letter));
   const duplicateAxes = ["U", "W"].filter(letter => (record.byLetter.get(letter) || []).length > 1);
   if (unsupportedAxes.length || duplicateAxes.length) {
@@ -2739,7 +3170,7 @@ function parseReferenceReturn(record, state, xMode, warnings) {
     state.turningPathTainted = true;
     warningOnce(warnings, {
       line: record.line, code: "reference-return-form-unsupported", verificationBlocked: true,
-      message: "This G28 form is not modeled; use at most one U and one W address, or an axisless G28. X/Z intermediate-position forms are unresolved.",
+      message: `This ${code} form is not modeled; use at most one U and one W address, or an axisless ${code}. X/Z intermediate-position forms are unresolved.`,
     });
     return [];
   }
@@ -2760,7 +3191,10 @@ function parseReferenceReturn(record, state, xMode, warnings) {
     segments.push(rapidSegment(start, intermediate, record, state, xMode, "intermediate"));
   }
 
-  const reference = state.referencePosition;
+  // G28 returns to the first machine reference; G30 (Hardinge dialect) to the
+  // second reference point, whose program-coordinate position is a separate,
+  // currently unconfigured, profile fact.
+  const reference = code === "G30" ? state.secondReferencePosition : state.referencePosition;
   const unresolvedAxes = [];
   // U selects the X return and W selects the Z return. A reference return
   // cannot move or invalidate an axis that was not selected by this block.
@@ -2774,7 +3208,7 @@ function parseReferenceReturn(record, state, xMode, warnings) {
   if (unresolvedAxes.length) {
     warnings.push({
       line: record.line, code: "reference-return-position-unknown", verificationScope: "reference-return", referenceAxes: unresolvedAxes,
-      message: `G28 ${unresolvedAxes.join("/")} machine-reference return has no known position in program coordinates; its return path is unresolved.`,
+      message: `${code} ${unresolvedAxes.join("/")} ${code === "G30" ? "second-reference" : "machine-reference"} return has no known position in program coordinates; its return path is unresolved.`,
     });
     return segments;
   }
@@ -2785,8 +3219,8 @@ function parseReferenceReturn(record, state, xMode, warnings) {
   }
   const referenceLabel = referenceAxes.map(axis => `${axis}${(reference[axis.toLowerCase()] / state.scale).toFixed(4)}`).join(" ");
   const message = isKnownPoint(start)
-    ? `G28 returned to the estimated machine reference at ${referenceLabel}.`
-    : `G28 established the estimated machine reference at ${referenceLabel}; the unknown incoming move was not drawn.`;
+    ? `${code} returned to the estimated machine reference at ${referenceLabel}.`
+    : `${code} established the estimated machine reference at ${referenceLabel}; the unknown incoming move was not drawn.`;
   warnings.push({line: record.line, code: "reference-return-resolved", info: true,
     ...(!isKnownPoint(start) ? {requiresAttention: true} : {}), message});
   return segments;
@@ -3701,7 +4135,7 @@ export function parseGcode(source, {
   const liveToolDialectDefinition = resolveLiveToolDialect(requestedLiveToolDialect);
   // Starting feed authority is explicit setup, never inferred from F magnitude.
   // Haas special-cycle contracts still require their programmed startup mode.
-  const initialFeedMode = liveToolDialectDefinition.id === "unconfigured"
+  const initialFeedMode = ["unconfigured", HARDINGE_DIALECT].includes(liveToolDialectDefinition.id)
     && ["G98", "G99"].includes(requestedInitialFeedMode) ? requestedInitialFeedMode : "unknown";
   const state = {
     x: Number.isFinite(initialPosition?.x) ? initialPosition.x : null,
@@ -3713,6 +4147,9 @@ export function parseGcode(source, {
       x: Number.isFinite(referencePosition?.x) ? referencePosition.x : null,
       z: Number.isFinite(referencePosition?.z) ? referencePosition.z : null,
     },
+    secondReferencePosition: {x: null, z: null},
+    rotaryModeAssumptionNoted: false,
+    liveToolSpeedSource: "unknown",
     rapidBehavior, rapidXMax, rapidZMax, arcChordTolerance,
     absolute: true, scale: normalizedDefaultUnits === "in" ? 25.4 : 1, units: normalizedDefaultUnits,
     motion: "rapid", feed: null,
@@ -3997,18 +4434,21 @@ export function parseGcode(source, {
       }
       const specialMotionCode = hasG(record, 28)
         ? "G28"
-        : (hasG(record, 70) ? "G70" : (hasG(record, 71) ? "G71" : (hasG(record, 72) ? "G72" : null)));
+        : (isHardinge(state) && hasG(record, 30)
+          ? "G30"
+          : (hasG(record, 70) ? "G70" : (hasG(record, 71) ? "G71" : (hasG(record, 72) ? "G72" : null))));
       if (specialMotionCode) {
         const g112WasActive = state.g112Active;
         updateModalState(record, state, warnings);
         const inBoundedG112 = g112WasActive || state.g112Active || hasG(record, 112);
-        const unsupportedSpecialAxes = ["C", "H", "Y"].filter((letter) => record.byLetter.has(letter));
+        const unsupportedSpecialAxes = ["C", "H", "Y", ...(isHardinge(state) ? ["B"] : [])]
+          .filter((letter) => record.byLetter.has(letter));
         const blockedModalState = state.blockCurrentMotionLine === record.line
           || activeMotionBlocker(state)
           || state.unconfiguredG112Active;
         if (inBoundedG112 || blockedModalState || unsupportedSpecialAxes.length) {
           if (inBoundedG112) {
-            noteLiveToolAttempt(record, state, specialMotionCode === "G28" ? "rapid" : "unsupported-cut");
+            noteLiveToolAttempt(record, state, specialMotionCode === "G28" || specialMotionCode === "G30" ? "rapid" : "unsupported-cut");
           }
           const warningCode = inBoundedG112
             ? "g112-special-motion-unsupported"
@@ -4036,7 +4476,7 @@ export function parseGcode(source, {
           state.faceYUncertaintyMm = null;
           state.faceZUncertaintyMm = null;
           state.g112PathTainted = true;
-          if (unsupportedSpecialAxes.some((letter) => letter === "C" || letter === "H")) {
+          if (unsupportedSpecialAxes.some((letter) => letter === "C" || letter === "H" || letter === "B")) {
             cAxisMotions.push({
               line: record.line,
               type: "rapid-index",
@@ -4067,8 +4507,8 @@ export function parseGcode(source, {
         else warnings.push({line: record.line, message: "G04 dwell needs nonnegative X/U seconds, integer P milliseconds, or decimal-point P seconds for bounded dwell-event review."});
         continue;
       }
-      if (hasG(record, 28)) {
-        segments.push(...parseReferenceReturn(record, state, xMode, warnings));
+      if (hasG(record, 28) || (isHardinge(state) && hasG(record, 30))) {
+        segments.push(...parseReferenceReturn(record, state, xMode, warnings, hasG(record, 28) ? "G28" : "G30"));
         continue;
       }
       if (hasG(record, 71) || hasG(record, 72)) {

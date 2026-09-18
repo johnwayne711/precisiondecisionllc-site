@@ -14,7 +14,7 @@ export function commandedSpindleGear(contract, code, dialect = "unconfigured") {
     ? code - 40 : null;
 }
 
-export const LIVE_TOOL_DIALECTS = Object.freeze({
+export const LIVE_TOOL_DIALECTS = {
   unconfigured: Object.freeze({
     id: "unconfigured",
     label: "Unconfigured / unknown",
@@ -69,10 +69,56 @@ export const LIVE_TOOL_DIALECTS = Object.freeze({
       }),
     ]),
   }),
+};
+
+export const HARDINGE_FANUC_18T_DIALECT = "hardinge-conquest-fanuc-18t";
+
+// Owner-sourced Hardinge Conquest T42 / GE Fanuc 18-T live-tool slice. The
+// command map comes from the owner's post-processed program and its inline
+// comments (M54 "LIVE TOOL ON COOLANT ON", M55 "LIVE TOOL OFF COOLANT OFF",
+// B as the absolute spindle-index address in degrees, S in the M54 block as
+// live-spindle RPM). No Hardinge programming manual has been retained, so the
+// dialect is labeled owner-sourced and every profile using it must still
+// declare live-tool capability, C/B availability and automatic engagement.
+LIVE_TOOL_DIALECTS[HARDINGE_FANUC_18T_DIALECT] = Object.freeze({
+  id: HARDINGE_FANUC_18T_DIALECT,
+  label: "Hardinge Conquest T42 · Fanuc 18-T live tool (owner-sourced)",
+  commands: Object.freeze({
+    liveOn: 54,
+    liveOff: 55,
+  }),
+  // Fanuc lathe G-code system A: B is the rotary spindle-index address on this
+  // machine, X/Z are absolute with U/W incremental words, and G90/G92/G94 are
+  // Group 01 turning cycles rather than positioning or feed-mode commands.
+  rotaryAddress: "B",
+  rotaryIncrementalAddress: null,
+  liveSpindleSpeedRouting: "s-with-live-on",
+  secondReferenceReturn: 30,
+  feedModes: Object.freeze({perMinute: [98], perRevolution: [99]}),
+  unsupportedGroup01Cycles: Object.freeze([90, 92, 94]),
+  unsupportedGroup09Cycles: Object.freeze([81, 82, 83, 84, 85, 86, 87, 88, 89]),
+  evidence: "owner-program-2026-09-17",
+  sources: Object.freeze([
+    Object.freeze({
+      title: "Owner program N1101 (OPERATION - 9): M54/M55 live-tool comments, B indexing, G30 U0 W0, G98, G97 S with M54",
+      url: "",
+    }),
+    Object.freeze({
+      title: "FANUC CNC function catalogue (Series 18 lathe G-code system A context)",
+      url: "https://www.fanucamerica.com/docs/default-source/cnc-files/cnc-function-catalog.pdf",
+    }),
+    Object.freeze({
+      title: "Hardinge T42 parts list",
+      url: "https://shop.hardinge.com/medias/sys_master/images/hab/hb7/8804586848286/PLA-0009500-0060/PLA-0009500-0060.pdf",
+    }),
+  ]),
 });
 
+Object.freeze(LIVE_TOOL_DIALECTS);
+
 export function liveToolDialect(id = "unconfigured") {
-  return LIVE_TOOL_DIALECTS[id] || LIVE_TOOL_DIALECTS.unconfigured;
+  return Object.prototype.hasOwnProperty.call(LIVE_TOOL_DIALECTS, id)
+    ? LIVE_TOOL_DIALECTS[id] : LIVE_TOOL_DIALECTS.unconfigured;
 }
 
 export function liveToolCommand(dialect, command) {

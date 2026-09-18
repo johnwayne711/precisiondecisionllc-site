@@ -80,6 +80,7 @@
               <nav class="sample-program-actions" aria-label="Built-in sample programs">
                 <button id="loadMillSampleButton" type="button">Mill sample</button>
                 <button id="loadLiveBoreSampleButton" type="button">Live bore sample</button>
+                <button id="loadLiveFlatSampleButton" type="button">Live flat sample</button>
                 <button id="loadStepSampleButton" type="button">G71 + STEP demo</button>
                 <button id="loadSampleButton" type="button">Reset turning sample</button>
               </nav>
@@ -297,7 +298,7 @@
                 <option value="hardinge-conquest-t42" selected>Hardinge Conquest T42 · Fanuc 18-T (Draft)</option>
                 <option value="generic-lathe">Generic lathe</option>
               </select>
-              <button id="editMachineButton" type="button" aria-label="View or edit selected machine">Edit</button>
+              <button id="editMachineButton" type="button" aria-label="Review selected machine setup">Setup</button>
               <a id="machineReferenceLink" class="machine-reference-link" href="./references/sl75.html" target="_blank" rel="noopener noreferrer" hidden>SL-75 reference ↗</a>
             </span>
             <span id="millSetupIdentity" class="mill-setup-identity" hidden>Generic Fanuc-style 3-axis mill · bounded path subset</span>
@@ -551,16 +552,20 @@
       <form id="machineForm">
         <header class="machine-dialog-header">
           <div>
-            <span class="eyebrow">MACHINE DEFINITION</span>
+            <span class="eyebrow">MACHINE SETUP</span>
             <h2 id="machineDialogTitle">Hardinge Conquest T42</h2>
           </div>
-          <button id="closeMachineButton" type="button" class="dialog-close close-icon" aria-label="Close machine definition"></button>
+          <button id="closeMachineButton" type="button" class="dialog-close close-icon" aria-label="Close machine setup"></button>
         </header>
 
         <div class="machine-form-body">
           <div class="machine-data-note">
             <span id="machineStatusBadge" class="status-badge draft">DRAFT</span>
             <p>Draft values may be best-effort estimates. The selected profile now affects reference-return and approach plotting; verify every value at the machine before relying on it.</p>
+          </div>
+          <div class="machine-setup-guide" role="note">
+            <strong>START WITH THE VISIBLE SETUP</strong>
+            <p>For ordinary X/Z plotting and Feed + Rapid time, review Identity &amp; control and Program start &amp; rapid motion. Leave unavailable values unknown—the app will disclose what is omitted or blocked instead of guessing. Open an advanced group only when you need it.</p>
           </div>
           <div id="sl75MachineReference" class="machine-data-note" hidden>
             <p><a href="./references/sl75.html" target="_blank" rel="noopener noreferrer">SL-75 reference — manual, specifications and search ↗</a><br>M41 / M42 / M43 select first (low), second and third spindle ranges in the SL-75 environment. They do not interrupt playback or invalidate programmed spindle/feed calculations.</p>
@@ -587,8 +592,8 @@
             </div>
           </section>
 
-          <section class="machine-form-section">
-            <div class="machine-section-heading"><span>02</span><div><h3>Travel & reference</h3><p>Strokes are physical slide travel in machine units; X stroke is not diameter-scaled. Coordinate limits and home require separate machine setup.</p></div></div>
+          <details id="machineTravelDetails" class="machine-form-section machine-form-details">
+            <summary class="machine-section-heading"><span>02</span><div><h3>Travel &amp; raw machine reference</h3><p>Advanced machine-coordinate metadata. It does not set the plotted initial position or G28 reference below.</p></div></summary>
             <div class="machine-form-grid numeric-grid">
               <label>X axis stroke<input name="xAxisStroke" type="number" min="0" step="any" placeholder="Unknown"></label>
               <label>Z axis stroke<input name="zAxisStroke" type="number" min="0" step="any" placeholder="Unknown"></label>
@@ -599,7 +604,7 @@
               <label>Home X<input name="homeX" type="number" step="any" placeholder="Unknown"></label>
               <label>Home Z<input name="homeZ" type="number" step="any" placeholder="Unknown"></label>
             </div>
-          </section>
+          </details>
 
           <section class="machine-form-section">
             <div class="machine-section-heading"><span>03</span><div><h3>Program start & rapid motion</h3><p>The explicit program-coordinate tool-reference position before the first move. This is not a turret-body or raw machine-coordinate transform.</p></div></div>
@@ -618,10 +623,10 @@
             </div>
           </section>
 
-          <section class="machine-form-section">
-            <div class="machine-section-heading"><span>04</span><div><h3>Live tooling & rotary axes</h3><p>Controller dialect, installed capabilities, documented limits, and retained evidence. Unknown values fail closed.</p></div></div>
+          <details id="machineLiveToolDetails" class="machine-form-section machine-form-details">
+            <summary class="machine-section-heading"><span>04</span><div><h3>Live tooling &amp; rotary axes</h3><p>Advanced settings for programs that use live tooling, C/Y motion, or Haas integer behavior. Unknown values fail closed.</p></div></summary>
             <div class="machine-form-grid">
-              <label class="wide">Live-tool syntax dialect<select name="liveToolDialect"><option value="unconfigured">Unconfigured / unknown</option><option value="haas-lathe-ngc">Haas lathe (NGC)</option></select></label>
+              <label class="wide">Live-tool syntax dialect<select name="liveToolDialect"><option value="unconfigured">Unconfigured / unknown</option><option value="haas-lathe-ngc">Haas lathe (NGC)</option><option value="hardinge-conquest-fanuc-18t">Hardinge Conquest T42 · Fanuc 18-T live tool (owner-sourced)</option></select></label>
               <label>Live-tool capability<select name="liveToolCapability"><option value="unknown">Unknown</option><option value="not-equipped">Not equipped</option><option value="equipped">Equipped</option></select></label>
               <label>C-axis capability<select name="cAxisCapability"><option value="unknown">Unknown</option><option value="unavailable">Unavailable</option><option value="available">Available</option></select></label>
               <label>Y-axis capability<select name="yAxisCapability"><option value="unknown">Unknown</option><option value="unavailable">Unavailable</option><option value="available">Available</option></select></label>
@@ -633,10 +638,10 @@
               <label>Maximum live-tool speed<input name="liveToolMaxRpm" type="number" min="0" step="any" placeholder="Unknown · rpm"></label>
               <label class="wide">Live-tool evidence<textarea name="liveToolEvidence" rows="3" maxlength="2000" placeholder="Official manual or manufacturer URL, revision, and option verification…"></textarea></label>
             </div>
-          </section>
+          </details>
 
-          <section class="machine-form-section">
-            <div class="machine-section-heading"><span>05</span><div><h3>Safe positions</h3><p>Retained machine-coordinate metadata only. These values are not projected into the part view without an approved machine-to-work transform.</p></div></div>
+          <details id="machineSafePositionDetails" class="machine-form-section machine-form-details">
+            <summary class="machine-section-heading"><span>05</span><div><h3>Stored safe-position metadata</h3><p>Advanced machine-coordinate records only. They are not projected into the part view without an approved machine-to-work transform.</p></div></summary>
             <div class="machine-form-grid numeric-grid">
               <label>Tool-change X<input name="toolChangeX" type="number" step="any" placeholder="Unknown"></label>
               <label>Tool-change Z<input name="toolChangeZ" type="number" step="any" placeholder="Unknown"></label>
@@ -644,7 +649,7 @@
               <label>Safe-index Z<input name="safeIndexZ" type="number" step="any" placeholder="Unknown"></label>
               <label class="wide">Machine notes<textarea name="notes" rows="4" maxlength="2000" placeholder="Configuration details, source manual, measurements, options…"></textarea></label>
             </div>
-          </section>
+          </details>
         </div>
 
         <footer class="machine-dialog-footer">
@@ -652,6 +657,38 @@
           <div>
             <button id="cancelMachineButton" type="button" class="button secondary">Cancel</button>
             <button type="submit" class="button primary">Save machine</button>
+          </div>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="declaredCutterDialog" class="machine-dialog declared-cutter-dialog" aria-labelledby="declaredCutterTitle">
+      <form id="declaredCutterForm">
+        <header class="machine-dialog-header">
+          <div>
+            <span class="eyebrow">OPERATOR-DECLARED CUTTER</span>
+            <h2 id="declaredCutterTitle">Declare square end mill for <span id="declaredCutterToolKey">T</span></h2>
+          </div>
+          <button id="declaredCutterClose" type="button" class="dialog-close close-icon" aria-label="Close declared cutter form"></button>
+        </header>
+        <div class="machine-form-body">
+          <p class="machine-data-note">Enter the exact dimensions of the mounted end mill. The tip is the programmed Z reference and flutes extend toward +Z. This declaration models rotary-indexed side milling only; it does not establish manufacturer identity, driven-unit mounting, holder, turret or collision geometry.</p>
+          <div class="machine-form-grid">
+            <label class="wide">Name<input name="name" type="text" maxlength="60" placeholder=".250 4FL carbide EM" required></label>
+            <label>Units<select name="units"><option value="inch">inch</option><option value="mm">mm</option></select></label>
+            <label>Flutes<input name="flutes" type="number" step="1" min="1" value="4" required></label>
+            <label>Cutter diameter<input name="cutterDiameter" type="number" step="any" min="0" placeholder="0.2500" required></label>
+            <label>Length of cut<input name="lengthOfCut" type="number" step="any" min="0" placeholder="0.7500" required></label>
+            <label>Shank diameter<input name="shankDiameter" type="number" step="any" min="0" placeholder="0.2500" required></label>
+            <label>Overall length<input name="overallLength" type="number" step="any" min="0" placeholder="2.5000" required></label>
+            <label class="wide">Center cutting<select name="centerCutting" required><option value="">Declare yes or no</option><option value="yes">Yes — end face cuts to center (axial plunges allowed)</option><option value="no">No — side milling only</option></select></label>
+          </div>
+        </div>
+        <footer class="machine-dialog-footer">
+          <span id="declaredCutterStatus" role="status" aria-live="polite"></span>
+          <div>
+            <button id="declaredCutterCancel" type="button" class="button secondary">Cancel</button>
+            <button type="submit" class="button primary">Declare and assign</button>
           </div>
         </footer>
       </form>

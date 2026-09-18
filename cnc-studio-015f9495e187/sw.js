@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "verify-app-";
-const CACHE_NAME = "verify-app-v121";
+const CACHE_NAME = "verify-app-v123";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -74,6 +74,8 @@ const APP_ASSETS = [
   "./mill-view.mjs",
   "./live-view.mjs",
   "./live-stock.mjs",
+  "./live-section-stock.mjs",
+  "./declared-cutters.mjs",
   "./runtime.mjs",
   "./lathe-motion-time.mjs",
   "./spindle-feed.mjs",

@@ -16,10 +16,13 @@ const PUNCTUATION = new Set([
 const ALL_PATH_CONTEXTS = Object.freeze([
   "lathe:generic",
   "lathe:haas-lathe-ngc",
+  "lathe:hardinge-conquest-fanuc-18t",
   "mill:fanuc-style",
 ]);
-const LATHE_CONTEXTS = Object.freeze(["lathe:generic", "lathe:haas-lathe-ngc"]);
+const LATHE_CONTEXTS = Object.freeze(["lathe:generic", "lathe:haas-lathe-ngc", "lathe:hardinge-conquest-fanuc-18t"]);
 const HAAS_LATHE_CONTEXT = Object.freeze(["lathe:haas-lathe-ngc"]);
+// Owner-sourced Hardinge Conquest T42 / Fanuc 18-T live-tool slice.
+const HARDINGE_LATHE_CONTEXT = Object.freeze(["lathe:hardinge-conquest-fanuc-18t"]);
 const MILL_CONTEXT = Object.freeze(["mill:fanuc-style"]);
 
 function entry(title, description, scope, contexts, variants = {}) {
@@ -50,6 +53,7 @@ const CODE_HELP = new Map([
   ["G20", entry("Inch units", "Selects inch program units.", "Modeled at the parser boundary and converted to canonical millimeters internally.", ALL_PATH_CONTEXTS)],
   ["G21", entry("Metric units", "Selects millimeter program units.", "Modeled at the parser boundary; internal geometry remains canonical millimeters.", ALL_PATH_CONTEXTS)],
   ["G28", entry("Reference return", "Uses the configured estimated machine-reference behavior for the supported lathe form.", "Only the bounded lathe G28 form is modeled; it does not invent an unconfigured machine-to-work transform. Unknown home travel and a later baseline-setting rapid from that unknown position are disclosed and omitted from the feed + rapid subtotal.", LATHE_CONTEXTS)],
+  ["G30", entry("Second reference return", "Returns the selected U/W axes to the machine's second reference point in the owner-sourced Hardinge dialect.", "Only the axisless or U0/W0 lathe form is modeled. The second reference point's program-coordinate position is unconfigured, so the return path is disclosed as unresolved and the next complete absolute G00 X/Z re-establishes the baseline.", HARDINGE_LATHE_CONTEXT)],
   ["G32", entry("Thread cutting command", "Retains the commanded nominal threading reference-point line and programmed lead under the explicit Haas lathe contract.", "Modeled only for the configured Haas lathe NGC subset. Encoder synchronization, phase, physical helix, pitch accuracy, and machine execution are not verified; generic or Fanuc behavior is not inferred.", HAAS_LATHE_CONTEXT)],
   ["G40", entry("Cutter compensation cancel", "Cancels cutter compensation state.", "Recognized by the lathe and mill engines; physical compensation effects remain limited to explicitly modeled contracts.", ALL_PATH_CONTEXTS)],
   ["G41", entry("Cutter compensation left", "Enables the locally modeled left compensation state when its required setup is confirmed.", "Motion is modeled only by the explicit bounded Haas lathe nose-compensation contract; otherwise it remains unsupported.", HAAS_LATHE_CONTEXT)],
@@ -103,14 +107,18 @@ const CODE_HELP = new Map([
   ["M8", entry("Flood coolant on", "Turns on the coolant state retained by the bounded mill parser.", "Modeled only as mill state; no flow, pressure, delivery, or machine result is verified.", MILL_CONTEXT, {
     "lathe:generic": {title: "Coolant command accepted without state", description: "The lathe parser treats M8 as centerline-geometry-neutral but does not retain or verify a coolant state.", scope: "No coolant-on machine claim is produced by the lathe model."},
     "lathe:haas-lathe-ngc": {title: "Coolant command accepted without state", description: "The Haas lathe parser treats M8 as centerline-geometry-neutral but does not retain or verify a coolant state.", scope: "No coolant-on machine claim is produced by the lathe model."},
+    "lathe:hardinge-conquest-fanuc-18t": {title: "Coolant command accepted without state", description: "The Hardinge lathe parser treats M8 as centerline-geometry-neutral but does not retain or verify a coolant state.", scope: "No coolant-on machine claim is produced by the lathe model."},
   })],
   ["M9", entry("Coolant off", "Turns off the coolant state retained by the bounded mill parser.", "Modeled only as mill state; no flow, pressure, delivery, or machine result is verified.", MILL_CONTEXT, {
     "lathe:generic": {title: "Coolant command accepted without state", description: "The lathe parser treats M9 as centerline-geometry-neutral but does not retain or verify a coolant state.", scope: "No coolant-off machine claim is produced by the lathe model."},
     "lathe:haas-lathe-ngc": {title: "Coolant command accepted without state", description: "The Haas lathe parser treats M9 as centerline-geometry-neutral but does not retain or verify a coolant state.", scope: "No coolant-off machine claim is produced by the lathe model."},
+    "lathe:hardinge-conquest-fanuc-18t": {title: "Coolant command accepted without state", description: "The Hardinge lathe parser treats M9 as centerline-geometry-neutral but does not retain or verify a coolant state.", scope: "No coolant-off machine claim is produced by the lathe model."},
   })],
   ["M23", entry("Thread chamfer on", "Enables the tracked thread-exit chamfer setting.", "Recognized only by the explicit Haas lathe G76 contract; unsupported chamfered cycle geometry remains blocked.", HAAS_LATHE_CONTEXT)],
   ["M24", entry("Thread chamfer off", "Disables the tracked thread-exit chamfer setting.", "Recognized only by the explicit Haas lathe G76 contract.", HAAS_LATHE_CONTEXT)],
   ["M30", entry("Program end and reset", "Ends executable program flow at the modeled boundary.", "Modeled as an execution boundary by the lathe and mill engines; machine-specific reset side effects are not inferred.", ALL_PATH_CONTEXTS)],
+  ["M54", entry("Live tool on (owner-sourced)", "Starts the live-tool spindle at the S RPM routed in the same block; the owner's post also reports coolant on.", "Modeled only for the owner-sourced Hardinge Conquest T42 / Fanuc 18-T dialect with live-tool capability equipped; S in the M54 block is the live RPM, direction is not documented, and coolant state is not retained.", HARDINGE_LATHE_CONTEXT)],
+  ["M55", entry("Live tool off (owner-sourced)", "Stops the tracked live-tool spindle state; the owner's post also reports coolant off.", "Modeled only for the owner-sourced Hardinge Conquest T42 / Fanuc 18-T dialect.", HARDINGE_LATHE_CONTEXT)],
   ["M96", entry("Unmodeled execution boundary", "The lathe parser recognizes M96 as program control flow and blocks execution instead of simulating the call or branch.", "No control-flow target, return, repetition, or machine side effect is guessed.", Object.freeze([]), {
     "mill:fanuc-style": {status: "unresolved", controllerSpecific: true, title: "Controller-specific or unsupported", description: "G-Code Studio has no locally verified M96 meaning for the bounded mill context.", scope: "Its behavior may depend on the controller or machine builder. Execution is blocked and no machine-state meaning is guessed."},
   })],
@@ -469,7 +477,8 @@ function normalizedContext(context) {
   if (!machineType) return null;
   if (machineType === "mill") return {machineType, dialect: "fanuc-style", key: "mill:fanuc-style"};
   const requestedDialect = String(context?.dialect || "").toLowerCase();
-  const dialect = requestedDialect === "haas-lathe-ngc" ? "haas-lathe-ngc" : "generic";
+  const dialect = requestedDialect === "haas-lathe-ngc" || requestedDialect === "hardinge-conquest-fanuc-18t"
+    ? requestedDialect : "generic";
   return {machineType, dialect, key: `lathe:${dialect}`};
 }
 

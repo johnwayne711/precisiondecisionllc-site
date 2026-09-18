@@ -16,6 +16,7 @@ import {
   listMillingToolLibraryRecords, millingToolLibraryRecordById,
 } from "./milling-tool-library.mjs";
 import {adaptEligibleMillingToolTo2dAssembly} from "./milling-tool-preview.mjs";
+import {declaredCutterTo2dAssembly, isDeclaredCutterId} from "./declared-cutters.mjs";
 
 const EPSILON = 1e-9;
 
@@ -23,6 +24,7 @@ export const TOOL_ASSEMBLY_2D_STATUS = Object.freeze({
   unverified: "UNVERIFIED",
   catalogScaled: "CATALOG-SCALED 2D ENVELOPE",
   manufacturerCadProjection: "MANUFACTURER CAD 2D DISPLAY",
+  operatorDeclared: "OPERATOR-DECLARED DIMENSIONS",
 });
 
 function deepClone(value) {
@@ -355,8 +357,23 @@ export const MILLING_CUTTER_2D_LIBRARY = Object.freeze(
   listMillingToolLibraryRecords().map(adaptEligibleMillingToolTo2dAssembly).filter(Boolean),
 );
 
+// Operator-declared cutters are registered per session from the remembered
+// job; they are never part of the source-linked catalog.
+let DECLARED_CUTTER_2D_DEFINITIONS = Object.freeze([]);
+
+export function registerDeclaredCutterAssemblies(records) {
+  DECLARED_CUTTER_2D_DEFINITIONS = Object.freeze(
+    (Array.isArray(records) ? records : []).map(declaredCutterTo2dAssembly).filter(Boolean),
+  );
+  return DECLARED_CUTTER_2D_DEFINITIONS;
+}
+
+export function listDeclaredCutterAssemblies2d() {
+  return DECLARED_CUTTER_2D_DEFINITIONS;
+}
+
 function allToolDefinitions2d() {
-  return [...TOOL_ASSEMBLY_2D_LIBRARY, ...MILLING_CUTTER_2D_LIBRARY];
+  return [...TOOL_ASSEMBLY_2D_LIBRARY, ...MILLING_CUTTER_2D_LIBRARY, ...DECLARED_CUTTER_2D_DEFINITIONS];
 }
 
 export function listToolAssemblies2d() {
@@ -380,6 +397,11 @@ export function resolveAssignableToolAssembly2d(assemblyRef) {
   const {id, revision} = assemblyRef;
   if (typeof id !== "string" || !id.length || id.trim() !== id || !Number.isInteger(revision) || revision < 1) {
     return null;
+  }
+  if (isDeclaredCutterId(id)) {
+    const definition = DECLARED_CUTTER_2D_DEFINITIONS.find((entry) => entry.id === id && entry.revision === revision) || null;
+    if (!definition || toolAssembly2dDisplayCapability(definition).available !== true) return null;
+    return definition;
   }
   const millingRecord = millingToolLibraryRecordById(id);
   if (millingRecord) {
@@ -571,9 +593,14 @@ export function validateToolAssembly2d(assembly) {
     errors.push("The permitted Z cutting direction must be confirmed.");
   }
   if (assembly.geometryKind === "axial-milling-cutter") {
+    const declared = assembly.cuttingModel?.dimensionSource === "operator-declared";
     if (assembly.cuttingModel?.referenceSemantics !== "flat-end-mill-tip") errors.push("The milling cutter must use flat-end-mill-tip reference semantics.");
-    if (assembly.cuttingModel?.centerCutting !== true) errors.push("Axial plunge removal requires a manufacturer-identified center-cutting tool.");
-    if (assembly.cuttingModel?.dimensionsExact !== true) errors.push("Axial plunge removal requires exact published cutter dimensions.");
+    if (declared) {
+      if (typeof assembly.cuttingModel?.centerCutting !== "boolean") errors.push("Declare whether the end mill is center cutting.");
+    } else if (assembly.cuttingModel?.centerCutting !== true) {
+      errors.push("Axial plunge removal requires a manufacturer-identified center-cutting tool.");
+    }
+    if (assembly.cuttingModel?.dimensionsExact !== true) errors.push(declared ? "Declared cutter dimensions must be complete." : "Axial plunge removal requires exact published cutter dimensions.");
   }
   return errors;
 }
@@ -889,7 +916,8 @@ function resolvedCuttingModel(assembly) {
         && Boolean(cuttingOffsets(model))
       : model.mode === "axial-flat-endmill"
         && model.stockRemovalVerified === true
-        && model.centerCutting === true
+        && (model.centerCutting === true
+          || (model.dimensionSource === "operator-declared" && typeof model.centerCutting === "boolean"))
         && model.dimensionsExact === true
         && model.referenceSemantics === "flat-end-mill-tip"
         && Number(model.diameter) > EPSILON

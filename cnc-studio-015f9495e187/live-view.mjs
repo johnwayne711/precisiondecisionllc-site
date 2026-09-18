@@ -1,3 +1,5 @@
+import {rotarySectionOutline} from "./live-section-stock.mjs";
+
 const EPSILON = 1e-9;
 
 export function liveFacePoint(segment, point, xScale = 1) {
@@ -92,6 +94,10 @@ export function renderLiveFace2d(context, {
   stockRadius = 0,
   stockFaceIntervals = null,
   axialBores = [],
+  rotarySections = [],
+  sectionFaceZ = null,
+  cutterRadius = 0,
+  cutterCenter = null,
   lengthScale = 1,
   lengthUnit = "mm",
   lengthDecimals = 3,
@@ -130,6 +136,57 @@ export function renderLiveFace2d(context, {
       }
       context.fill("evenodd"); context.stroke();
     }
+  }
+
+  // Rotary-indexed side-milling sections: the section reaching the free face
+  // replaces the plain stock disk; deeper sections are outlined with their Z.
+  const faceSection = (rotarySections || []).find((section) => (
+    Number.isFinite(sectionFaceZ) && section.endZ >= sectionFaceZ - EPSILON
+  )) || null;
+  for (const section of rotarySections || []) {
+    const outline = rotarySectionOutline(section, {maximumPoints: 1440});
+    if (outline.length < 3) continue;
+    const atFace = section === faceSection;
+    if (atFace && stockRadius > 0) {
+      const radius = projectedRadius(project, {x: 0, y: 0}, stockRadius);
+      context.beginPath();
+      context.arc(origin.x, origin.y, radius, 0, Math.PI * 2);
+      outline.forEach((point, index) => {
+        const screen = project(point);
+        if (index) context.lineTo(screen.x, screen.y); else context.moveTo(screen.x, screen.y);
+      });
+      context.closePath();
+      context.fillStyle = "#061012";
+      context.fill("evenodd");
+    }
+    context.beginPath();
+    outline.forEach((point, index) => {
+      const screen = project(point);
+      if (index) context.lineTo(screen.x, screen.y); else context.moveTo(screen.x, screen.y);
+    });
+    context.closePath();
+    context.strokeStyle = atFace ? "#7ce5dc" : "rgba(124, 229, 220, .55)";
+    context.lineWidth = atFace ? 1.6 : 1;
+    context.setLineDash(atFace ? [] : [4, 3]);
+    context.stroke();
+    context.setLineDash([]);
+    if (!atFace) {
+      context.fillStyle = "rgba(180, 229, 226, .8)";
+      context.font = '8px "Cascadia Code", Consolas, monospace';
+      const label = project(outline[0]);
+      context.fillText(`SECTION Z${(section.startZ / lengthScale).toFixed(lengthDecimals)}…${(section.endZ / lengthScale).toFixed(lengthDecimals)} ${lengthUnit}`, label.x + 4, label.y - 4);
+    }
+  }
+  if (cutterRadius > 0 && cutterCenter && Number.isFinite(cutterCenter.x) && Number.isFinite(cutterCenter.y)) {
+    const center = project(cutterCenter);
+    const radius = projectedRadius(project, cutterCenter, cutterRadius);
+    context.beginPath();
+    context.arc(center.x, center.y, radius, 0, Math.PI * 2);
+    context.strokeStyle = "#f9a8d4";
+    context.lineWidth = 1.2;
+    context.setLineDash([2, 3]);
+    context.stroke();
+    context.setLineDash([]);
   }
 
   for (const bore of axialBores || []) {

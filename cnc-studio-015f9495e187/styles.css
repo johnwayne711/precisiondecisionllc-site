@@ -575,6 +575,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .warnings .note-occurrences ol { margin: 6px 0 0; padding: 0; list-style: none; }
 .warnings .note-occurrences li { margin: 0; padding: 7px 0; color: inherit; border: 0; border-top: 1px solid var(--border); background: none; overflow-wrap: anywhere; }
 .safety-note { margin: 0; padding: 10px 12px; color: #d4a8ae; border-top: 1px solid var(--border); background: rgba(251, 113, 133, .05); font-size: 9px; line-height: 1.45; }
+.declared-cutter-dialog { width: min(640px, calc(100vw - 28px)); }
+.declared-cutter-dialog .machine-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .machine-dialog { width: min(920px, calc(100vw - 28px)); max-height: min(900px, calc(100dvh - 28px)); padding: 0; color: var(--text); border: 1px solid #355159; border-radius: 14px; background: #091416; box-shadow: 0 28px 90px rgba(0, 0, 0, .72); overflow: hidden; }
 .machine-dialog::backdrop { background: rgba(2, 8, 10, .82); backdrop-filter: blur(5px); }
 .machine-dialog form { display: flex; max-height: min(900px, calc(100dvh - 28px)); flex-direction: column; }
@@ -589,6 +591,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .machine-form-body { flex: 1; min-height: 0; padding: 16px 18px 22px; overflow: auto; }
 .machine-data-note { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 16px; padding: 10px 12px; border: 1px solid rgba(245, 158, 11, .26); border-radius: 9px; background: rgba(245, 158, 11, .055); }
 .machine-data-note p { margin: 0; color: #d7c4a2; font-size: 10px; line-height: 1.5; }
+.machine-setup-guide { margin-bottom: 16px; padding: 10px 12px; border: 1px solid rgba(74, 222, 128, .24); border-radius: 9px; background: rgba(20, 83, 45, .12); }
+.machine-setup-guide strong { display: block; margin-bottom: 4px; color: #86efac; font-size: 9px; letter-spacing: .08em; }
+.machine-setup-guide p { margin: 0; color: #c5d8cf; font-size: 10px; line-height: 1.5; }
 .status-badge { flex: 0 0 auto; padding: 4px 7px; border: 1px solid currentColor; border-radius: 999px; font-size: 8px; font-weight: 900; letter-spacing: .1em; }
 .status-badge.draft { color: var(--warn); }
 .status-badge.confirmed { color: var(--success); }
@@ -597,6 +602,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .machine-section-heading > span { color: var(--accent); font: 10px "Cascadia Code", Consolas, monospace; }
 .machine-section-heading h3 { margin: 0 0 5px; font-size: 12px; }
 .machine-section-heading p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.machine-form-details { display: block; padding: 0; }
+.machine-form-details > summary { min-height: 68px; padding: 20px 0; cursor: pointer; list-style: none; }
+.machine-form-details > summary::-webkit-details-marker { display: none; }
+.machine-form-details > summary > div { min-width: 0; }
+.machine-form-details > summary::after { content: "+"; display: grid; flex: 0 0 auto; place-items: center; width: 24px; height: 24px; margin-left: auto; color: var(--accent); border: 1px solid #31525a; border-radius: 6px; font: 15px/1 "Cascadia Code", Consolas, monospace; }
+.machine-form-details[open] > summary::after { content: "−"; }
+.machine-form-details > summary:focus-visible { outline: 2px solid #85f8cd; outline-offset: 2px; border-radius: 5px; }
+.machine-form-details > .machine-form-grid { margin: 0 0 20px 212px; }
 .machine-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .machine-form-grid label { display: flex; min-width: 0; flex-direction: column; gap: 6px; color: var(--muted); font-size: 9px; font-weight: 750; letter-spacing: .04em; }
 .machine-form-grid label.wide { grid-column: 1 / -1; }
@@ -950,6 +963,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .machine-dialog form { max-height: calc(100dvh - 12px); }
   .machine-dialog-header, .machine-form-body, .machine-dialog-footer { padding-left: 12px; padding-right: 12px; }
   .machine-form-section { grid-template-columns: 1fr; gap: 12px; }
+  .machine-form-details > .machine-form-grid { margin-left: 0; }
   .machine-form-grid { grid-template-columns: 1fr; }
   .machine-form-grid label.wide { grid-column: auto; }
   .machine-dialog-footer { align-items: flex-start; flex-direction: column; }
