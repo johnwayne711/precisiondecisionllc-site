@@ -267,7 +267,7 @@ export function renderLiveFace2d(context, {
   const front = turretSide === "front";
   const turretLabel = turretSide === "rear" ? "TURRET REAR" : front ? "TURRET FRONT" : "TURRET SIDE UNKNOWN · DRAWN AS REAR";
   const rotationLabel = Number.isFinite(referenceB)
-    ? ` · PART FIXED AT B${referenceB.toFixed(2)}${rotarySenseKnown ? "" : " (+B CCW ASSUMED)"}`
+    ? ` · PART FIXED AT B${referenceB.toFixed(2)}${rotarySenseKnown ? "" : " (+B: CUTTER WALKS CW, ASSUMED)"}`
     : "";
   context.fillStyle = "rgba(180, 205, 208, .76)";
   context.font = '9px "Cascadia Code", Consolas, monospace';

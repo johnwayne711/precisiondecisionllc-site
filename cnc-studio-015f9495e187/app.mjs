@@ -92,8 +92,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.24";
-const APP_BUILD = 126;
+const APP_VERSION = "v0.3.25";
+const APP_BUILD = 127;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -6936,7 +6936,7 @@ function drawFace(rect) {
       ? "FACE VIEW · SIDE-MILL SECTION MODELED"
       : "FACE VIEW · SIDE-MILL SECTION PARTIAL";
     const frame = faceViewFrameOptions();
-    const frameNote = `${frame.turretSide === "unknown" ? " Turret side is not declared; drawn as a rear turret." : ""}${frame.rotarySenseKnown ? "" : " Positive B is assumed counterclockwise from the free end (right-hand rule); declare the rotary direction in Setup to confirm."}`;
+    const frameNote = `${frame.turretSide === "unknown" ? " Turret side is not declared; drawn as a rear turret." : ""}${frame.rotarySenseKnown ? "" : " For +B the cutter is assumed to walk clockwise around the part (right-hand rule); set the direction in Setup to confirm."}`;
     const referenceLabel = Number.isFinite(frame.referenceB) ? ` The part is shown fixed as it sits at B${frame.referenceB.toFixed(2)} (mid-range of the indexes) with +X toward the turret; the tool moves around it.` : "";
     faceCopy.textContent = `${sectionSummary.details.join(". ")}.${referenceLabel}${frameNote} Exact ray entries per pass at ${(360 / (stock.rotarySections.angleSamples || 3600)).toFixed(2)}°; holder, turret and drive engagement remain path-only.`;
   } else if (liveSummary.status === LIVE_STOCK_STATUS.MODELED) {
@@ -7347,7 +7347,7 @@ function updateStats() {
       info: true,
       requiresAttention: true,
       code: "rotary-sense-assumed",
-      message: "Positive B is assumed to turn the part counterclockwise viewed from the free end (right-hand rule about +Z). Declare the rotary direction in Setup → Live tool, rotary & extra axes if your machine turns the other way; dimensions do not change, only which way the part is shown turning.",
+      message: "For +B the cutter is assumed to walk clockwise around the part as seen from the free end (the part or spindle turning counterclockwise, right-hand rule about +Z). If on your machine the cutter walks the other way, set it in Setup → Live tool, rotary & extra axes; the flat's dimensions do not change, only which way the passes are laid out.",
     });
   }
   if (analyzedSectionSummary.airOnly) {
