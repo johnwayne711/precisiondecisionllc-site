@@ -1037,8 +1037,14 @@ export function renderLathe3d(context, {
   context.fillRect(0, 0, width, height);
 
   const scene = makeProjector({width, height, segments, stock, xScale, orientationSign, camera});
-  const partProject = spindleRotatedProjector(scene.project, spindleRotationDegrees, orientationSign);
-  drawAxes(context, scene.project, scene.bounds, stock?.radius);
+  // Machine picture: world +y is the machine's vertical (+Y) and world +z is
+  // the operator's side (machine -X), so the rear turret (+X) is "Back" and
+  // sits on the viewer's right when looking from the free end, matching the
+  // Face view. The geometry helpers still yield (y = X, z = Y) at C = 0; this
+  // fixed quarter turn about the spindle axis maps them into that picture.
+  const machineProject = (point) => scene.project({x: point.x, y: point.z, z: -point.y});
+  const partProject = spindleRotatedProjector(machineProject, spindleRotationDegrees, orientationSign);
+  drawAxes(context, machineProject, scene.bounds, stock?.radius);
   drawStockSurface(context, stock, orientationSign, partProject, camera, quality);
   drawAxialBores(context, stock, orientationSign, partProject, quality);
   if (showToolpaths) drawToolpaths(context, segments, Math.min(visibleCount, segments.length), xScale, orientationSign, partProject);
