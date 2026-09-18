@@ -257,6 +257,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .segmented button.active { color: var(--accent); background: #14312a; }
 .dimension-toggle button { min-width: 32px; font-size: 9px; font-weight: 850; letter-spacing: .04em; }
 .graphics-toggle { position: relative; display: inline-flex; align-items: center; height: 32px; cursor: pointer; }
+.graphics-toggle[hidden] { display: none; }
 .graphics-toggle input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .graphics-toggle span { display: grid; place-items: center; height: 30px; padding: 0 9px; color: var(--muted); border: 1px solid var(--border); border-radius: 7px; background: #0d1728; font-size: 9px; font-weight: 850; letter-spacing: .04em; }
 .graphics-toggle input:checked + span { color: var(--accent); border-color: rgba(86, 227, 159, .42); background: #14312a; }

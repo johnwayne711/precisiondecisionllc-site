@@ -90,10 +90,11 @@ import {
   zoomCameraAt,
   viewCubeHitTarget,
 } from "./view3d.mjs";
+import {buildToolBodies3d} from "./tool-bodies-3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.27";
-const APP_BUILD = 129;
+const APP_VERSION = "v0.3.28";
+const APP_BUILD = 130;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -403,6 +404,7 @@ const elements = {
   view2d: $("view2dButton"), viewFace: $("viewFaceButton"), view3d: $("view3dButton"), faceViewStatus: $("faceViewStatus"),
   millViewStatus: $("millViewStatus"), latheReadout: $("latheReadout"), millReadout: $("millReadout"),
   toolOverlay: $("toolOverlayButton"), toolVerificationBadge: $("toolVerificationBadge"),
+  transparencyToggle: $("transparencyToggle"), transparencyToggleLabel: $("transparencyToggleLabel"),
   programToolsSetup: $("programToolsSetup"), programToolSummary: $("programToolSummary"), programToolList: $("programToolList"),
   toolLibraryButton: $("toolLibraryButton"), toolLibraryDialog: $("toolLibraryDialog"), toolLibraryClose: $("toolLibraryClose"),
   toolLibrarySearch: $("toolLibrarySearch"), toolLibraryFamilyFilter: $("toolLibraryFamilyFilter"),
@@ -6302,25 +6304,31 @@ function toolPhysicalToScreen(point) {
 }
 
 function updateToolControls() {
-  const available = state.viewMode === "2d" && !isMillMode();
+  const threeDimensional = state.viewMode === "3d";
+  const available = !isMillMode() && (state.viewMode === "2d" || threeDimensional);
   const active = available && state.showTool2d;
   elements.toolOverlay.disabled = !available;
   elements.toolOverlay.classList.toggle("active", active);
   elements.toolOverlay.setAttribute("aria-pressed", String(active));
   elements.toolOverlay.title = available
-    ? "Show or hide the dimension-driven 2D tool outline"
-    : "The tool assembly is currently available in 2D only";
+    ? (threeDimensional
+      ? "Show or hide the assigned tool, its holder and a nominal turret as illustrative 3D bodies"
+      : "Show or hide the dimension-driven 2D tool outline")
+    : "The tool assembly is available in the 2D and 3D views";
   if (!active) elements.toolVerificationBadge.hidden = true;
 }
 
-function drawToolAssembly2d() {
-  if (isMillMode() || state.viewMode !== "2d" || !state.showTool2d) {
-    elements.toolVerificationBadge.hidden = true;
-    return;
-  }
+/**
+ * Resolve the active tool's display model at the current execution point and
+ * refresh the tool badge. Shared by the 2D outline and the 3D bodies: the
+ * reference point is taken from the given segments (the 2D plot's own
+ * projection, or the parsed segments for 3D). Returns null when nothing can
+ * be drawn; the badge then explains why.
+ */
+function activeToolDisplay(segments) {
   const toolKey = activeProgramToolKey();
   const configured = configuredToolAssembly2d(toolKey);
-  const physicalReference = toolPhysicalReferencePointForExecution(plotSegments(),
+  const physicalReference = toolPhysicalReferencePointForExecution(segments,
     state.visibleBlocks,
     xScale(),
   );
@@ -6339,11 +6347,13 @@ function drawToolAssembly2d() {
     running: typeof spindleEvent?.running === "boolean" ? spindleEvent.running : null,
   };
   const badgeStatus = elements.toolVerificationBadge.querySelector("strong");
+  const badgeLabel = elements.toolVerificationBadge.querySelector("span");
+  if (badgeLabel) badgeLabel.textContent = state.viewMode === "3d" ? "3D TOOL BODIES · ILLUSTRATIVE" : "2D TOOL OUTLINE";
   elements.toolVerificationBadge.hidden = false;
   if (!toolKey || !configured) {
     elements.toolVerificationBadge.classList.add("invalid");
     badgeStatus.textContent = toolKey ? `${toolKey} UNASSIGNED` : "NO ACTIVE TOOL";
-    return;
+    return null;
   }
   const liveCutter = configured.geometryKind === "axial-milling-cutter";
   const boringDisplay = configured.mountingAxis === "program-z";
@@ -6355,7 +6365,7 @@ function drawToolAssembly2d() {
   if (!model.valid) {
     elements.toolVerificationBadge.classList.add("invalid");
     badgeStatus.textContent = `${toolKey} · OUTLINE UNAVAILABLE`;
-    return;
+    return null;
   }
   const mainSpindleState = machineRunningState(spindle.running);
   const mainSpindleStateLabel = mainSpindleState === "stopped"
@@ -6374,6 +6384,49 @@ function drawToolAssembly2d() {
   elements.toolVerificationBadge.classList.toggle("invalid", !liveCutter && (!["standard", "flipped"].includes(configured.mountingOrientation) || rotationMismatch));
   badgeStatus.textContent = `${toolKey} · ${rotationMismatch ? "ROTATION MISMATCH · " : ""}${spindleLabel}${configured.cuttingModel?.mode === "nominal-lathe" ? " · NOMINAL CUTTER / CAD DISPLAY" : configured.displayOnly ? " · DISPLAY ONLY / NO STOCK REMOVAL" : ""}`;
   if (noseCenter) badgeStatus.textContent += ' · COMPENSATED NOSE';
+  return {toolKey, configured, model, physicalReference, nose, noseCenter, spindleLabel};
+}
+
+/**
+ * Illustrative 3D bodies for the active tool at the point where its 3D path
+ * ends, or null. The assembly follows the drawn path point (spindle angle
+ * and machine Y for a live cutter) so it always sits on its own toolpath.
+ */
+function toolBodies3dForDisplay({interactive = false} = {}) {
+  if (isMillMode() || state.viewMode !== "3d" || !state.showTool2d) {
+    elements.toolVerificationBadge.hidden = true;
+    return null;
+  }
+  const segments = state.parsed.segments;
+  const display = activeToolDisplay(segments);
+  if (!display) return null;
+  const count = Math.max(0, Math.min(segments.length, state.visibleBlocks));
+  const segment = count > 0 ? segments[count - 1] : segments[0];
+  const point = count > 0 ? segment?.end : segment?.start;
+  const faceCoordinates = segment?.coordinateMode === "g112-face";
+  const tangent = Number.isFinite(Number(point?.y)) ? Number(point.y) : 0;
+  const spindleAngleDegrees = !faceCoordinates && Number.isFinite(Number(point?.c)) ? Number(point.c) : 0;
+  const built = buildToolBodies3d(display.configured, display.model, {
+    orientationSign: orientationSign(),
+    tangent,
+    spindleAngleDegrees,
+    turretStations: currentMachineProfile()?.turretStations,
+    slices: interactive ? 12 : 32,
+  });
+  return {
+    bodies: built.bodies,
+    label: `${display.toolKey} · ${built.turretStations}-STATION NOMINAL TURRET`,
+  };
+}
+
+function drawToolAssembly2d() {
+  if (isMillMode() || state.viewMode !== "2d" || !state.showTool2d) {
+    elements.toolVerificationBadge.hidden = true;
+    return;
+  }
+  const display = activeToolDisplay(plotSegments());
+  if (!display) return;
+  const {toolKey, model, nose, noseCenter, spindleLabel} = display;
 
   const tracePolygon = (points) => {
     points.forEach((point, index) => {
@@ -6978,6 +7031,8 @@ function draw3d(rect) {
       if (stock) updateStockRemovedStatus(stock); else updateStockRemovedStatus(null, "BLOCKED");
     } else updateStockRemovedStatus(null, "SET STOCK");
   }
+  const frame = faceViewFrameOptions();
+  const toolDisplay = toolBodies3dForDisplay({interactive});
   renderLathe3d(ctx, {
     width: rect.width,
     height: rect.height,
@@ -6989,7 +7044,11 @@ function draw3d(rect) {
     camera: state.camera3d,
     quality: renderQuality,
     showToolpaths: elements.toolpathToggle.checked,
-    spindleRotationDegrees: faceViewFrameOptions().spindleRotationDegrees,
+    spindleRotationDegrees: frame.spindleRotationDegrees,
+    turretSide: frame.turretSide,
+    toolBodies: toolDisplay?.bodies || null,
+    toolBodiesLabel: toolDisplay?.label || null,
+    transparent: elements.transparencyToggle ? elements.transparencyToggle.checked : true,
   });
   state.graphicsHits = [];
   drawViewCube();
@@ -8532,12 +8591,13 @@ function setGraphicsDimension(mode) {
     : face
     ? "Live-tool face view from the free end toward the chuck, with positive X (turret side) to the right and positive Y up; the part is drawn fixed and the cutter moves around it. Shows programmed centerlines, modeled sections and any supported analytic axial bores; unsupported material removal and complete cutter-holder collision remain path-only."
     : threeDimensional
-      ? "Interactive three-dimensional lathe backplot."
+      ? "Interactive three-dimensional lathe backplot. With Tool on, the assigned tool, its holder and a nominal turret are drawn as illustrative bodies that are not dimensional and make no clearance claim; See-through shows paths inside the material, off draws a solid picture."
       : "Interactive lathe backplot. Click component geometry to inspect it, or use Dimension to pin exact line and radius measurements.");
   elements.canvas.style.cursor = threeDimensional ? "grab" : (face || isMillMode() ? "default" : "crosshair");
   elements.viewCube.hidden = !threeDimensional;
   elements.faceViewStatus.hidden = !face;
   elements.plotViewToggle.hidden = !twoDimensional || isMillMode();
+  if (elements.transparencyToggleLabel) elements.transparencyToggleLabel.hidden = !threeDimensional || isMillMode();
   updatePlotViewToggle();
   if (!twoDimensional) {
     state.geometrySelection = null;
@@ -8579,7 +8639,7 @@ elements.view2d.addEventListener("click", () => setGraphicsDimension("2d"));
 elements.viewFace.addEventListener("click", () => setGraphicsDimension("face"));
 elements.view3d.addEventListener("click", () => setGraphicsDimension("3d"));
 elements.toolOverlay.addEventListener("click", () => {
-  if (isMillMode() || state.viewMode !== "2d") return;
+  if (isMillMode() || !["2d", "3d"].includes(state.viewMode)) return;
   state.showTool2d = !state.showTool2d;
   updateToolControls();
   draw();
@@ -8599,6 +8659,11 @@ elements.toolpathToggle.addEventListener("change", () => {
   state.hoverBlockIndex = null;
   draw();
   persistSession();
+});
+// See-through is a current-page presentation choice for the 3D picture. It is
+// not persisted: D-026 keeps the private preference allowlist closed.
+elements.transparencyToggle?.addEventListener("change", () => {
+  if (state.viewMode === "3d") draw();
 });
 elements.clearGeometrySelection.addEventListener("click", () => {
   state.geometrySelection = null;

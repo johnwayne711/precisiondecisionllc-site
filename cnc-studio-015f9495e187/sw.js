@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "verify-app-";
-const CACHE_NAME = "verify-app-v129";
+const CACHE_NAME = "verify-app-v130";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -39,6 +39,7 @@ const APP_ASSETS = [
   "./samples/sample-g71-finished-part.dxf",
   "./samples/sample-g71-finished-part.step",
   "./view3d.mjs",
+  "./tool-bodies-3d.mjs",
   "./graphics-quality.mjs",
   "./render-scheduler.mjs",
   "./interaction.mjs",

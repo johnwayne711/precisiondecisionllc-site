@@ -1,5 +1,6 @@
 import {isLiveToolSegment, stockContourPoints} from "./simulation.mjs";
 import {hasStockCavities, stockSectionPolygons} from "./stock-section-view.mjs";
+import {subdividePlanarPolygon} from "./tool-bodies-3d.mjs";
 
 const PATH_COLORS = {
   rapid: "#f59e0b",
@@ -443,7 +444,7 @@ function makeProjector({width, height, segments, stock, xScale, orientationSign,
     panX: camera.panX,
     panY: camera.panY,
   };
-  return {project: (point) => projectModelPoint(point, options), bounds, center, sceneSize};
+  return {project: (point) => projectModelPoint(point, options), bounds, center, sceneSize, scale: options.scale};
 }
 
 function drawPolyline(context, points, project, {color, width = 1, dash = [], alpha = 1, glow = 0} = {}) {
@@ -712,10 +713,10 @@ function contourRadiusAt(contour, z) {
   return contour.at(-1).radius;
 }
 
-function drawRotarySectionedStock(context, stock, orientationSign, project, quality) {
+function rotarySectionedStockFacets(stock, orientationSign, project, quality) {
   const sections = stock.rotarySections.sections;
   const contour = stockContourPoints(stock, {maximumPoints: quality.axialRings});
-  if (!contour.length) return;
+  if (!contour.length) return {facets: [], outlines: []};
   const boundaries = new Set(contour.map((point) => point.z));
   for (const section of sections) {
     boundaries.add(section.startZ);
@@ -795,18 +796,8 @@ function drawRotarySectionedStock(context, stock, orientationSign, project, qual
     }
   }
   facets.sort((a, b) => a.depth - b.depth);
-  for (const facet of facets) {
-    context.beginPath();
-    facet.screen.forEach((point, index) => {
-      if (index) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y);
-    });
-    context.closePath();
-    const green = Math.round(105 + facet.light * 55);
-    const blue = Math.round(120 + facet.light * 72);
-    context.fillStyle = `rgba(38, ${green}, ${blue}, .5)`;
-    context.fill();
-  }
   // Outline each modeled section at its Z bounds so the feature reads clearly.
+  const outlines = [];
   for (const section of sections) {
     for (const z of [section.startZ, section.endZ]) {
       const points = [];
@@ -815,9 +806,16 @@ function drawRotarySectionedStock(context, stock, orientationSign, project, qual
         const radius = ringRadius(z, section, angle);
         points.push({x: z * orientationSign, y: radius * Math.cos(angle), z: radius * Math.sin(angle)});
       }
-      drawPolyline(context, points, project, {color: "#7ce5dc", width: 1, alpha: 0.7});
+      outlines.push(points);
     }
   }
+  return {facets, outlines};
+}
+
+function drawRotarySectionedStock(context, stock, orientationSign, project, quality) {
+  const {facets, outlines} = rotarySectionedStockFacets(stock, orientationSign, project, quality);
+  paintStockFacets(context, facets, 0.5);
+  for (const points of outlines) drawPolyline(context, points, project, {color: "#7ce5dc", width: 1, alpha: 0.7});
 }
 
 function drawStockSurface(context, stock, orientationSign, project, camera, quality) {
@@ -842,17 +840,7 @@ function drawStockSurface(context, stock, orientationSign, project, camera, qual
     return;
   }
 
-  for (const facet of surfaceFacets(rings, quality.radialSlices, project)) {
-    context.beginPath();
-    facet.screen.forEach((point, index) => {
-      if (index) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y);
-    });
-    context.closePath();
-    const green = Math.round(105 + facet.light * 55);
-    const blue = Math.round(120 + facet.light * 72);
-    context.fillStyle = `rgba(38, ${green}, ${blue}, .42)`;
-    context.fill();
-  }
+  paintStockFacets(context, surfaceFacets(rings, quality.radialSlices, project), 0.42);
 
   const ends = stockAxialExtent(stock, orientationSign);
   const startRadius = rings[0]?.radius ?? stock.radius;
@@ -869,7 +857,31 @@ function drawStockSurface(context, stock, orientationSign, project, camera, qual
   }
 }
 
-function drawSectionStock(context, stock, orientationSign, project, quality) {
+function stockFacetFill(light, alpha) {
+  const green = Math.round(105 + light * 55);
+  const blue = Math.round(120 + light * 72);
+  return `rgba(38, ${green}, ${blue}, ${alpha})`;
+}
+
+function paintStockFacets(context, facets, alpha) {
+  for (const facet of facets) {
+    context.beginPath();
+    facet.screen.forEach((point, index) => {
+      if (index) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y);
+    });
+    context.closePath();
+    context.fillStyle = stockFacetFill(facet.light, alpha);
+    context.fill();
+  }
+}
+
+function drawStockBlocked(context, message) {
+  context.fillStyle = "#fb7185";
+  context.font = '12px "Cascadia Code", Consolas, monospace';
+  context.fillText(`STOCK DISPLAY BLOCKED: ${message}`, 16, 48);
+}
+
+function sectionStockFacets(stock, orientationSign, project, quality) {
   let sections;
   const preview = quality.id === "interactive-preview";
   const tolerance = Number(quality.arcChordTolerance) || 0.00254;
@@ -879,10 +891,7 @@ function drawSectionStock(context, stock, orientationSign, project, quality) {
     if (!Number.isFinite(slices) || slices > 2048) throw new RangeError("Selected radial chord tolerance exceeds the surface display budget.");
     sections = stockSectionPolygons(stock, {tolerance, maximumPoints: Math.floor(180000 / slices)});
   } catch (error) {
-    context.fillStyle = "#fb7185";
-    context.font = '12px "Cascadia Code", Consolas, monospace';
-    context.fillText(`STOCK DISPLAY BLOCKED: ${error.message}`, 16, 48);
-    return;
+    return {facets: [], error: error.message};
   }
   const facets = [];
   for (const points of sections) {
@@ -899,13 +908,16 @@ function drawSectionStock(context, stock, orientationSign, project, quality) {
     }
   }
   facets.sort((a, b) => a.depth - b.depth);
-  for (const {screen, light} of facets) {
-    context.beginPath();
-    screen.forEach((point, index) => { if (index) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y); });
-    context.closePath();
-    context.fillStyle = `rgba(38, ${Math.round(105 + light * 55)}, ${Math.round(120 + light * 72)}, .58)`;
-    context.fill();
+  return {facets, error: null};
+}
+
+function drawSectionStock(context, stock, orientationSign, project, quality) {
+  const {facets, error} = sectionStockFacets(stock, orientationSign, project, quality);
+  if (error) {
+    drawStockBlocked(context, error);
+    return;
   }
+  paintStockFacets(context, facets, 0.58);
 }
 
 /**
@@ -971,6 +983,10 @@ function drawToolpaths(context, segments, visibleCount, xScale, orientationSign,
       toolpathStyleForSegment(segment),
     );
   }
+  drawCurrentMarker(context, segments, visibleCount, xScale, orientationSign, project);
+}
+
+function drawCurrentMarker(context, segments, visibleCount, xScale, orientationSign, project) {
   if (!visibleCount) return;
   const finalSegment = segments[Math.min(visibleCount, segments.length) - 1];
   const point = segmentWorldPoints(finalSegment, xScale, orientationSign).at(-1);
@@ -983,6 +999,211 @@ function drawToolpaths(context, segments, visibleCount, xScale, orientationSign,
   context.arc(marker.x, marker.y, 3.5, 0, Math.PI * 2);
   context.fill();
   context.shadowBlur = 0;
+}
+
+/**
+ * Toolpath pieces as depth-sortable primitives for the solid picture. Each
+ * polyline edge carries the mean depth of its two ends so a pass lying on
+ * the remaining surface paints after that surface and a pass still inside
+ * the material stays hidden behind it.
+ */
+function toolpathPrimitives(segments, visibleCount, xScale, orientationSign, project) {
+  const primitives = [];
+  const add = (segment, pending) => {
+    const style = toolpathStyleForSegment(segment, {pending});
+    const screen = segmentWorldPoints(segment, xScale, orientationSign).map(project);
+    for (let index = 1; index < screen.length; index += 1) {
+      const a = screen[index - 1];
+      const b = screen[index];
+      primitives.push({kind: "line", screen: [a, b], depth: (a.depth + b.depth) / 2 + LINE_DEPTH_BIAS, style});
+    }
+  };
+  for (const segment of segments) add(segment, true);
+  for (const segment of segments.slice(0, visibleCount)) add(segment, false);
+  return primitives;
+}
+
+function axialBorePrimitives(stock, orientationSign, project, quality) {
+  const primitives = [];
+  const bores = Array.isArray(stock?.axialBores) ? stock.axialBores : [];
+  for (const bore of bores) {
+    const rings = axialBoreWorldRings(bore, orientationSign, Math.min(96, Math.max(24, quality.radialSlices || 48)));
+    if (!rings) continue;
+    const frontCenter = project({x: rings.frontX, y: rings.centerY, z: rings.centerZ});
+    const bottomCenter = project({x: rings.bottomX, y: rings.centerY, z: rings.centerZ});
+    if (frontCenter.depth + 1e-9 < bottomCenter.depth) continue;
+    const polygon = (world, fill, stroke = null, lineWidth = 1) => {
+      const screen = world.map(project);
+      return {kind: "polygon", screen, depth: screen.reduce((sum, point) => sum + point.depth, 0) / screen.length, fill, stroke, lineWidth};
+    };
+    for (let index = 0; index < rings.front.length; index += 1) {
+      const next = (index + 1) % rings.front.length;
+      primitives.push(polygon([rings.front[index], rings.bottom[index], rings.bottom[next], rings.front[next]], "rgba(3, 18, 22, .92)"));
+    }
+    primitives.push(polygon(rings.bottom, "rgba(11, 49, 55, .98)", "rgba(102, 215, 209, .62)", 0.9));
+    primitives.push(polygon(rings.front, "rgba(2, 11, 14, .76)", "#7ce5dc", 1.35));
+  }
+  return primitives;
+}
+
+/**
+ * Stock facets for the solid picture. Cardinal silhouettes are skipped here
+ * because every surface has to take part in one depth sort with the tool
+ * bodies and the toolpaths.
+ */
+function collectSolidStock(stock, orientationSign, project, quality) {
+  if (!stock?.radius || !stock?.length) return {facets: [], outlines: [], error: null};
+  if (hasStockCavities(stock)) {
+    const {facets, error} = sectionStockFacets(stock, orientationSign, project, quality);
+    return {facets, outlines: [], error};
+  }
+  if (stock.rotarySections?.sections?.length) {
+    const {facets, outlines} = rotarySectionedStockFacets(stock, orientationSign, project, quality);
+    return {facets, outlines, error: null};
+  }
+  const rings = stockRings(stock, orientationSign, quality.axialRings);
+  return {facets: rings.length ? surfaceFacets(rings, quality.radialSlices, project) : [], outlines: [], error: null};
+}
+
+const LINE_DEPTH_BIAS = 0.05;
+const LIGHT_DIRECTION = (() => {
+  const length = Math.hypot(-0.45, 0.6, 0.66);
+  return {x: -0.45 / length, y: 0.6 / length, z: 0.66 / length};
+})();
+const TOOL_BODY_COLORS = {
+  holder: [178, 188, 202],
+  insert: [251, 211, 75],
+  cutter: [251, 211, 75],
+  shank: [150, 160, 174],
+  "driven-holder": [126, 138, 156],
+  turret: [104, 116, 136],
+};
+const TOOL_BODY_EDGE_COLORS = {
+  holder: "rgba(226, 232, 240, .9)",
+  insert: "#fde68a",
+  cutter: "#fde68a",
+  shank: "rgba(203, 213, 225, .8)",
+  "driven-holder": "rgba(148, 163, 184, .85)",
+  turret: "rgba(148, 163, 184, .7)",
+};
+// Coplanar seat faces resolve toward the insert; the turret always yields.
+const TOOL_BODY_DEPTH_BIAS = {insert: 0.5, cutter: 0.5, turret: -0.5};
+const COARSE_TOOL_BODIES = new Set(["turret", "driven-holder"]);
+
+/**
+ * Front-facing faces of the illustrative tool bodies as screen primitives.
+ * Facing and shading come from projecting each face normal, so no winding
+ * assumption is needed. With a finite `cell` the faces are split into
+ * pieces that sort correctly against the stock facets around them.
+ */
+export function toolBodyPrimitives(bodies, project, scale, {cell = Infinity} = {}) {
+  const primitives = [];
+  const unitScale = Number.isFinite(scale) && scale > 1e-12 ? scale : 1;
+  for (const body of Array.isArray(bodies) ? bodies : []) {
+    const base = TOOL_BODY_COLORS[body.role] || TOOL_BODY_COLORS.holder;
+    const edge = TOOL_BODY_EDGE_COLORS[body.role] || TOOL_BODY_EDGE_COLORS.holder;
+    const bias = TOOL_BODY_DEPTH_BIAS[body.role] || 0;
+    const faceCell = COARSE_TOOL_BODIES.has(body.role) ? Infinity : cell;
+    for (const face of body.faces || []) {
+      const points = face.points;
+      if (!Array.isArray(points) || points.length < 3) continue;
+      const normalLength = Math.hypot(face.normal?.x || 0, face.normal?.y || 0, face.normal?.z || 0);
+      if (normalLength < 1e-12) continue;
+      const normal = {x: face.normal.x / normalLength, y: face.normal.y / normalLength, z: face.normal.z / normalLength};
+      const centroid = points.reduce((sum, point) => ({x: sum.x + point.x / points.length, y: sum.y + point.y / points.length, z: sum.z + point.z / points.length}), {x: 0, y: 0, z: 0});
+      const origin = project(centroid);
+      const tip = project({x: centroid.x + normal.x, y: centroid.y + normal.y, z: centroid.z + normal.z});
+      const facing = tip.depth - origin.depth;
+      if (!(facing > 1e-9)) continue;
+      const viewX = (tip.x - origin.x) / unitScale;
+      const viewY = -(tip.y - origin.y) / unitScale;
+      const viewLength = Math.hypot(viewX, viewY, facing) || 1;
+      const light = clamp(0.3 + 0.62 * Math.max(0, (viewX * LIGHT_DIRECTION.x + viewY * LIGHT_DIRECTION.y + facing * LIGHT_DIRECTION.z) / viewLength), 0.3, 0.95);
+      const fill = `rgb(${Math.round(base[0] * light)}, ${Math.round(base[1] * light)}, ${Math.round(base[2] * light)})`;
+      for (const piece of subdividePlanarPolygon(points, normal, faceCell)) {
+        const screen = piece.map(project);
+        primitives.push({
+          kind: "body",
+          screen,
+          depth: screen.reduce((sum, point) => sum + point.depth, 0) / screen.length + bias,
+          fill,
+          edge,
+          dashed: body.dashed === true,
+          role: body.role,
+        });
+      }
+    }
+  }
+  return primitives;
+}
+
+function tracePrimitive(context, screen, closed) {
+  context.beginPath();
+  screen.forEach((point, index) => {
+    if (index) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y);
+  });
+  if (closed) context.closePath();
+}
+
+function paintSolidPrimitives(context, primitives) {
+  context.globalAlpha = 1;
+  context.setLineDash([]);
+  context.lineJoin = "round";
+  for (const primitive of primitives) {
+    if (primitive.kind === "line") {
+      const {style} = primitive;
+      tracePrimitive(context, primitive.screen, false);
+      context.strokeStyle = style.color;
+      context.lineWidth = style.width;
+      context.globalAlpha = style.alpha;
+      context.setLineDash(style.dash);
+      context.stroke();
+      context.setLineDash([]);
+      context.globalAlpha = 1;
+    } else if (primitive.kind === "facet") {
+      tracePrimitive(context, primitive.screen, true);
+      context.fillStyle = stockFacetFill(primitive.light, 1);
+      context.fill();
+    } else if (primitive.kind === "body") {
+      tracePrimitive(context, primitive.screen, true);
+      context.fillStyle = primitive.fill;
+      context.fill();
+      // A same-colour hairline hides the seams between pieces; dashed edges
+      // mark a body whose mounting has not been declared.
+      context.strokeStyle = primitive.dashed ? primitive.edge : primitive.fill;
+      context.lineWidth = primitive.dashed ? 0.9 : 1;
+      context.setLineDash(primitive.dashed ? [3, 2] : []);
+      context.stroke();
+      context.setLineDash([]);
+    } else {
+      tracePrimitive(context, primitive.screen, true);
+      context.fillStyle = primitive.fill;
+      context.fill();
+      if (primitive.stroke) {
+        context.strokeStyle = primitive.stroke;
+        context.lineWidth = primitive.lineWidth || 1;
+        context.stroke();
+      }
+    }
+  }
+}
+
+function drawToolBodiesTransparent(context, bodies, project, scale) {
+  const primitives = toolBodyPrimitives(bodies, project, scale).sort((a, b) => a.depth - b.depth);
+  context.lineJoin = "round";
+  for (const primitive of primitives) {
+    tracePrimitive(context, primitive.screen, true);
+    context.globalAlpha = 0.4;
+    context.fillStyle = primitive.fill;
+    context.fill();
+    context.globalAlpha = 0.85;
+    context.strokeStyle = primitive.edge;
+    context.lineWidth = primitive.role === "turret" ? 0.8 : 1;
+    context.setLineDash(primitive.dashed ? [3, 2] : []);
+    context.stroke();
+  }
+  context.setLineDash([]);
+  context.globalAlpha = 1;
 }
 
 function drawAxes(context, project, bounds, stockRadius) {
@@ -1021,11 +1242,24 @@ function spindleRotatedProjector(project, spindleRotationDegrees, orientationSig
   });
 }
 
+/**
+ * Part-frame display rotation: the program's fixed spindle angle plus the
+ * half turn that puts a declared front turret on the operator's side, the
+ * same frame the Face view uses (D-057).
+ */
+export function machinePictureRotation(spindleRotationDegrees = 0, turretSide = "rear") {
+  return (Number(spindleRotationDegrees) || 0) + (turretSide === "front" ? 180 : 0);
+}
+
 export function renderLathe3d(context, {
   width, height, segments = [], visibleCount = 0, stock = null,
   xScale = 0.5, orientationSign = 1,
   showToolpaths = true,
   spindleRotationDegrees = 0,
+  turretSide = "rear",
+  toolBodies = null,
+  toolBodiesLabel = null,
+  transparent = true,
   camera = {yaw: -Math.PI / 4, pitch: Math.asin(1 / Math.sqrt(3)), zoom: 1, panX: 0, panY: 0},
   quality = {contourRings: 720, axialRings: 320, radialSlices: 128},
 } = {}) {
@@ -1043,16 +1277,45 @@ export function renderLathe3d(context, {
   // Face view. The geometry helpers still yield (y = X, z = Y) at C = 0; this
   // fixed quarter turn about the spindle axis maps them into that picture.
   const machineProject = (point) => scene.project({x: point.x, y: point.z, z: -point.y});
-  const partProject = spindleRotatedProjector(machineProject, spindleRotationDegrees, orientationSign);
+  const partProject = spindleRotatedProjector(machineProject, machinePictureRotation(spindleRotationDegrees, turretSide), orientationSign);
+  const bodies = Array.isArray(toolBodies) ? toolBodies : [];
+  const shownCount = Math.min(visibleCount, segments.length);
   drawAxes(context, machineProject, scene.bounds, stock?.radius);
-  drawStockSurface(context, stock, orientationSign, partProject, camera, quality);
-  drawAxialBores(context, stock, orientationSign, partProject, quality);
-  if (showToolpaths) drawToolpaths(context, segments, Math.min(visibleCount, segments.length), xScale, orientationSign, partProject);
+  if (transparent) {
+    drawStockSurface(context, stock, orientationSign, partProject, camera, quality);
+    drawAxialBores(context, stock, orientationSign, partProject, quality);
+    if (showToolpaths) drawToolpaths(context, segments, shownCount, xScale, orientationSign, partProject);
+    if (bodies.length) drawToolBodiesTransparent(context, bodies, partProject, scene.scale);
+  } else {
+    // Solid picture: every surface, bore, toolpath piece and tool-body piece
+    // takes part in one painter's sort so nearer material hides what is
+    // behind it. Tool faces are split to roughly the facet size so the sort
+    // stays honest where the insert meets the remaining surface.
+    const preview = quality.id === "interactive-preview";
+    const cell = clamp(scene.sceneSize / 40, 1.5, 6) * (preview ? 3 : 1);
+    const stockResult = collectSolidStock(stock, orientationSign, partProject, quality);
+    if (stockResult.error) drawStockBlocked(context, stockResult.error);
+    const primitives = stockResult.facets.map((facet) => ({kind: "facet", screen: facet.screen, depth: facet.depth, light: facet.light}));
+    primitives.push(...axialBorePrimitives(stock, orientationSign, partProject, quality));
+    if (showToolpaths) primitives.push(...toolpathPrimitives(segments, shownCount, xScale, orientationSign, partProject));
+    if (bodies.length) primitives.push(...toolBodyPrimitives(bodies, partProject, scene.scale, {cell}));
+    primitives.sort((a, b) => a.depth - b.depth);
+    paintSolidPrimitives(context, primitives);
+    for (const points of stockResult.outlines) drawPolyline(context, points, partProject, {color: "#7ce5dc", width: 1, alpha: 0.7});
+    if (showToolpaths) drawCurrentMarker(context, segments, shownCount, xScale, orientationSign, partProject);
+  }
 
-  context.fillStyle = "rgba(145, 166, 171, .66)";
   context.font = '9px "Cascadia Code", Consolas, monospace';
+  if (bodies.length) {
+    // Two short rows above the navigation hint so nothing overlaps the badge
+    // or the hint on a narrow canvas.
+    context.fillStyle = "rgba(253, 230, 138, .82)";
+    if (toolBodiesLabel) context.fillText(String(toolBodiesLabel), 14, height - 42);
+    context.fillText("TOOL · HOLDER · TURRET ARE ILLUSTRATIVE · NOT DIMENSIONAL · NO CLEARANCE CLAIM", 14, height - 28);
+  }
+  context.fillStyle = "rgba(145, 166, 171, .66)";
   context.textAlign = "right";
-  context.fillText("MIDDLE-DRAG ORBIT · LEFT-DRAG PAN · WHEEL ZOOM", width - 14, height - 14);
+  context.fillText(`${transparent ? "SEE-THROUGH" : "SOLID"} · MIDDLE-DRAG ORBIT · LEFT-DRAG PAN · WHEEL ZOOM`, width - 14, height - 14);
   context.textAlign = "left";
   return {hitPaths: []};
 }
