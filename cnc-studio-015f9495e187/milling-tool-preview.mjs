@@ -248,3 +248,72 @@ export function adaptEligibleMillingToolTo2dAssembly(recordOrId) {
     },
   });
 }
+
+/**
+ * Adapt a browse-only milling seed (ball nose, drill point) to a display-only
+ * 2D assembly: its source-scaled outline can be drawn at the programmed point,
+ * but no stock-removal, holder or collision claim follows because the record
+ * has no approved cutting reference semantics.
+ */
+export function adaptDisplayOnlyMillingToolTo2dAssembly(recordOrId) {
+  const record = resolveRecord(recordOrId);
+  if (record.demoCuttingEligibility?.eligible === true) return null;
+  const preview = millingToolPreviewViewModel(record);
+  const dimensions = preview.dimensions;
+  const blockedReason = record.demoCuttingEligibility?.blockedReason
+    || "This milling cutter has no approved cutting reference semantics; it is drawn for display only.";
+  return deepFreeze({
+    id: record.id,
+    revision: record.revision,
+    name: `${record.manufacturer} ${record.catalogNumber} · ${record.name}`,
+    manufacturer: record.manufacturer,
+    family: "live-milling",
+    geometryKind: "axial-milling-cutter",
+    verification: "catalogScaled",
+    displayVerification: "catalogScaled",
+    renderingClaim: "catalog-construction",
+    displayOnly: true,
+    geometryNotice: "Source-scale cutter and shank envelope drawn for display only. Stock removal, driven unit, collet projection, mounting transform, turret, and collision envelope are not represented.",
+    sourceRecordRef: {id: record.id, revision: record.revision, revisionRef: record.revisionRef},
+    geometryRevisionRef: record.geometryRevisionRef,
+    profile: record.profile,
+    cutterProfile: record.profile,
+    cutterDiameter: dimensions.cutterDiameterMm,
+    shankDiameter: dimensions.shankDiameterMm,
+    lengthOfCut: dimensions.cuttingLengthMm,
+    overallLength: dimensions.overallLengthMm,
+    point: dimensions.point,
+    schematic: millingToolGeometryMm(record),
+    preview,
+    sources: [...record.sourceRefs],
+    assignment: {
+      assignable: true,
+      scope: ["displayGeometry"],
+      reference: {type: "cutter-tip-display", units: "mm", axisMm: 0, radialMm: 0, geometryRevisionRef: record.geometryRevisionRef},
+      blockedOutsideScope: blockedReason,
+    },
+    cuttingModel: {
+      family: "live-milling",
+      mode: "unsupported",
+      referenceSemantics: "cutter-tip-display",
+      geometryRevisionRef: record.geometryRevisionRef,
+      diameter: dimensions.cutterDiameterMm,
+      lengthOfCut: dimensions.cuttingLengthMm,
+      centerCutting: record.centerCutting === true,
+      dimensionsExact: record.claims?.publishedDimensions === true,
+      point: dimensions.point,
+      scope: ["displayGeometry"],
+      demoSimulationReady: false,
+      simulationReady: false,
+      stockRemovalVerified: false,
+      collisionReady: false,
+      holderGeometryIncluded: false,
+      blockedReason,
+    },
+  });
+}
+
+/** Every milling seed as a 2D assembly: demo cutting when eligible, display only otherwise. */
+export function adaptMillingToolTo2dAssembly(recordOrId) {
+  return adaptEligibleMillingToolTo2dAssembly(recordOrId) || adaptDisplayOnlyMillingToolTo2dAssembly(recordOrId);
+}

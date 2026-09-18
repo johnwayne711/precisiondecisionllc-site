@@ -167,13 +167,16 @@ function cubePoint(values = {}) {
 
 function cubeDirectionLabel(direction, coordinateSystem = "lathe") {
   if (coordinateSystem === "mill") {
+    // Mill machine picture (mill-view.mjs millMachinePicturePoint): world +y
+    // is machine +Z (tool axis up) and world +z is the operator's side
+    // (machine -Y), so the cube names the machine axes behind each face.
     const labels = [];
-    if (direction.z > 0) labels.push("Top +Z");
-    if (direction.z < 0) labels.push("Bottom -Z");
-    if (direction.y > 0) labels.push("+Y");
-    if (direction.y < 0) labels.push("-Y");
-    if (direction.x > 0) labels.push("+X");
-    if (direction.x < 0) labels.push("-X");
+    if (direction.y > 0) labels.push("Top +Z");
+    if (direction.y < 0) labels.push("Bottom -Z");
+    if (direction.z > 0) labels.push("Front -Y");
+    if (direction.z < 0) labels.push("Back +Y");
+    if (direction.x > 0) labels.push("Right +X");
+    if (direction.x < 0) labels.push("Left -X");
     return labels.join(" ");
   }
   const labels = [];
@@ -1259,6 +1262,7 @@ export function renderLathe3d(context, {
   turretSide = "rear",
   toolBodies = null,
   toolBodiesLabel = null,
+  toolBodiesNotice = null,
   transparent = true,
   camera = {yaw: -Math.PI / 4, pitch: Math.asin(1 / Math.sqrt(3)), zoom: 1, panX: 0, panY: 0},
   quality = {contourRings: 720, axialRings: 320, radialSlices: 128},
@@ -1311,7 +1315,7 @@ export function renderLathe3d(context, {
     // or the hint on a narrow canvas.
     context.fillStyle = "rgba(253, 230, 138, .82)";
     if (toolBodiesLabel) context.fillText(String(toolBodiesLabel), 14, height - 42);
-    context.fillText("TOOL · HOLDER · TURRET ARE ILLUSTRATIVE · NOT DIMENSIONAL · NO CLEARANCE CLAIM", 14, height - 28);
+    context.fillText(String(toolBodiesNotice || "TOOL · HOLDER · TURRET ARE ILLUSTRATIVE · NOT DIMENSIONAL · NO CLEARANCE CLAIM"), 14, height - 28);
   }
   context.fillStyle = "rgba(145, 166, 171, .66)";
   context.textAlign = "right";

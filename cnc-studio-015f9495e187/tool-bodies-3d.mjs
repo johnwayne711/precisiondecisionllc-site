@@ -166,16 +166,33 @@ function turretStationCount(stations) {
 }
 
 /** Distance from the turret centre to the flat that faces the part. */
-export function turretApothem(stations) {
-  return NOMINAL_TURRET_DISPLAY.diameterMm / 2 * Math.cos(Math.PI / turretStationCount(stations));
+export function turretApothem(stations, diameterMm = NOMINAL_TURRET_DISPLAY.diameterMm) {
+  return diameterMm / 2 * Math.cos(Math.PI / turretStationCount(stations));
 }
 
-function turretDisc({centerX, centerW = 0, z0, z1, stations}) {
+/**
+ * Turret disc size for the 3D picture: the machine profile's published or
+ * measured values when both are present, otherwise the nominal display disc.
+ * The flags let the label say which one is drawn.
+ */
+export function turretDisplaySize({turretDiameterMm = null, turretThicknessMm = null} = {}) {
+  const diameterKnown = positive(turretDiameterMm);
+  const thicknessKnown = positive(turretThicknessMm);
+  return {
+    diameterMm: diameterKnown ? Number(turretDiameterMm) : NOMINAL_TURRET_DISPLAY.diameterMm,
+    thicknessMm: thicknessKnown ? Number(turretThicknessMm) : NOMINAL_TURRET_DISPLAY.thicknessMm,
+    nominal: !(diameterKnown && thicknessKnown),
+    diameterNominal: !diameterKnown,
+    thicknessNominal: !thicknessKnown,
+  };
+}
+
+function turretDisc({centerX, centerW = 0, z0, z1, stations, diameterMm = NOMINAL_TURRET_DISPLAY.diameterMm}) {
   const sides = turretStationCount(stations);
   return prismAlongZ({
     centerX,
     centerW,
-    radius: NOMINAL_TURRET_DISPLAY.diameterMm / 2,
+    radius: diameterMm / 2,
     z0,
     z1,
     sides,
@@ -213,15 +230,19 @@ export function buildToolBodies3d(assembly, model, {
   tangent = 0,
   spindleAngleDegrees = 0,
   turretStations = null,
+  turretDiameterMm = null,
+  turretThicknessMm = null,
+  turretShankMm = null,
   slices = 32,
   includeTurret = true,
 } = {}) {
   const stations = turretStationCount(turretStations);
-  const result = {bodies: [], notice: TOOL_BODY_3D_NOTICE, kind: null, turretStations: stations};
+  const disc = turretDisplaySize({turretDiameterMm, turretThicknessMm});
+  const result = {bodies: [], notice: TOOL_BODY_3D_NOTICE, kind: null, turretStations: stations, turret: disc};
   // An axial station sits on the turret face inside the periphery; a square
   // shank ends where the flat facing the part begins.
-  const axialStationOffset = NOMINAL_TURRET_DISPLAY.diameterMm / 2 * NOMINAL_TURRET_DISPLAY.stationPitchFraction;
-  const shankEndOffset = turretApothem(stations);
+  const axialStationOffset = disc.diameterMm / 2 * NOMINAL_TURRET_DISPLAY.stationPitchFraction;
+  const shankEndOffset = turretApothem(stations, disc.diameterMm);
   if (!assembly || !model?.valid || !model.referencePoint) return result;
   const reference = model.referencePoint;
   if (!finite(reference.z) || !finite(reference.x)) return result;
@@ -254,7 +275,7 @@ export function buildToolBodies3d(assembly, model, {
     const bodyEnd = noseEnd + nose.bodyLengthMm;
     push("driven-holder", prismAlongZ({centerX: reference.x, radius: nose.noseDiameterMm / 2, z0: noseStart, z1: noseEnd, sides: slices}), {nominal: true});
     push("driven-holder", prismAlongZ({centerX: reference.x, radius: nose.bodyDiameterMm / 2, z0: noseEnd, z1: bodyEnd, sides: slices}), {nominal: true});
-    turret = {centerX: reference.x + axialStationOffset, z0: bodyEnd, z1: bodyEnd + NOMINAL_TURRET_DISPLAY.thicknessMm};
+    turret = {centerX: reference.x + axialStationOffset, z0: bodyEnd, z1: bodyEnd + disc.thicknessMm};
   } else {
     const holderOutline = model.holder?.outline?.length >= 3 ? model.holder.outline : componentOutline(model, ["holder"]);
     const cutterOutline = componentOutline(model, ["insert", "cutter"]) || model.insert?.outline || model.cutter?.outline || null;
@@ -271,16 +292,20 @@ export function buildToolBodies3d(assembly, model, {
       turret = {
         centerX: (bounds.minX + bounds.maxX) / 2 + axialStationOffset,
         z0: bounds.maxZ,
-        z1: bounds.maxZ + NOMINAL_TURRET_DISPLAY.thicknessMm,
+        z1: bounds.maxZ + disc.thicknessMm,
       };
     } else {
       // Square-shank OD tool: the shank stands on the cutting plane. Standard
       // (insert down, rear turret) puts the holder above the cutting edge in
       // machine +Y; a flipped mounting puts it below.
+      // The tool's own published shank governs; the profile's square-shank
+      // size fills in for a definition that lacks one; nominal only after that.
       const height = positive(assembly.holderShankHeight)
         ? assembly.holderShankHeight
-        : (positive(assembly.holderShankWidth) ? assembly.holderShankWidth : NOMINAL_SHANK_HEIGHT_MM);
-      const heightPublished = positive(assembly.holderShankHeight) || positive(assembly.holderShankWidth);
+        : (positive(assembly.holderShankWidth)
+          ? assembly.holderShankWidth
+          : (positive(turretShankMm) ? Number(turretShankMm) : NOMINAL_SHANK_HEIGHT_MM));
+      const heightPublished = positive(assembly.holderShankHeight) || positive(assembly.holderShankWidth) || positive(turretShankMm);
       const thickness = positive(assembly.insertThickness) ? assembly.insertThickness : Math.min(NOMINAL_INSERT_THICKNESS_MM, height / 4);
       const up = flipped ? -1 : 1;
       push("holder", extrudeOutline(holderOutline, 0, up * height), {nominal: !heightPublished, dashed: !mountingKnown});
@@ -288,14 +313,14 @@ export function buildToolBodies3d(assembly, model, {
       const centerZ = (bounds.minZ + bounds.maxZ) / 2;
       turret = {
         centerX: bounds.maxX + shankEndOffset,
-        z0: centerZ - NOMINAL_TURRET_DISPLAY.thicknessMm / 2,
-        z1: centerZ + NOMINAL_TURRET_DISPLAY.thicknessMm / 2,
+        z0: centerZ - disc.thicknessMm / 2,
+        z1: centerZ + disc.thicknessMm / 2,
       };
     }
   }
 
   if (includeTurret && turret) {
-    push("turret", turretDisc({...turret, stations}), {nominal: true});
+    push("turret", turretDisc({...turret, stations, diameterMm: disc.diameterMm}), {nominal: disc.nominal});
   }
 
   const cosine = Math.cos((Number(spindleAngleDegrees) || 0) * DEGREES);

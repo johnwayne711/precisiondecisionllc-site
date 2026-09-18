@@ -159,7 +159,7 @@
               <input id="transparencyToggle" type="checkbox" checked>
               <span>See-through</span>
             </label>
-            <button id="dimensionButton" class="toolbar-tool" type="button" aria-pressed="false" title="Pin exact line and radius dimensions in the 2D view">Dimension</button>
+            <button id="dimensionButton" class="toolbar-tool" type="button" aria-pressed="false" title="Pin exact dimensions in the 2D view: click a line or radius for its size, or two corners or midpoints for the distance between them">Dimension</button>
             <button id="clearDimensionsButton" class="toolbar-tool clear-tool" type="button" title="Remove all pinned dimensions" disabled>Clear dims</button>
           </div>
           <div id="latheReadout" class="readout"><span>Z</span><strong id="zReadout">0.0000</strong><span id="xReadoutLabel">X</span><strong id="xReadout">0.0000</strong><small id="unitReadout">in</small></div>
@@ -168,8 +168,10 @@
             <span><i class="pending"></i>Pending</span>
             <span><i class="rapid"></i>Rapid</span>
             <span data-lathe-legend><i class="rough"></i>Rough</span>
-            <span><i class="cut"></i>Cut</span>
+            <span data-lathe-legend><i class="cut"></i>Cut</span>
+            <span data-mill-legend hidden><i class="mill-cut"></i>Cut</span>
             <span><i class="arc"></i>Arc</span>
+            <span data-mill-legend hidden><i class="blocked"></i>Blocked</span>
             <span data-lathe-legend><i class="live"></i>Live tool</span>
             <span data-lathe-legend><i class="reference"></i>Reference geometry</span>
           </div>
@@ -185,7 +187,7 @@
           <button id="toolRotationJump" type="button">Show source line</button>
         </section>
         <div id="canvasWrap" class="canvas-wrap">
-          <canvas id="plotCanvas" role="img" aria-label="Interactive lathe backplot. In 2D, click component geometry to inspect it, or use Dimension to pin exact line and radius measurements." title="In 2D, click component geometry to measure it. Turn on Dimension to pin exact line and radius measurements."></canvas>
+          <canvas id="plotCanvas" role="img" aria-label="Interactive lathe backplot. In 2D, click component geometry to inspect it, or use Dimension to pin exact line, radius and point-to-point measurements." title="In 2D, click component geometry to measure it. Turn on Dimension to pin exact line, radius and point-to-point measurements."></canvas>
           <div class="plot-overlays">
             <section id="profilePenetrationAlert" class="profile-penetration-alert" role="alert" aria-live="assertive" hidden>
               <div>
@@ -209,7 +211,7 @@
                 <div><dt>Midpoint</dt><dd id="geometryMidpoint">—</dd></div>
                 <div><dt>End</dt><dd id="geometryEnd">—</dd></div>
               </dl>
-              <small>Geometric X is signed radius from spindle centerline. Dimension mode pins exact analytic/programmed entities; sampled stock-grid chords are labeled approximate and cannot be pinned as exact dimensions.</small>
+              <small>Geometric X is signed radius from spindle centerline. Dimension mode pins exact analytic/programmed entities, imported DXF/STEP geometry with its numeric bound shown, and point-to-point distances between exact corners and midpoints; sampled stock-grid chords are labeled approximate and cannot be pinned as exact dimensions.</small>
             </section>
           </div>
           <section id="solidSetupWorkspace" class="solid-setup-workspace" aria-labelledby="solidSetupTitle" hidden>
@@ -230,7 +232,8 @@
           </div>
           <div id="millViewStatus" class="mill-view-status" role="status" aria-live="polite" hidden>
             <strong>3-AXIS MILL · COMMAND CENTERLINE · PATH ONLY</strong>
-            <span>Native XYZ programmed motion only. Stock, cutter diameter/length, compensation, work-offset transforms, fixtures, machine travel, and collision are not modeled.</span>
+            <span>Native XYZ programmed motion only. Stock, cutter compensation, work-offset transforms, fixtures, machine travel, and collision are not modeled; a chosen cutter is drawn for display only.</span>
+            <span id="millStateReadout" class="mill-state-readout"></span>
           </div>
           <div id="viewCube" class="view-cube" role="group" aria-label="3D view navigation" hidden>
             <canvas id="viewCubeCanvas" role="img" aria-label="Clickable view cube. Select a face, edge, or corner to orient the model."></canvas>
@@ -527,6 +530,16 @@
           <div id="millSetupBoundary" class="mill-setup-boundary" hidden>
             <strong>FANUC-STYLE 3-AXIS PATH SUBSET</strong>
             <p>G0/G1 XYZ and G2/G3 in G17 are rendered as programmed command centerlines. Startup requires explicit G40, G49 or G43 H, G80, G90/G91, G94, and G54; I/J arcs also require G90.1/G91.1. Dashed multi-axis G0 lines connect commanded endpoints only. Unsupported controller behavior blocks downstream geometry instead of being ignored.</p>
+            <details id="millToolsDetails" class="tool-assembly-setup" open>
+              <summary><span>PROGRAM TOOLS</span><strong id="millToolSummary">NO T CALLS</strong></summary>
+              <div class="tool-assembly-body">
+                <p>Each executable T word can show one cutter: a milling cutter from the library (published dimensions) or an end mill you declare. The cutter is drawn at the command point in Top and 3D for display only; mill stock, cutter compensation, holders and collision remain unmodeled.</p>
+                <button id="millToolLibraryButton" type="button" class="tool-library-open" aria-haspopup="dialog" aria-controls="toolLibraryDialog">Browse mill cutters</button>
+                <div id="millToolList" class="program-tool-list" aria-live="polite">
+                  <div class="program-tool-empty">Plot a program containing a T call to choose the cutter drawn for it.</div>
+                </div>
+              </div>
+            </details>
           </div>
         </div>
 
@@ -597,6 +610,11 @@
               <div id="machineCssUnitsReview" class="wide" hidden><p>The previous release may have changed this saved G96 setting to m/min. Its origin is unknown, so CSS calculations are paused. Choose the intended units above or confirm the retained choice.</p><label><input id="confirmMachineCssUnits" type="checkbox">Use the selected G96 units for this machine profile</label></div>
               <label>Chuck orientation<select name="orientation"><option value="left">Chuck left</option><option value="right">Chuck right</option></select></label>
               <label>Turret stations<input name="turretStations" type="number" min="1" max="100" step="1" placeholder="Unknown"></label>
+              <label>Turret disc diameter (machine units)<input name="turretDiameter" type="number" min="0" step="any" placeholder="Unknown · 3D turret stays nominal"></label>
+              <label>Turret disc thickness (machine units)<input name="turretThickness" type="number" min="0" step="any" placeholder="Unknown · 3D turret stays nominal"></label>
+              <label>Square tool shank size (machine units)<input name="turretToolShank" type="number" min="0" step="any" placeholder="Unknown"></label>
+              <label>Largest boring bar diameter (machine units)<input name="turretBoringBore" type="number" min="0" step="any" placeholder="Unknown"></label>
+              <p class="machine-data-note wide">Turret sizes come from the builder's specification or a measurement on the machine. Leave unknown values blank: the 3D picture then keeps a labeled nominal disc instead of a guessed one.</p>
             </div>
           </section>
 

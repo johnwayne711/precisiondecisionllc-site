@@ -15,7 +15,7 @@ export {A16TMCLNR4_CAD_PROJECTION} from "./tool-cad-boring-projection.mjs";
 import {
   listMillingToolLibraryRecords, millingToolLibraryRecordById,
 } from "./milling-tool-library.mjs";
-import {adaptEligibleMillingToolTo2dAssembly} from "./milling-tool-preview.mjs";
+import {adaptMillingToolTo2dAssembly} from "./milling-tool-preview.mjs";
 import {declaredCutterTo2dAssembly, isDeclaredCutterId} from "./declared-cutters.mjs";
 
 const EPSILON = 1e-9;
@@ -354,7 +354,7 @@ export const TOOL_ASSEMBLY_2D_LIBRARY = Object.freeze([
 ]);
 
 export const MILLING_CUTTER_2D_LIBRARY = Object.freeze(
-  listMillingToolLibraryRecords().map(adaptEligibleMillingToolTo2dAssembly).filter(Boolean),
+  listMillingToolLibraryRecords().map(adaptMillingToolTo2dAssembly).filter(Boolean),
 );
 
 // Operator-declared cutters are registered per session from the remembered
@@ -405,7 +405,9 @@ export function resolveAssignableToolAssembly2d(assemblyRef) {
   }
   const millingRecord = millingToolLibraryRecordById(id);
   if (millingRecord) {
-    if (millingRecord.revision !== revision || millingRecord.demoCuttingEligibility?.eligible !== true) return null;
+    // A demo-cutting seed resolves to its cutting definition; a browse-only
+    // seed resolves to a display-only outline that never removes stock.
+    if (millingRecord.revision !== revision) return null;
     const definition = MILLING_CUTTER_2D_LIBRARY.find((entry) => entry.id === id && entry.revision === revision) || null;
     if (!definition || toolAssembly2dDisplayCapability(definition).available !== true) return null;
     return definition;

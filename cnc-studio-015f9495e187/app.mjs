@@ -48,7 +48,7 @@ import {
   registerDeclaredCutterAssemblies, resolveAssignableToolAssembly2d, TOOL_ASSEMBLY_2D_STATUS, toolAssembly2dById,
   toolPhysicalReferencePointForExecution,
 } from "./tool-assembly.mjs";
-import {normalizeDeclaredCutters, validateDeclaredCutter} from "./declared-cutters.mjs";
+import {declaredCutterTo2dAssembly, normalizeDeclaredCutters, validateDeclaredCutter} from "./declared-cutters.mjs";
 import {
   TOOL_LIBRARY_CATALOG, catalogDiamondInsertOutline2d, listToolLibraryAssemblies,
   toolLibraryAssemblyById, toolLibraryAssemblyDetail,
@@ -75,6 +75,10 @@ import {
   sampleGeometryEntity,
 } from "./geometry-inspector.mjs";
 import {
+  dimensionFigure, dimensionReadings, entityDimension, isSnapHit, labelRegionAt, pairDimension, placeLabelRect, referenceBound,
+  samePoint, withCycledDimension, withoutDimension,
+} from "./dimensions.mjs";
+import {
   advanceExecutionPosition, blockedPathPreviewAtPosition, entryVisibleBlocksForSourceLine, executionLineForPosition, executionRangeForSourceLine,
   graphicsHitAt, graphicsSelectionEnabled, latestMachineEventAtPosition, machineRunningState,
   programCursorNavigationKey, programEndAtPosition, programStopAtPosition, programStopEventAtPosition, sourceEndAtPosition, sourceLineAtOffset,
@@ -93,8 +97,8 @@ import {
 import {buildToolBodies3d} from "./tool-bodies-3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.28";
-const APP_BUILD = 130;
+const APP_VERSION = "v0.3.29";
+const APP_BUILD = 131;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -282,7 +286,8 @@ const DEFAULT_MACHINE_PROFILES = [
     liveToolMaxRpm: null, haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown", liveToolEvidence: "",
     turretSide: "rear", rotaryPositiveSense: "unknown",
     toolChangeX: 0, toolChangeZ: 0, safeIndexX: 0, safeIndexZ: 0, turretStations: 12,
-    notes: "BEST-EFFORT DRAFT — NOT VERIFIED. Travel and rapid estimates come from Hardinge T-Series brochure 1312-1E; applicability to this older Conquest is unconfirmed. The 12-station turret is a guess from the 10/12-station options in Conquest parts list PL-60A. Assumes machine reference X0/Z0, negative machine travel, diameter-mode plotted home X12.74/Z16, and independent-axis rapid motion. Rear (slant-bed) turret per the owner, 2026-09-18. Check every value at the machine before relying on it.",
+    turretDiameter: null, turretThickness: null, turretToolShank: 0.75, turretBoringBore: 1.25,
+    notes: "BEST-EFFORT DRAFT — NOT VERIFIED. Travel and rapid estimates come from Hardinge T-Series brochure 1312-1E; applicability to this older Conquest is unconfirmed. The 12-station turret is a guess from the 10/12-station options in Conquest parts list PL-60A. Assumes machine reference X0/Z0, negative machine travel, diameter-mode plotted home X12.74/Z16, and independent-axis rapid motion. Rear (slant-bed) turret per the owner, 2026-09-18. Check every value at the machine before relying on it. Turret tooling: 3/4 in square-shank and 1-1/4 in round-shank tool sizes come from used-machine listings for the Conquest T42 (2026-09-18) and are not verified against Hardinge documentation; the turret disc diameter and thickness are not published, so the 3D turret stays a labeled nominal disc until they are entered from a measurement.",
     updatedAt: null,
   },
   {
@@ -300,7 +305,8 @@ const DEFAULT_MACHINE_PROFILES = [
     liveToolEvidence: "Owner program N1101 (OPERATION - 9), 2026-09-17: M54 (LIVE TOOL ON COOLANT ON), M55 (LIVE TOOL OFF COOLANT OFF), absolute B spindle index in degrees, G30 U0 W0 home, G98 inch/min, G97 S with M54 as live RPM. Rear turret per the owner, 2026-09-18. No Hardinge programming manual retained.",
     turretSide: "rear", rotaryPositiveSense: "unknown",
     toolChangeX: 0, toolChangeZ: 0, safeIndexX: 0, safeIndexZ: 0, turretStations: 12,
-    notes: "DRAFT LIVE-TOOL SYNTAX PROFILE — NOT VERIFIED. Machine facts repeat the Hardinge Conquest T42 draft (brochure 1312-1E estimates, parts list PL-60A turret guess, plotted home X12.74/Z16). Live-tool syntax is owner-program-sourced: M54/M55 live tool on/off (post reports coolant with them), absolute B spindle index in degrees, S routed to the live spindle with M54 or while it runs, G30 U0 W0 second-reference return, Fanuc G-code system A (G98/G99 feed modes; G90/G92/G94 are turning cycles). Automatic spindle positioning-mode engagement on a B word is assumed and disclosed per program. Live-tool RPM limit and B rapid rate are unknown. Check every value at the machine before relying on it.",
+    turretDiameter: null, turretThickness: null, turretToolShank: 0.75, turretBoringBore: 1.25,
+    notes: "DRAFT LIVE-TOOL SYNTAX PROFILE — NOT VERIFIED. Machine facts repeat the Hardinge Conquest T42 draft (brochure 1312-1E estimates, parts list PL-60A turret guess, plotted home X12.74/Z16). Live-tool syntax is owner-program-sourced: M54/M55 live tool on/off (post reports coolant with them), absolute B spindle index in degrees, S routed to the live spindle with M54 or while it runs, G30 U0 W0 second-reference return, Fanuc G-code system A (G98/G99 feed modes; G90/G92/G94 are turning cycles). Automatic spindle positioning-mode engagement on a B word is assumed and disclosed per program. Live-tool RPM limit and B rapid rate are unknown. Check every value at the machine before relying on it. Turret tooling: 3/4 in square-shank and 1-1/4 in round-shank tool sizes come from used-machine listings for the Conquest T42 (2026-09-18) and are not verified against Hardinge documentation; the turret disc diameter and thickness are not published, so the 3D turret stays a labeled nominal disc until they are entered from a measurement.",
     updatedAt: null,
   },
   {
@@ -309,6 +315,7 @@ const DEFAULT_MACHINE_PROFILES = [
     status: "draft", templateRevision: 6, units: "inch", xProgramming: "diameter", orientation: "left", cssUnits: "program", cssUnitsSource: "template",
     initialPlane: "G18", initialFeedMode: "G99", startMode: "unknown", rapidBehavior: "unknown",
     xAxisStroke: 400 / 25.4, zAxisStroke: 1550 / 25.4, turretStations: 12,
+    turretDiameter: null, turretThickness: null, turretToolShank: null, turretBoringBore: null,
     rapidXMax: 5000 / 25.4, rapidYMax: null, rapidZMax: 8000 / 25.4, rapidCMax: null,
     liveToolDialect: "unconfigured", liveToolCapability: "unknown", cAxisCapability: "unknown",
     yAxisCapability: "unknown", cAxisEngagement: "unknown", liveToolMaxRpm: null,
@@ -344,7 +351,8 @@ const MACHINE_PROFILE_FIELDS = [
   "xAxisStroke", "zAxisStroke",
   "displayHomeMode", "displayHomeX", "displayHomeZ",
   "startMode", "startX", "startZ", "rapidBehavior", "rapidXMax", "rapidZMax", "toolChangeX", "toolChangeZ",
-  "safeIndexX", "safeIndexZ", "turretStations", "liveToolDialect", "liveToolCapability", "cAxisCapability",
+  "safeIndexX", "safeIndexZ", "turretStations", "turretDiameter", "turretThickness", "turretToolShank", "turretBoringBore",
+  "liveToolDialect", "liveToolCapability", "cAxisCapability",
   "yAxisCapability", "cAxisEngagement", "rapidYMax", "rapidCMax", "liveToolMaxRpm", "haasDefaultToFloat",
   "haasIntegerFeedScale", "turretSide", "rotaryPositiveSense", "liveToolEvidence", "notes",
 ];
@@ -354,6 +362,7 @@ const NUMERIC_MACHINE_FIELDS = new Set([
   "xTravelMin", "xTravelMax", "zTravelMin", "zTravelMax", "homeX", "homeZ", "startX", "startZ",
   "rapidXMax", "rapidYMax", "rapidZMax", "rapidCMax", "liveToolMaxRpm", "toolChangeX", "toolChangeZ",
   "safeIndexX", "safeIndexZ", "turretStations",
+  "turretDiameter", "turretThickness", "turretToolShank", "turretBoringBore",
 ]);
 
 const $ = (id) => document.getElementById(id);
@@ -468,10 +477,11 @@ const state = {
   preview3dUntil: 0, precisionRedrawTimer: null,
   graphicsHits: [], hoverBlockIndex: null, highlightedSourceLine: null, programDirty: false,
   componentGeometry: [], geometryHover: null, geometrySelection: null,
-  dimensions: [], dimensionMode: false,
+  dimensions: [], dimensionMode: false, dimensionPending: null, dimensionHover: null, dimensionLabelRegions: [],
   showTool2d: false,
   toolAssignments: {}, toolAssignmentRevision: 0, toolAssignmentScope: null, declaredCutters: [],
   plot2dView: "top", plotSegmentsCache: null,
+  millToolAssignments: {},
   toolAssignmentDocumentIdentity: null, programEditOrigin: null, bundledSample: false,
   programIdentity: createProgramIdentity(sampleProgram, {fileName: "sample-g71-rough.nc", origin: "sample"}),
   bundledStepReference: false,
@@ -1149,6 +1159,7 @@ function persistSession() {
     program: elements.input.value,
     toolAssignments: toolAssignmentsForPersistence(state.toolAssignments),
     declaredCutters: state.declaredCutters,
+    millToolAssignments: state.millToolAssignments,
     latheControllerSettings: state.latheControllerSettings || null,
     toolAssignmentScope: state.toolAssignmentScope,
     bundledSample: isExactBundledSample(elements.input.value, state.bundledSample),
@@ -1186,6 +1197,7 @@ function restoreSession(saved) {
       && isExactBundledProgram(saved.program, stepSampleProgram, state.bundledSample);
     state.declaredCutters = normalizeDeclaredCutters(saved.declaredCutters);
     registerDeclaredCutterAssemblies(state.declaredCutters);
+    state.millToolAssignments = normalizeMillToolAssignments(saved.millToolAssignments);
     if (saved.toolAssignments && typeof saved.toolAssignments === "object" && !Array.isArray(saved.toolAssignments)) {
       state.toolAssignments = Object.fromEntries(Object.entries(saved.toolAssignments).filter(([key, assignment]) => (
         /^T[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/i.test(key)
@@ -1547,7 +1559,7 @@ function loadMillSample() {
   elements.programUnits.value = "machine";
   elements.toolpathToggle.checked = true;
   refreshUnitUi();
-  applyMachineModeUi();
+  applyMachineModeUi({refreshView: false});
   loadProgram("sample-3-axis-mill.nc", millSampleProgram, {bundledSample: true, machineMode: "mill"});
   state.programLine = state.parsed.sourceLines || programLineCount();
   state.visibleBlocks = state.parsed.segments.length;
@@ -3775,6 +3787,7 @@ function applyMachineModeUi({refreshView = true} = {}) {
   elements.view2d.textContent = mill ? "Top" : "2D";
   elements.view2d.title = mill ? "Show the native X/Y command-centerline projection" : "Show the X/Z lathe backplot";
   for (const item of document.querySelectorAll("[data-lathe-legend]")) item.hidden = mill;
+  for (const item of document.querySelectorAll("[data-mill-legend]")) item.hidden = !mill;
   $("operationModeLabel").textContent = mill ? "MILL TOOLPATH" : "LIVE TOOL";
   $("stockStatusLabel").textContent = mill ? "STOCK MODEL" : "STOCK SIMULATION";
   $("clearanceStatusLabel").textContent = mill ? "COLLISION" : "CLEARANCE";
@@ -4324,6 +4337,26 @@ function exactEntityMatchesStock(entity, stock) {
   return matches >= 4;
 }
 
+/**
+ * A programmed radial move (a shoulder or face at one Z) lies on the current
+ * stock when the silhouette steps between the move's two radii across that Z:
+ * one side of the plane carries the outer radius and the other side carries the
+ * inner radius or no stock at all (the front face). Sampled along the move,
+ * as exactEntityMatchesStock does, only the outer end could ever match.
+ */
+function exactRadialEntityMatchesStock(entity, stock) {
+  const step = Math.max(1e-6, stock.length / Math.max(1, stock.columns - 1));
+  const tolerance = Math.max(0.01, step * 2);
+  const z = entity.start.z;
+  const [inner, outer] = [Math.abs(entity.start.x), Math.abs(entity.end.x)].sort((first, second) => first - second);
+  if (outer - inner <= tolerance) return false;
+  const near = (radius, target) => radius !== null && Math.abs(radius - target) <= tolerance;
+  const before = stockRadiusAt(stock, z - step);
+  const after = stockRadiusAt(stock, z + step);
+  const steps = (outerSide, innerSide) => near(outerSide, outer) && (innerSide === null || near(innerSide, inner));
+  return steps(before, after) || steps(after, before);
+}
+
 function oppositeGeometryEntity(entity, id) {
   if (entity.type === "arc") {
     return arcGeometry({
@@ -4358,8 +4391,9 @@ function exactStockContourGeometry(stock) {
       xScale: xScale(),
       metadata: {blockIndex, sourceLine: segment.line, exact: true},
     });
-    if (entity?.type === "line" && Math.abs(entity.end.z - entity.start.z) <= 1e-9) return;
-    if (!entity || !exactEntityMatchesStock(entity, stock)) return;
+    if (!entity) return;
+    const radial = entity.type === "line" && Math.abs(entity.end.z - entity.start.z) <= 1e-9;
+    if (radial ? !exactRadialEntityMatchesStock(entity, stock) : !exactEntityMatchesStock(entity, stock)) return;
     const key = `${entity.type}:${entity.start.z.toFixed(8)}:${entity.start.x.toFixed(8)}:${entity.end.z.toFixed(8)}:${entity.end.x.toFixed(8)}:${entity.radius?.toFixed(8) || ""}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -4942,6 +4976,17 @@ function saveDeclaredCutterFromDialog(event) {
   state.declaredCutters = [...state.declaredCutters.filter((entry) => entry.id !== record.id), record];
   const definitions = registerDeclaredCutterAssemblies(state.declaredCutters);
   const definition = definitions.find((entry) => entry.id === record.id) || null;
+  if (toolKey && isMillMode()) {
+    // Mill mode draws the declared cutter at the command point; it never
+    // enters the lathe stock-removal assignment path.
+    state.millToolAssignments[toolKey] = {id: record.id, revision: record.revision, kind: "declared"};
+    $("declaredCutterDialog").close();
+    renderMillToolAssignments();
+    updateTransport();
+    draw();
+    persistSession();
+    return;
+  }
   if (toolKey && definition) {
     state.toolAssignments[toolKey] = createVersionedToolAssignment(definition, {
       tipDatum: definition.cuttingModel?.tipDatum || null,
@@ -4950,6 +4995,169 @@ function saveDeclaredCutterFromDialog(event) {
   }
   $("declaredCutterDialog").close();
   invalidateToolAssignments();
+}
+
+// Mill mode: each T call may show one cutter, drawn at the command point
+// from published library dimensions or an operator declaration. This is a
+// display choice only; mill stock, compensation, holders and collision stay
+// unmodeled and no cutting claim follows from it.
+const MILL_CUTTER_DISPLAY_NOTE = "drawn at the command point from published or declared dimensions — display only; stock, compensation, holders and collision stay unmodeled";
+
+function normalizeMillToolAssignments(saved) {
+  if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
+  return Object.fromEntries(Object.entries(saved)
+    .filter(([key, reference]) => (
+      typeof key === "string" && key.length && reference && typeof reference === "object"
+      && typeof reference.id === "string" && reference.id.length
+      && Number.isInteger(reference.revision) && reference.revision >= 1
+      && ["library", "declared"].includes(reference.kind)
+    ))
+    .map(([key, reference]) => [key, {id: reference.id, revision: reference.revision, kind: reference.kind}]));
+}
+
+function millCutterChoices() {
+  const declared = state.declaredCutters.map((record) => ({
+    id: record.id, revision: record.revision, kind: "declared",
+    label: `${record.name} · OPERATOR-DECLARED · CUTTER OUTLINE ONLY`,
+  }));
+  const library = listMillingToolLibraryRecords().map((record) => ({
+    id: record.id, revision: record.revision, kind: "library",
+    label: `${record.manufacturer} ${record.catalogNumber} · ${record.name} · CUTTER OUTLINE ONLY`,
+  }));
+  return [...declared, ...library];
+}
+
+function millCutterDisplayFor(reference) {
+  if (!reference?.id) return null;
+  if (reference.kind === "declared") {
+    const record = state.declaredCutters.find((entry) => entry.id === reference.id && entry.revision === reference.revision);
+    if (!record) return null;
+    const assembly = declaredCutterTo2dAssembly(record);
+    return {
+      diameterMm: assembly.cutterDiameter, lengthOfCutMm: assembly.lengthOfCut,
+      shankDiameterMm: assembly.shankDiameter, overallLengthMm: assembly.overallLength,
+      label: record.name, source: "OPERATOR-DECLARED",
+    };
+  }
+  const record = millingToolLibraryRecordById(reference.id);
+  if (!record || record.revision !== reference.revision) return null;
+  const dimensions = millingToolPreviewViewModel(record).dimensions;
+  return {
+    diameterMm: dimensions.cutterDiameterMm, lengthOfCutMm: dimensions.cuttingLengthMm,
+    shankDiameterMm: dimensions.shankDiameterMm, overallLengthMm: dimensions.overallLengthMm,
+    label: `${record.manufacturer} ${record.catalogNumber}`, source: "PUBLISHED DIMENSIONS",
+  };
+}
+
+function activeMillCutterDisplay() {
+  if (!isMillMode() || !elements.toolpathToggle.checked || state.programDirty) return null;
+  const toolKey = activeToolKeyAtLine(state.parsed.executableToolCalls || [], state.programLine);
+  return toolKey ? millCutterDisplayFor(state.millToolAssignments[toolKey]) : null;
+}
+
+function millStateAtLine(line) {
+  const latest = (events) => (Array.isArray(events) ? events : [])
+    .filter((event) => Number.isFinite(Number(event?.line)) && Number(event.line) <= line)
+    .at(-1) || null;
+  return {
+    toolKey: activeToolKeyAtLine(state.parsed.executableToolCalls || [], line),
+    spindle: latest(state.parsed.spindleEvents),
+    coolant: latest(state.parsed.coolantEvents),
+  };
+}
+
+function updateMillStateReadout() {
+  const output = $("millStateReadout");
+  if (!output) return;
+  if (!isMillMode() || state.programDirty) {
+    output.textContent = "";
+    return;
+  }
+  const current = millStateAtLine(state.programLine);
+  // The mill parser records the commanded word ("m3" / "m4") as the direction.
+  const direction = String(current.spindle?.direction || "").toLowerCase();
+  const spindle = current.spindle
+    ? (current.spindle.running
+      ? `SPINDLE ${direction === "m4" || direction === "ccw" ? "CCW (M4)" : "CW (M3)"}`
+      : "SPINDLE STOPPED")
+    : "SPINDLE STATE UNKNOWN";
+  const coolant = current.coolant ? `COOLANT ${String(current.coolant.mode || "unknown").toUpperCase()}` : "COOLANT UNKNOWN";
+  const cutter = activeMillCutterDisplay();
+  output.textContent = [
+    current.toolKey || "NO TOOL",
+    spindle,
+    coolant,
+    cutter ? `CUTTER Ø${formatDistance(cutter.diameterMm, millDisplayDecimals())} DRAWN` : "NO CUTTER DRAWN",
+  ].join(" · ");
+}
+
+function millToolKeys() {
+  return [...new Set((state.parsed.executableToolCalls || []).map((call) => call.key))];
+}
+
+function renderMillToolAssignments() {
+  const list = $("millToolList");
+  const summary = $("millToolSummary");
+  if (!list || !summary) return;
+  const keys = millToolKeys();
+  list.replaceChildren();
+  const drawn = keys.filter((key) => millCutterDisplayFor(state.millToolAssignments[key])).length;
+  summary.textContent = keys.length ? `${drawn}/${keys.length} CUTTER${keys.length === 1 ? "" : "S"} DRAWN` : "NO T CALLS";
+  if (!keys.length) {
+    const empty = document.createElement("div");
+    empty.className = "program-tool-empty";
+    empty.textContent = "Plot a program containing a T call to choose the cutter drawn for it.";
+    list.append(empty);
+    return;
+  }
+  const choices = millCutterChoices();
+  for (const toolKey of keys) {
+    const toolCalls = toolCallsForKey(toolKey);
+    const current = state.millToolAssignments[toolKey] || null;
+    const display = millCutterDisplayFor(current);
+    const card = document.createElement("section");
+    card.className = `program-tool-card ${display ? "display-only" : "unassigned"}`;
+    card.dataset.toolKey = toolKey;
+    const heading = document.createElement("div");
+    heading.className = "program-tool-heading";
+    const keyLabel = document.createElement("strong");
+    keyLabel.textContent = toolKey;
+    const lines = document.createElement("span");
+    lines.textContent = `Line${toolCalls.length === 1 ? "" : "s"} ${toolCalls.map((call) => call.line).join(", ")}`;
+    heading.append(keyLabel, lines);
+    card.append(heading);
+    const controls = document.createElement("div");
+    controls.className = "program-tool-controls";
+    controls.append(selectField(
+      "Cutter drawn",
+      choices.map((choice) => [`${choice.kind}:${choice.id}`, choice.label]),
+      current ? `${current.kind}:${current.id}` : "",
+      "No cutter drawn — path only",
+      (value) => {
+        const choice = choices.find((entry) => `${entry.kind}:${entry.id}` === value) || null;
+        if (choice) state.millToolAssignments[toolKey] = {id: choice.id, revision: choice.revision, kind: choice.kind};
+        else delete state.millToolAssignments[toolKey];
+        renderMillToolAssignments();
+        updateTransport();
+        draw();
+        persistSession();
+      },
+    ));
+    const declare = document.createElement("button");
+    declare.type = "button";
+    declare.className = "program-tool-browse";
+    declare.textContent = "Declare end mill";
+    declare.addEventListener("click", () => openDeclaredCutterDialog(toolKey));
+    controls.append(declare);
+    card.append(controls);
+    const note = document.createElement("p");
+    note.className = "program-tool-hint";
+    note.textContent = display
+      ? `Ø${formatDistance(display.diameterMm, millDisplayDecimals())} × ${formatDistance(display.lengthOfCutMm, millDisplayDecimals())} flute · ${display.source} · ${MILL_CUTTER_DISPLAY_NOTE}.`
+      : "Path only until a cutter is chosen.";
+    card.append(note);
+    list.append(card);
+  }
 }
 
 function selectField(labelText, values, selected, placeholder, onChange, accessibleName = labelText) {
@@ -5873,7 +6081,7 @@ function renderMillingCutterDetail(record) {
   const titleBlock = document.createElement("div");
   const eyebrow = document.createElement("span");
   eyebrow.className = "eyebrow";
-  eyebrow.textContent = eligible ? "MILLING CUTTER · BOUNDED DEMO" : "MILLING CUTTER · BROWSE ONLY";
+  eyebrow.textContent = eligible ? "MILLING CUTTER · BOUNDED DEMO" : "MILLING CUTTER · OUTLINE ONLY";
   const title = document.createElement("h3");
   title.id = "toolLibraryDetailTitle";
   title.textContent = toolLibraryRecordName(record, "cutters");
@@ -5955,8 +6163,10 @@ function renderMillingCutterDetail(record) {
 
   const selectedTarget = elements.toolLibraryTarget.value;
   elements.toolLibraryTarget.disabled = false;
-  elements.toolLibraryAssign.disabled = !(eligible && selectedTarget);
-  elements.toolLibraryAssign.textContent = eligible ? "Assign cutter-only demo" : "Catalog record only";
+  elements.toolLibraryAssign.disabled = !selectedTarget;
+  elements.toolLibraryAssign.textContent = isMillMode()
+    ? "Draw this cutter for the T call"
+    : (eligible ? "Assign cutter-only demo" : "Assign cutter outline only");
 }
 
 function relatedAssemblies(record, tab = state.toolLibraryTab) {
@@ -6406,16 +6616,32 @@ function toolBodies3dForDisplay({interactive = false} = {}) {
   const faceCoordinates = segment?.coordinateMode === "g112-face";
   const tangent = Number.isFinite(Number(point?.y)) ? Number(point.y) : 0;
   const spindleAngleDegrees = !faceCoordinates && Number.isFinite(Number(point?.c)) ? Number(point.c) : 0;
+  const profile = currentMachineProfile();
+  // Profile lengths are stored in the machine's units; the 3D bodies are mm.
+  const profileLengthMm = (field) => {
+    const value = Number(profile?.[field]);
+    return Number.isFinite(value) && value > 0 ? value * (profile?.units === "mm" ? 1 : 25.4) : null;
+  };
   const built = buildToolBodies3d(display.configured, display.model, {
     orientationSign: orientationSign(),
     tangent,
     spindleAngleDegrees,
-    turretStations: currentMachineProfile()?.turretStations,
+    turretStations: profile?.turretStations,
+    turretDiameterMm: profileLengthMm("turretDiameter"),
+    turretThicknessMm: profileLengthMm("turretThickness"),
+    turretShankMm: profileLengthMm("turretToolShank"),
     slices: interactive ? 12 : 32,
   });
+  const turret = built.turret;
+  const turretLabel = turret?.nominal
+    ? `${built.turretStations}-STATION NOMINAL TURRET Ø${Math.round(turret.diameterMm)} mm · SET TURRET SIZE IN SETUP`
+    : `${built.turretStations}-STATION TURRET Ø${Math.round(turret.diameterMm)} × ${Math.round(turret.thicknessMm)} mm FROM PROFILE`;
   return {
     bodies: built.bodies,
-    label: `${display.toolKey} · ${built.turretStations}-STATION NOMINAL TURRET`,
+    label: `${display.toolKey} · ${turretLabel}`,
+    notice: turret?.nominal
+      ? "TOOL · HOLDER · TURRET ARE ILLUSTRATIVE · NOT DIMENSIONAL · NO CLEARANCE CLAIM"
+      : "TOOL · HOLDER FROM PUBLISHED SIZES · TURRET DISC FROM PROFILE · ILLUSTRATIVE · NO CLEARANCE CLAIM",
   };
 }
 
@@ -6789,38 +7015,115 @@ function drawGeometryInspection() {
   ctx.restore();
 }
 
-function dimensionEntityKey(entity) {
-  return entity.id;
-}
-
 function updateDimensionControls() {
   const available = state.viewMode === "2d" && !isMillMode() && !plotFront();
+  if (!available || !state.dimensionMode) {
+    state.dimensionPending = null;
+    state.dimensionHover = null;
+  }
   elements.dimensionButton.disabled = !available;
   elements.dimensionButton.classList.toggle("active", available && state.dimensionMode);
   elements.dimensionButton.setAttribute("aria-pressed", String(available && state.dimensionMode));
   elements.clearDimensionsButton.disabled = !available || state.dimensions.length === 0;
+  elements.clearDimensionsButton.dataset.count = String(state.dimensions.length);
+  elements.clearDimensionsButton.title = state.dimensions.length
+    ? `Remove all ${state.dimensions.length} pinned dimension${state.dimensions.length === 1 ? "" : "s"}`
+    : "Remove all pinned dimensions";
 }
 
 function clearPinnedDimensions({disableMode = false} = {}) {
   state.dimensions = [];
+  state.dimensionPending = null;
+  state.dimensionHover = null;
+  state.dimensionLabelRegions = [];
   if (disableMode) state.dimensionMode = false;
   updateDimensionControls();
 }
 
+/**
+ * Pin an entity: a programmed line or radius on the current stock, a chuck
+ * edge, or an imported DXF/STEP reference primitive. The reading starts at
+ * the lathe-appropriate default from dimensions.mjs and cycles when the
+ * pinned label is clicked. Sampled stock chords are refused because they are
+ * approximations; imported reference geometry pins with its numeric bound
+ * shown in the reading.
+ */
 function pinDimension(entity) {
-  if (entity.metadata?.sampledContour) {
-    elements.status.textContent = "Sampled stock-grid chords cannot be pinned as exact dimensions; select an exact programmed line or radius.";
+  const refusal = dimensionRefusal(entity);
+  if (refusal) {
+    elements.status.textContent = refusal;
     return;
   }
-  if (entity.metadata?.referenceGeometry) {
-    const format = entity.metadata.referenceFormat === "step" ? "STEP section" : "DXF";
-    elements.status.textContent = `Imported ${format} dimensions carry a bounded numeric uncertainty (≤ ${formatReferenceDistance(entity.metadata.geometryUncertaintyMm || 0)}); use the reference-deviation result instead of pinning an exact dimension.`;
-    return;
-  }
-  const key = dimensionEntityKey(entity);
-  if (state.dimensions.some((dimension) => dimension.key === key)) return;
-  state.dimensions.push({key, entity: JSON.parse(JSON.stringify(entity))});
+  state.dimensionPending = null;
+  const dimension = entityDimension(entity);
+  if (state.dimensions.some((pinned) => pinned.key === dimension.key)) return;
+  state.dimensions.push(dimension);
+  noteReferenceDimension(dimension.reference);
   updateDimensionControls();
+}
+
+function dimensionRefusal(entity) {
+  if (entity.metadata?.sampledContour) {
+    return "Sampled stock-grid chords cannot be pinned as exact dimensions; select an exact programmed line or radius.";
+  }
+  return null;
+}
+
+function noteReferenceDimension(reference) {
+  if (!reference) return;
+  const format = reference.format === "STEP" ? "STEP section" : reference.format;
+  elements.status.textContent = `Imported ${format} dimensions carry a bounded numeric uncertainty (≤ ${formatReferenceDistance(reference.uncertaintyMm)}); the pinned reading shows that bound.`;
+}
+
+/**
+ * A corner click starts a point pair; a midpoint only completes one, so a
+ * click near the middle of a line still pins that line's own reading.
+ */
+function startsDimensionPair(hit) {
+  return hit.kind === "corner" || (hit.kind === "midpoint" && Boolean(state.dimensionPending));
+}
+
+/** First snap click stores a pending point; the second pins the exact distance between them. */
+function addDimensionPoint(hit) {
+  const refusal = dimensionRefusal(hit.entity);
+  if (refusal) {
+    elements.status.textContent = refusal;
+    return;
+  }
+  const point = {z: hit.modelPoint.z, x: hit.modelPoint.x, reference: referenceBound(hit.entity)};
+  const pending = state.dimensionPending;
+  if (!pending) {
+    state.dimensionPending = point;
+    return;
+  }
+  state.dimensionPending = null;
+  if (samePoint(pending, point)) return;
+  const dimension = pairDimension(pending, point);
+  if (state.dimensions.some((pinned) => pinned.key === dimension.key)) return;
+  state.dimensions.push(dimension);
+  noteReferenceDimension(dimension.reference);
+  updateDimensionControls();
+}
+
+function cyclePinnedDimension(key) {
+  state.dimensions = withCycledDimension(state.dimensions, key);
+  draw();
+}
+
+function removePinnedDimension(key) {
+  state.dimensions = withoutDimension(state.dimensions, key);
+  updateDimensionControls();
+  draw();
+}
+
+function dimensionHoverKey(hover) {
+  return hover ? `${hover.key}:${hover.close ? "close" : "label"}` : "";
+}
+
+function dimensionLabelHitForEvent(event) {
+  if (!state.dimensionMode || state.viewMode !== "2d" || isMillMode() || plotFront()) return null;
+  const rect = elements.canvas.getBoundingClientRect();
+  return labelRegionAt(state.dimensionLabelRegions, {x: event.clientX - rect.left, y: event.clientY - rect.top});
 }
 
 function strokeScreenPolyline(points) {
@@ -6829,6 +7132,21 @@ function strokeScreenPolyline(points) {
   ctx.moveTo(points[0].x, points[0].y);
   for (const point of points.slice(1)) ctx.lineTo(point.x, point.y);
   ctx.stroke();
+}
+
+const DIMENSION_STROKE = "#facc15";
+const DIMENSION_TEXT = "#fde68a";
+const DIMENSION_LABEL_FONT = '600 11px "Cascadia Code", Consolas, monospace';
+const DIMENSION_LABEL_LINE_HEIGHT = 14;
+
+function dimensionFormat() {
+  const places = elements.displayUnits.value === "inch" ? 4 : 3;
+  return {
+    length: (mm) => formatDistance(mm, places),
+    bound: (mm) => formatReferenceDistance(mm),
+    angle: (degrees) => `${degrees.toFixed(2)}°`,
+    diameterMode: elements.xMode.value === "diameter",
+  };
 }
 
 function drawDimensionArrow(tip, direction, size = 6) {
@@ -6844,84 +7162,318 @@ function drawDimensionArrow(tip, direction, size = 6) {
   ctx.stroke();
 }
 
-function drawDimensionLabel(text, point) {
-  ctx.save();
-  ctx.font = '600 11px "Cascadia Code", Consolas, monospace';
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  const width = ctx.measureText(text).width + 12;
-  const height = 20;
-  ctx.fillStyle = "rgba(6, 20, 29, 0.94)";
-  ctx.strokeStyle = "rgba(250, 204, 21, 0.72)";
-  ctx.lineWidth = 1;
-  ctx.fillRect(point.x - width / 2, point.y - height / 2, width, height);
-  ctx.strokeRect(point.x - width / 2, point.y - height / 2, width, height);
-  ctx.fillStyle = "#fde68a";
-  ctx.fillText(text, point.x, point.y + 0.5);
-  ctx.restore();
+/** Arrowheads at both ends of a dimension line; short lines get them outside. */
+function drawDimensionArrowPair(first, second, {inside = true} = {}) {
+  const delta = {x: second.x - first.x, y: second.y - first.y};
+  if (Math.hypot(delta.x, delta.y) < 1) return;
+  const reverse = {x: -delta.x, y: -delta.y};
+  drawDimensionArrow(first, inside ? delta : reverse);
+  drawDimensionArrow(second, inside ? reverse : delta);
 }
 
-function drawLineDimension(entity) {
-  const measurement = geometryMeasurement(entity);
-  const start = geometryToScreen(entity.start);
-  const end = geometryToScreen(entity.end);
+function measureDimensionLabel(lines, interactive) {
+  ctx.save();
+  ctx.font = DIMENSION_LABEL_FONT;
+  const textWidth = Math.max(...lines.map((line) => ctx.measureText(line).width));
+  ctx.restore();
+  return {
+    width: Math.ceil(textWidth + 12 + (interactive ? 18 : 0)),
+    height: lines.length * DIMENSION_LABEL_LINE_HEIGHT + 6,
+  };
+}
+
+/**
+ * Draw a label box. `anchor` is the point the box attaches to and `align`
+ * says which side of the box touches it; `nudge` is the screen direction the
+ * box slides in to clear earlier labels. In dimension mode a pinned label is
+ * interactive: it gets a remove control and registers a hit region.
+ */
+function drawDimensionLabel(lines, anchor, context, {key = null, align = "center", nudge = {x: 0, y: -1}} = {}) {
+  const interactive = context.interactive && key !== null;
+  const size = measureDimensionLabel(lines, interactive);
+  let x = anchor.x - size.width / 2;
+  let y = anchor.y - size.height / 2;
+  if (align === "left") x = anchor.x;
+  if (align === "right") x = anchor.x - size.width;
+  if (align === "top") y = anchor.y;
+  if (align === "bottom") y = anchor.y - size.height;
+  const rect = placeLabelRect({x, y, width: size.width, height: size.height}, context.placed, {
+    stepX: nudge.x * 12, stepY: nudge.y * 12, bounds: {width: context.width, height: context.height, margin: 4},
+  });
+  context.placed.push(rect);
+  const hovered = interactive && context.hover?.key === key;
+  ctx.save();
+  ctx.font = DIMENSION_LABEL_FONT;
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(6, 20, 29, 0.94)";
+  ctx.strokeStyle = hovered ? DIMENSION_TEXT : "rgba(250, 204, 21, 0.72)";
+  ctx.lineWidth = hovered ? 1.5 : 1;
+  ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+  ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+  ctx.fillStyle = DIMENSION_TEXT;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  lines.forEach((line, index) => ctx.fillText(line, rect.x + 6, rect.y + 3 + DIMENSION_LABEL_LINE_HEIGHT * (index + 0.5) + 0.5));
+  if (interactive) {
+    const closeRect = {x: rect.x + rect.width - 18, y: rect.y, width: 18, height: Math.min(rect.height, 20)};
+    const closeHovered = hovered && context.hover.close;
+    ctx.strokeStyle = closeHovered ? "#fda4af" : "rgba(253, 230, 138, 0.62)";
+    ctx.lineWidth = closeHovered ? 1.75 : 1.25;
+    const centerX = closeRect.x + 9;
+    const centerY = closeRect.y + 10;
+    ctx.beginPath();
+    ctx.moveTo(centerX - 3, centerY - 3); ctx.lineTo(centerX + 3, centerY + 3);
+    ctx.moveTo(centerX + 3, centerY - 3); ctx.lineTo(centerX - 3, centerY + 3);
+    ctx.stroke();
+    state.dimensionLabelRegions.push({key, rect, closeRect});
+  }
+  ctx.restore();
+  return rect;
+}
+
+/** Screen direction away from the spindle axis for a model point. */
+function outwardScreenDirection(point) {
+  return {x: 0, y: Math.abs(point.x) > 1e-9 ? -Math.sign(point.x) : -1};
+}
+
+function unitVector(to, from) {
+  const delta = {x: to.x - from.x, y: to.y - from.y};
+  const length = Math.hypot(delta.x, delta.y);
+  return length > 1e-9 ? {x: delta.x / length, y: delta.y / length} : null;
+}
+
+function drawAlignedFigure(figure, labels, context, key) {
+  const start = geometryToScreen(figure.from);
+  const end = geometryToScreen(figure.to);
   const delta = {x: end.x - start.x, y: end.y - start.y};
   const length = Math.hypot(delta.x, delta.y) || 1;
   let normal = {x: -delta.y / length, y: delta.x / length};
-  const modelMidpoint = measurement.midpoint;
-  const outward = Math.abs(modelMidpoint.x) > 1e-9
-    ? {x: 0, y: -Math.sign(modelMidpoint.x)}
-    : {x: 1, y: 0};
-  if (normal.x * outward.x + normal.y * outward.y < 0) {
-    normal = {x: -normal.x, y: -normal.y};
-  }
+  const outward = outwardScreenDirection({x: (figure.from.x + figure.to.x) / 2});
+  if (normal.x * outward.x + normal.y * outward.y < 0) normal = {x: -normal.x, y: -normal.y};
   const offset = 28;
   const extension = 5;
   const first = {x: start.x + normal.x * offset, y: start.y + normal.y * offset};
   const second = {x: end.x + normal.x * offset, y: end.y + normal.y * offset};
-  ctx.strokeStyle = "#facc15";
-  ctx.lineWidth = 1.25;
   strokeScreenPolyline([start, {x: first.x + normal.x * extension, y: first.y + normal.y * extension}]);
   strokeScreenPolyline([end, {x: second.x + normal.x * extension, y: second.y + normal.y * extension}]);
   strokeScreenPolyline([first, second]);
-  drawDimensionArrow(first, delta);
-  drawDimensionArrow(second, {x: -delta.x, y: -delta.y});
+  drawDimensionArrowPair(first, second, {inside: length >= 36});
   drawDimensionLabel(
-    formatDistance(measurement.length, elements.displayUnits.value === "inch" ? 4 : 3),
+    labels[0],
     {x: (first.x + second.x) / 2 + normal.x * 13, y: (first.y + second.y) / 2 + normal.y * 13},
+    context,
+    {key, nudge: normal},
   );
 }
 
-function drawRadiusDimension(entity) {
-  const measurement = geometryMeasurement(entity);
-  const center = geometryToScreen(measurement.center);
-  const curve = geometryToScreen(measurement.midpoint);
+/** Z distance between two model points, drawn on the side away from the axis. */
+function drawHorizontalFigure(figure, labels, context, key) {
+  const a = geometryToScreen(figure.from);
+  const b = geometryToScreen(figure.to);
+  const side = outwardScreenDirection({x: (figure.from.x + figure.to.x) / 2}).y < 0 ? -1 : 1;
+  const row = (side < 0 ? Math.min(a.y, b.y) : Math.max(a.y, b.y)) + side * 30;
+  ctx.setLineDash(figure.datum ? [3, 4] : []);
+  strokeScreenPolyline([a, {x: a.x, y: row + side * 5}]);
+  ctx.setLineDash([]);
+  strokeScreenPolyline([b, {x: b.x, y: row + side * 5}]);
+  const first = {x: a.x, y: row};
+  const second = {x: b.x, y: row};
+  strokeScreenPolyline([first, second]);
+  drawDimensionArrowPair(first, second, {inside: Math.abs(b.x - a.x) >= 36});
+  drawDimensionLabel(labels[0], {x: (a.x + b.x) / 2, y: row + side * 13}, context, {
+    key, align: side < 0 ? "bottom" : "top", nudge: {x: 0, y: side},
+  });
+}
+
+/** X distance between two model points beside the free end, or a Ø through the axis. */
+function drawVerticalFigure(figure, labels, context, key, {diameter = false} = {}) {
+  const a = geometryToScreen(figure.from);
+  const b = geometryToScreen(figure.to);
+  const side = orientationSign() > 0 ? 1 : -1;
+  const column = diameter ? a.x : (side > 0 ? Math.max(a.x, b.x) : Math.min(a.x, b.x)) + side * 30;
+  if (!diameter) {
+    strokeScreenPolyline([a, {x: column + side * 5, y: a.y}]);
+    strokeScreenPolyline([b, {x: column + side * 5, y: b.y}]);
+  }
+  const first = {x: column, y: a.y};
+  const second = {x: column, y: b.y};
+  strokeScreenPolyline([first, second]);
+  drawDimensionArrowPair(first, second, {inside: Math.abs(b.y - a.y) >= 36});
+  if (diameter) {
+    drawDimensionLabel(labels[0], {x: column, y: Math.min(a.y, b.y) - 10}, context, {key, align: "bottom", nudge: {x: 0, y: -1}});
+    return;
+  }
+  drawDimensionLabel(labels[0], {x: column + side * 8, y: (a.y + b.y) / 2}, context, {
+    key, align: side > 0 ? "left" : "right", nudge: {x: side, y: 0},
+  });
+}
+
+/** Axial and radial legs of a taper, labeled outside the right triangle they form. */
+function drawDeltasFigure(figure, labels, context, key) {
+  const from = geometryToScreen(figure.from);
+  const corner = geometryToScreen(figure.corner);
+  const to = geometryToScreen(figure.to);
+  ctx.setLineDash([3, 4]);
+  strokeScreenPolyline([from, corner, to]);
+  ctx.setLineDash([]);
+  drawDimensionArrowPair(from, corner, {inside: Math.abs(corner.x - from.x) >= 36});
+  drawDimensionArrowPair(corner, to, {inside: Math.abs(to.y - corner.y) >= 36});
+  ctx.beginPath();
+  ctx.arc(corner.x, corner.y, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  const legSide = to.y < corner.y ? 1 : -1;
+  drawDimensionLabel(labels[0], {x: (from.x + corner.x) / 2, y: from.y + legSide * 9}, context, {
+    key, align: legSide > 0 ? "top" : "bottom", nudge: {x: 0, y: legSide},
+  });
+  const columnSide = from.x <= corner.x ? 1 : -1;
+  drawDimensionLabel(labels[1], {x: corner.x + columnSide * 9, y: (corner.y + to.y) / 2}, context, {
+    key, align: columnSide > 0 ? "left" : "right", nudge: {x: columnSide, y: 0},
+  });
+}
+
+/** Angle between a taper and the Z axis, swept from an axial reference at its start. */
+function drawAngleFigure(figure, labels, context, key) {
+  const vertex = geometryToScreen(figure.vertex);
+  const along = unitVector(geometryToScreen(figure.toward), vertex);
+  const axis = unitVector(geometryToScreen({z: figure.toward.z, x: figure.vertex.x}), vertex);
+  if (!along || !axis) return;
+  const radius = 34;
+  strokeScreenPolyline([vertex, {x: vertex.x + axis.x * (radius + 14), y: vertex.y + axis.y * (radius + 14)}]);
+  const startAngle = Math.atan2(axis.y, axis.x);
+  let sweep = Math.atan2(along.y, along.x) - startAngle;
+  while (sweep > Math.PI) sweep -= Math.PI * 2;
+  while (sweep < -Math.PI) sweep += Math.PI * 2;
+  ctx.beginPath();
+  ctx.arc(vertex.x, vertex.y, radius, startAngle, startAngle + sweep, sweep < 0);
+  ctx.stroke();
+  const middle = startAngle + sweep / 2;
+  const direction = {x: Math.cos(middle), y: Math.sin(middle)};
+  drawDimensionLabel(labels[0], {x: vertex.x + direction.x * (radius + 12), y: vertex.y + direction.y * (radius + 12)}, context, {
+    key, align: direction.x >= 0 ? "left" : "right", nudge: direction,
+  });
+}
+
+function drawRadiusFigure(figure, labels, context, key) {
+  const center = geometryToScreen(figure.center);
+  const curve = geometryToScreen(figure.midpoint);
   const delta = {x: curve.x - center.x, y: curve.y - center.y};
   const length = Math.hypot(delta.x, delta.y) || 1;
   const direction = {x: delta.x / length, y: delta.y / length};
   const leaderEnd = {x: curve.x + direction.x * 34, y: curve.y + direction.y * 34};
-  ctx.strokeStyle = "#facc15";
-  ctx.lineWidth = 1.25;
   strokeScreenPolyline([center, curve, leaderEnd]);
   drawDimensionArrow(curve, {x: -delta.x, y: -delta.y});
   ctx.beginPath();
   ctx.moveTo(center.x - 4, center.y); ctx.lineTo(center.x + 4, center.y);
   ctx.moveTo(center.x, center.y - 4); ctx.lineTo(center.x, center.y + 4);
   ctx.stroke();
-  drawDimensionLabel(
-    `R ${formatDistance(measurement.radius, elements.displayUnits.value === "inch" ? 4 : 3)}`,
-    {x: leaderEnd.x + direction.x * 24, y: leaderEnd.y + direction.y * 24},
-  );
+  drawDimensionLabel(labels[0], {x: leaderEnd.x + direction.x * 6, y: leaderEnd.y + direction.y * 6}, context, {
+    key, align: direction.x >= 0 ? "left" : "right", nudge: direction,
+  });
 }
 
-function drawPinnedDimensions() {
-  if (state.viewMode !== "2d" || !state.dimensions.length) return;
+function drawDimension(dimension, context) {
+  const figure = dimensionFigure(dimension);
+  const labels = dimensionReadings(dimension, context.format);
+  const key = dimension.key;
+  ctx.strokeStyle = DIMENSION_STROKE;
+  ctx.fillStyle = DIMENSION_STROKE;
+  ctx.lineWidth = 1.25;
+  ctx.setLineDash([]);
+  if (figure.type === "radius") drawRadiusFigure(figure, labels, context, key);
+  else if (figure.type === "horizontal") drawHorizontalFigure(figure, labels, context, key);
+  else if (figure.type === "vertical") drawVerticalFigure(figure, labels, context, key);
+  else if (figure.type === "diameter") drawVerticalFigure(figure, labels, context, key, {diameter: true});
+  else if (figure.type === "deltas") drawDeltasFigure(figure, labels, context, key);
+  else if (figure.type === "angle") drawAngleFigure(figure, labels, context, key);
+  else drawAlignedFigure(figure, labels, context, key);
+}
+
+/** The hovered snap point a pending first point would be measured to, if any. */
+function pendingDimensionTarget() {
+  const hover = state.geometryHover;
+  if (!state.dimensionPending || !isSnapHit(hover) || dimensionRefusal(hover.entity)) return null;
+  const point = {z: hover.modelPoint.z, x: hover.modelPoint.x, reference: referenceBound(hover.entity)};
+  return samePoint(point, state.dimensionPending) ? null : point;
+}
+
+function drawPendingDimensionPoint(context) {
+  if (!state.dimensionMode || !state.dimensionPending) return;
+  const pending = geometryToScreen(state.dimensionPending);
+  const target = pendingDimensionTarget();
+  ctx.strokeStyle = DIMENSION_STROKE;
+  ctx.fillStyle = DIMENSION_STROKE;
+  ctx.lineWidth = 1.25;
+  if (target) {
+    const preview = pairDimension(state.dimensionPending, target);
+    const end = geometryToScreen(target);
+    ctx.setLineDash([4, 4]);
+    strokeScreenPolyline([pending, end]);
+    ctx.setLineDash([]);
+    drawDimensionLabel(
+      dimensionReadings(preview, context.format)[0],
+      {x: (pending.x + end.x) / 2, y: (pending.y + end.y) / 2 - 16},
+      context,
+      {align: "bottom"},
+    );
+  }
+  ctx.beginPath();
+  ctx.arc(pending.x, pending.y, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(6, 20, 29, 0.9)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.strokeStyle = DIMENSION_STROKE;
+  ctx.lineWidth = 1.25;
+  ctx.beginPath();
+  ctx.arc(pending.x, pending.y, 9, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function drawPinnedDimensions(width, height) {
+  state.dimensionLabelRegions = [];
+  if (state.viewMode !== "2d" || isMillMode() || plotFront()) return;
+  if (!state.dimensions.length && !state.dimensionPending) return;
+  const context = {
+    width, height, placed: [], format: dimensionFormat(),
+    interactive: state.dimensionMode, hover: state.dimensionHover,
+  };
   ctx.save();
   ctx.setLineDash([]);
-  for (const dimension of state.dimensions) {
-    if (dimension.entity.type === "arc") drawRadiusDimension(dimension.entity);
-    else drawLineDimension(dimension.entity);
+  for (const dimension of state.dimensions) drawDimension(dimension, context);
+  drawPendingDimensionPoint(context);
+  ctx.restore();
+}
+
+function drawDimensionModeHint(width, height) {
+  if (!state.dimensionMode || state.viewMode !== "2d" || isMillMode() || plotFront()) return;
+  const compact = width < 640;
+  let lines;
+  if (state.dimensionPending) {
+    lines = compact
+      ? ["POINT 1 SET · tap a second corner or midpoint", "or a line/radius for its size · Esc cancels"]
+      : ["POINT 1 SET · click a second corner or midpoint to measure between them", "click a line or radius to pin its size instead · Esc cancels the point"];
+  } else {
+    lines = compact
+      ? ["DIMENSION · tap a line/radius, or two corners", "tap a label to cycle its reading · × removes · Esc exits"]
+      : ["DIMENSION · click a line or radius to pin its size · click two corners to measure between them", "click a pinned label to cycle its reading · × removes it · Backspace removes the last · Esc exits"];
   }
+  ctx.save();
+  ctx.font = '600 9px "Cascadia Code", Consolas, monospace';
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  const lineHeight = 13;
+  const textWidth = Math.max(...lines.map((line) => ctx.measureText(line).width));
+  const boxWidth = Math.min(width - 16, Math.ceil(textWidth + 16));
+  const boxHeight = lines.length * lineHeight + 8;
+  const x = 8;
+  const y = height - boxHeight - 8;
+  ctx.fillStyle = "rgba(6, 20, 29, 0.9)";
+  ctx.strokeStyle = "rgba(250, 204, 21, 0.55)";
+  ctx.lineWidth = 1;
+  ctx.fillRect(x, y, boxWidth, boxHeight);
+  ctx.strokeRect(x, y, boxWidth, boxHeight);
+  ctx.fillStyle = DIMENSION_TEXT;
+  lines.forEach((line, index) => ctx.fillText(line, x + 8, y + 4 + lineHeight * (index + 0.5), boxWidth - 16));
   ctx.restore();
 }
 
@@ -7007,6 +7559,7 @@ function draw3d(rect) {
       segments: elements.toolpathToggle.checked ? state.parsed.segments : [],
       visibleCount: elements.toolpathToggle.checked ? state.visibleBlocks : 0,
       currentPoint,
+      cutter: activeMillCutterDisplay(),
       camera: state.camera3d,
       lengthScale: unitScale(),
       lengthUnit: unitName(),
@@ -7048,6 +7601,7 @@ function draw3d(rect) {
     turretSide: frame.turretSide,
     toolBodies: toolDisplay?.bodies || null,
     toolBodiesLabel: toolDisplay?.label || null,
+    toolBodiesNotice: toolDisplay?.notice || null,
     transparent: elements.transparencyToggle ? elements.transparencyToggle.checked : true,
   });
   state.graphicsHits = [];
@@ -7140,6 +7694,7 @@ function draw() {
       segments: elements.toolpathToggle.checked ? state.parsed.segments : [],
       visibleCount: elements.toolpathToggle.checked ? state.visibleBlocks : 0,
       currentPoint,
+      cutter: activeMillCutterDisplay(),
       lengthScale: unitScale(),
       lengthUnit: unitName(),
     });
@@ -7155,9 +7710,10 @@ function draw() {
     drawToolAssembly2d();
     drawReferenceDeviationWitness();
     drawGeometryInspection();
-    drawPinnedDimensions();
+    drawPinnedDimensions(rect.width, rect.height);
     drawStockSetupDimensions(rect.width, rect.height);
     drawDisplayHomeEstimate(rect.width, rect.height);
+    drawDimensionModeHint(rect.width, rect.height);
   }
   renderGeometryInspector();
   updateDimensionControls();
@@ -7319,7 +7875,8 @@ function updateMillStats() {
   const blockedSegments = segments.filter((segment) => segment.verificationBlocked).length;
 
   $("motionCount").textContent = String(segments.length);
-  $("cycleCount").textContent = "0";
+  $("cycleCount").textContent = "—";
+  $("cycleCount").title = "Canned cycles (G73, G81–G89) are outside the mill subset; they block downstream geometry instead of being counted.";
   $("rapidDistance").textContent = unresolvedRapidSegments.length ? "UNRESOLVED" : formatDistance(rapid, decimals);
   $("rapidDistance").className = unresolvedRapidSegments.length ? "warning-value" : "";
   $("rapidDistance").title = unresolvedRapidSegments.length
@@ -7341,15 +7898,17 @@ function updateMillStats() {
   collisionStatus.className = "warning-value";
   collisionStatus.title = "Mill cutter, holder, fixture, machine-envelope, and collision geometry are not modeled.";
 
-  const cycleTime = estimateCycleTime(state.parsed, {xScale: 1});
+  // No mill profile records rapid rates, so rapid moves stay untimed instead
+  // of borrowing the lathe-era 400 IPM fallback.
+  const cycleTime = estimateCycleTime(state.parsed, {xScale: 1, fallbackRapidRate: null});
   state.cycleTime = cycleTime;
   const timeText = cycleTime.hasEstimate ? qualifiedTime(cycleTime.seconds, cycleTime.quality) : "—";
   const timeTitle = [
     cycleTime.hasEstimate
-      ? `Estimated feed + rapid subtotal: ${formatCycleTime(cycleTime.seconds)}.`
-      : "Feed + rapid time cannot be estimated from the available commanded path and feed data.",
+      ? `Estimated feed subtotal: ${formatCycleTime(cycleTime.seconds)}. Rapid moves are excluded because no mill rapid rate is configured.`
+      : "Feed time cannot be estimated from the available commanded path and feed data.",
     ...cycleTime.limitations,
-    "Generic mill rapid rates, tool-change duration, and spindle acceleration are not modeled.",
+    "Mill rapid rates, tool-change duration, and spindle acceleration are not modeled.",
   ].join(" ");
   for (const element of [$("cycleTimeHeader"), $("cycleTimeStat")]) {
     element.textContent = timeText;
@@ -7683,6 +8242,7 @@ function updateTransport({scrollProgram = false} = {}) {
   if (isMillMode()) {
     const point = millPositionAt(state.parsed, {sourceLine: state.programLine, visibleCount: state.visibleBlocks});
     const places = millDisplayDecimals();
+    updateMillStateReadout();
     if (point) {
       $("millXReadout").textContent = displayValue(point.x).toFixed(places);
       $("millYReadout").textContent = displayValue(point.y).toFixed(places);
@@ -7904,6 +8464,7 @@ function plotProgram({fit = true, clearDimensions = true} = {}) {
   renderProgramLineNumbers();
   renderProgramSyntax();
   if (!mill) renderProgramToolAssignments();
+  else renderMillToolAssignments();
   const cycleStatus = state.parsed.cycles.filter((cycle) => cycle.code !== "G70").map((cycle) => `${cycle.code} ${cycle.passes} passes`).join(" • ");
   if (mill) {
     const blockingWarnings = state.parsed.warnings.filter((warning) => warning.verificationBlocked).length;
@@ -8134,6 +8695,7 @@ elements.graphicsQuality.addEventListener("change", () => {
 
 elements.editMachine.addEventListener("click", openMachineEditor);
 elements.toolLibraryButton.addEventListener("click", () => openToolLibrary());
+$("millToolLibraryButton")?.addEventListener("click", () => openToolLibrary(null, listMillingToolLibraryRecords()[0]?.id || null));
 elements.toolLibraryClose.addEventListener("click", () => elements.toolLibraryDialog.close());
 elements.toolLibraryDialog.addEventListener("click", (event) => {
   if (event.target === elements.toolLibraryDialog) elements.toolLibraryDialog.close();
@@ -8160,11 +8722,22 @@ elements.toolLibraryAuthorityFilter.addEventListener("change", renderToolLibrary
 elements.toolLibraryTarget.addEventListener("change", renderToolLibrary);
 elements.toolLibraryAssign.addEventListener("click", () => {
   const toolKey = elements.toolLibraryTarget.value;
+  if (isMillMode()) {
+    const millCutter = state.toolLibraryTab === "cutters" ? millingToolLibraryRecordById(state.toolLibrarySelection) : null;
+    if (!toolKey || !millCutter) return;
+    state.millToolAssignments[toolKey] = {id: millCutter.id, revision: millCutter.revision, kind: "library"};
+    elements.toolLibraryDialog.close();
+    renderMillToolAssignments();
+    updateTransport();
+    draw();
+    persistSession();
+    return;
+  }
   const assembly = state.toolLibraryTab === "assemblies" ? toolLibraryAssemblyById(state.toolLibrarySelection) : null;
   const cutter = state.toolLibraryTab === "cutters" ? millingToolLibraryRecordById(state.toolLibrarySelection) : null;
   const assignableRecord = assembly?.assignment?.assignable === true
     ? assembly
-    : cutter?.demoCuttingEligibility?.eligible === true ? cutter : null;
+    : cutter || null;
   const definition = assignableRecord
     ? resolveAssignableToolAssembly2d({id: assignableRecord.id, revision: assignableRecord.revision})
     : null;
@@ -8236,8 +8809,11 @@ elements.machineMode.addEventListener("change", () => {
   state.bundledStepReference = false;
   revokeBundledDxfMaterialAuthority();
   if (elements.machineMode.value === "mill") solidSetupDialog.close();
-  applyMachineModeUi();
+  // Re-parse for the new mode before any view refresh so the renderers never
+  // see the previous mode's segments.
+  applyMachineModeUi({refreshView: false});
   plotProgram();
+  setGraphicsDimension(state.viewMode);
   persistSession();
 });
 
@@ -8605,7 +9181,7 @@ function setGraphicsDimension(mode) {
   }
   elements.wrap.classList.toggle("three-d", threeDimensional);
   elements.wrap.classList.toggle("face-view", face);
-  $("fitButton").disabled = face;
+  $("fitButton").disabled = face || (isMillMode() && twoDimensional);
   $("zoomInButton").disabled = face || (isMillMode() && twoDimensional);
   $("zoomOutButton").disabled = face || (isMillMode() && twoDimensional);
   state.drag = null;
@@ -8821,6 +9397,17 @@ function updateGraphicsHover(event) {
     return null;
   }
   if (state.viewMode === "2d") {
+    const labelHit = dimensionLabelHitForEvent(event);
+    const previousLabelHover = dimensionHoverKey(state.dimensionHover);
+    state.dimensionHover = labelHit;
+    if (labelHit) {
+      state.hoverBlockIndex = null;
+      state.geometryHover = null;
+      if (previousLabelHover !== dimensionHoverKey(labelHit)) draw();
+      elements.canvas.style.cursor = "pointer";
+      return null;
+    }
+    if (previousLabelHover) draw();
     const geometryHit = geometryHitForEvent(event);
     if (geometryHit) {
       state.hoverBlockIndex = null;
@@ -8858,7 +9445,10 @@ function selectGeometryAt(event) {
   state.geometrySelection = hit;
   state.geometryHover = hit;
   state.hoverBlockIndex = null;
-  if (state.dimensionMode) pinDimension(hit.entity);
+  if (state.dimensionMode) {
+    if (startsDimensionPair(hit)) addDimensionPoint(hit);
+    else pinDimension(hit.entity);
+  }
   draw();
   return true;
 }
@@ -8943,7 +9533,19 @@ function finishCanvasDrag(event, cancelled = false) {
   const shouldSelect = !cancelled && drag?.button === 0 && !drag.moved;
   state.drag = null;
   if (shouldSelect && state.dimensionMode) {
-    selectGeometryAt(event);
+    const labelHit = dimensionLabelHitForEvent(event);
+    if (labelHit) {
+      if (labelHit.close) removePinnedDimension(labelHit.key);
+      else cyclePinnedDimension(labelHit.key);
+      state.dimensionHover = dimensionLabelHitForEvent(event);
+      if (state.dimensionHover) draw();
+      elements.canvas.style.cursor = state.dimensionHover ? "pointer" : "crosshair";
+      return;
+    }
+    if (!selectGeometryAt(event) && state.dimensionPending) {
+      state.dimensionPending = null;
+      draw();
+    }
     elements.canvas.style.cursor = "crosshair";
     return;
   }
@@ -8966,9 +9568,10 @@ elements.canvas.addEventListener("pointercancel", (event) => finishCanvasDrag(ev
 elements.canvas.addEventListener("auxclick", (event) => { if (event.button === 1) event.preventDefault(); });
 elements.canvas.addEventListener("pointerleave", () => {
   if (state.drag) return;
-  if (state.hoverBlockIndex !== null || state.geometryHover !== null) {
+  if (state.hoverBlockIndex !== null || state.geometryHover !== null || state.dimensionHover !== null) {
     state.hoverBlockIndex = null;
     state.geometryHover = null;
+    state.dimensionHover = null;
     draw();
   }
   elements.canvas.style.cursor = state.viewMode === "face" || (isMillMode() && state.viewMode === "2d")
@@ -9098,6 +9701,21 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (event.altKey || event.shiftKey || (event.target instanceof Element && event.target.matches("input, textarea, select"))) return;
+  if (event.key === "Escape" && state.dimensionMode) {
+    event.preventDefault();
+    if (state.dimensionPending) state.dimensionPending = null;
+    else state.dimensionMode = false;
+    updateDimensionControls();
+    draw();
+    return;
+  }
+  if ((event.key === "Backspace" || event.key === "Delete") && state.dimensionMode && state.dimensions.length) {
+    event.preventDefault();
+    state.dimensions = state.dimensions.slice(0, -1);
+    updateDimensionControls();
+    draw();
+    return;
+  }
   if (event.key === "ArrowLeft") { event.preventDefault(); stepProgram(-1); }
   if (event.key === "ArrowRight") { event.preventDefault(); stepProgram(1); }
 });

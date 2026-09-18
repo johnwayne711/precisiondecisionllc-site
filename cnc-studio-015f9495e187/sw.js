@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "verify-app-";
-const CACHE_NAME = "verify-app-v130";
+const CACHE_NAME = "verify-app-v131";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -47,6 +47,7 @@ const APP_ASSETS = [
   "./gcode-language.mjs",
   "./pane-splitter.mjs",
   "./geometry-inspector.mjs",
+  "./dimensions.mjs",
   "./tool-assembly.mjs",
   "./tool-mounting.mjs",
   "./tool-cad-projections.mjs",

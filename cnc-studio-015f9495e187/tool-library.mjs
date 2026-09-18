@@ -658,42 +658,6 @@ function unavailableClaim(state, blockedReason, sourceRefs = []) {
   };
 }
 
-function catalogOnlyClaims(holderSourceRef, insertSourceRef, compatibilitySourceRefs) {
-  const catalogSourceRefs = [holderSourceRef, insertSourceRef];
-  return {
-    identity: manufacturerClaim(catalogSourceRefs),
-    dimensions: manufacturerClaim(catalogSourceRefs),
-    compatibility: manufacturerClaim(compatibilitySourceRefs),
-    displayGeometry: unavailableClaim(
-      "catalog-record-only",
-      "Official downloadable CAD exists, but no retained 2D projection revision and mounted reference transform have been validated for this assembly.",
-      catalogSourceRefs,
-    ),
-    mountedReference: unavailableClaim(
-      "unavailable",
-      "No authoritative mounted cutting-reference point and app transform are retained for this assembly. Catalog F/L1 dimensions and CAD bounds cannot be used as a substitute.",
-      catalogSourceRefs,
-    ),
-    cuttingModel: unavailableClaim(
-      "unavailable",
-      "Compatibility and catalog dimensions do not establish programmed-tip semantics, permitted cutting direction, or stock-removal authority.",
-      catalogSourceRefs,
-    ),
-    collisionModel: unavailableClaim(
-      "unavailable",
-      "No validated holder/insert/turret collision solid, tolerance, or mounted transform is retained.",
-      catalogSourceRefs,
-    ),
-  };
-}
-
-const CATALOG_ONLY_ASSIGNMENT = {
-  state: "blocked",
-  assignable: false,
-  scope: [],
-  blockedReason: "This is a searchable catalog record only. Mounted display/reference assignment must fail closed until both claims have retained evidence.",
-};
-
 const ASSEMBLIES = [
   {
     id: "kennametal-mclnr164d-cnmg432",
@@ -1021,13 +985,66 @@ const ASSEMBLIES = [
       insertIcInches: null,
       applications: ["external", "grooving", "profiling", "back-turning"],
     },
-    catalogRecordOnly: true,
-    assignment: CATALOG_ONLY_ASSIGNMENT,
-    claims: catalogOnlyClaims(
-      "source:kennametal:holder:1016462:product-page",
-      "source:kennametal:insert:4109881:product-page",
-      ["source:kennametal:holder:1016462:product-page", "source:kennametal:insert:4109881:product-page"],
-    ),
+    catalogRecordOnly: false,
+    assignment: {
+      state: "mounted-display-only",
+      assignable: true,
+      scope: ["displayGeometry", "mountedReference"],
+      blockedOutsideScope: "Cutting and collision claims remain unavailable: the catalog-scaled envelope shows the handed cutting corner only, and stock removal stays blocked until the mounted edge sweep has external dimensional evidence.",
+    },
+    claims: {
+      identity: manufacturerClaim([
+        "source:kennametal:holder:1016462:product-page",
+        "source:kennametal:insert:4109881:product-page",
+      ]),
+      dimensions: manufacturerClaim([
+        "source:kennametal:holder:1016462:product-page",
+        "source:kennametal:insert:4109881:product-page",
+      ]),
+      compatibility: manufacturerClaim([
+        "source:kennametal:holder:1016462:product-page",
+        "source:kennametal:insert:4109881:product-page",
+      ]),
+      displayGeometry: {
+        state: "catalog-scaled-envelope",
+        available: true,
+        assignable: true,
+        revisionRef: "kennametal-nsr163d-catalog-envelope-v1",
+        projection: "Catalog-scaled flat holder envelope with the published handed NP3002RK cutting corner; stroke-only and display-only. Holder seating and head detail are omitted.",
+        sourceRefs: [
+          "source:kennametal:holder:1016462:product-page",
+          "source:kennametal:insert:4109881:product-page",
+        ],
+      },
+      mountedReference: {
+        state: "catalog-published-corner",
+        available: true,
+        assignable: true,
+        revisionRef: "kennametal-nsr163d-catalog-corner-v1",
+        reference: {
+          type: "catalog-cutting-corner",
+          coordinateSystem: "G-Code Studio 2D envelope local Z/X",
+          coordinateOrder: ["z", "x"],
+          units: "mm",
+          point: [0, 0],
+          displayTransformRef: "kennametal-nsr163d-catalog-envelope-v1",
+        },
+        sourceRefs: [
+          "source:kennametal:holder:1016462:product-page",
+          "source:kennametal:insert:4109881:product-page",
+        ],
+      },
+      cuttingModel: unavailableClaim(
+        "separate-unvalidated-model",
+        "The catalog-scaled display does not validate the mounted cutting-edge sweep, programmed reference convention, or stock-removal authority.",
+        ["source:kennametal:holder:1016462:product-page", "source:kennametal:insert:4109881:product-page"],
+      ),
+      collisionModel: unavailableClaim(
+        "unavailable",
+        "The flat catalog envelope omits seating and head hardware and has no collision tolerance or mounted solid authority.",
+        ["source:kennametal:holder:1016462:product-page"],
+      ),
+    },
   },
   {
     id: "kennametal-mclnl164d-cnmg432",

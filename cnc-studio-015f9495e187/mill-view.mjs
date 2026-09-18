@@ -156,6 +156,12 @@ function niceGridStep(span, targetLines = 10) {
   return factor * magnitude;
 }
 
+/** Grid pitch chosen in the display unit, so inch programs get inch-multiple lines. */
+export function gridStepFor(span, lengthScale) {
+  const scale = Number(lengthScale) > 0 ? Number(lengthScale) : 1;
+  return niceGridStep(span / scale) * scale;
+}
+
 function axisGridValues(minimum, maximum, step) {
   if (![minimum, maximum, step].every(Number.isFinite) || !(step > 0)) return [];
   const start = Math.ceil(minimum / step) * step;
@@ -261,9 +267,9 @@ function unitLabel(lengthScale, lengthUnit) {
   return Number.isFinite(scale) && scale > 0 ? String(lengthUnit || "mm") : "mm";
 }
 
-function drawTopGrid(context, bounds, project) {
+function drawTopGrid(context, bounds, project, lengthScale = 1) {
   const span = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY, 1);
-  const step = niceGridStep(span);
+  const step = gridStepFor(span, lengthScale);
   context.beginPath();
   for (const x of axisGridValues(bounds.minX, bounds.maxX, step)) {
     const bottom = project({x, y: bounds.minY, z: 0});
@@ -293,12 +299,113 @@ function drawTopGrid(context, bounds, project) {
   context.fillText("Y+", yEnd.x + 4, yEnd.y - 4);
 }
 
+const CUTTER_COLOR = "#fbbf24";
+const CUTTER_SHANK_COLOR = "#94a3b8";
+
+function positiveDimension(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function screenRadius(project, point, radiusMm) {
+  const center = project(point);
+  const edge = project({x: point.x + radiusMm, y: point.y, z: point.z});
+  return {center, radius: Math.hypot(edge.x - center.x, edge.y - center.y)};
+}
+
+export function cutterDisplayLabel(cutter, lengthScale, lengthUnit) {
+  const scale = Number(lengthScale) > 0 ? Number(lengthScale) : 1;
+  const decimals = scale > 1 ? 4 : 3;
+  const name = cutter.label ? ` · ${cutter.label}` : "";
+  return `CUTTER Ø${(cutter.diameterMm / scale).toFixed(decimals)} ${unitLabel(lengthScale, lengthUnit)}${name} · DISPLAY ONLY`;
+}
+
+/**
+ * Top view: the chosen cutter's published or declared diameter as a circle
+ * around the command point (dashed shank circle when the shank is wider).
+ * Display only — no stock, compensation or collision claim.
+ */
+function drawTopCutter(context, cutter, point, project, lengthScale, lengthUnit) {
+  const diameter = positiveDimension(cutter?.diameterMm);
+  if (!diameter) return;
+  const {center, radius} = screenRadius(project, point, diameter / 2);
+  if (!(radius > 0.5)) return;
+  context.globalAlpha = 1;
+  context.setLineDash([]);
+  context.strokeStyle = CUTTER_COLOR;
+  context.fillStyle = "rgba(251, 191, 36, .12)";
+  context.lineWidth = 1.4;
+  context.beginPath();
+  context.arc(center.x, center.y, radius, 0, Math.PI * 2);
+  context.fill();
+  context.stroke();
+  const shank = positiveDimension(cutter.shankDiameterMm);
+  if (shank && shank > diameter) {
+    const outer = screenRadius(project, point, shank / 2);
+    context.setLineDash([3, 4]);
+    context.strokeStyle = CUTTER_SHANK_COLOR;
+    context.lineWidth = 1;
+    context.beginPath();
+    context.arc(center.x, center.y, outer.radius, 0, Math.PI * 2);
+    context.stroke();
+    context.setLineDash([]);
+  }
+  context.fillStyle = CUTTER_COLOR;
+  context.font = '700 9px "Cascadia Code", Consolas, monospace';
+  context.fillText(cutterDisplayLabel(cutter, lengthScale, lengthUnit), center.x + radius + 8, center.y - 6);
+}
+
+function circlePoints(point, radiusMm, zOffsetMm, count = 24) {
+  return Array.from({length: count + 1}, (_, index) => {
+    const angle = (index / count) * Math.PI * 2;
+    return {x: point.x + Math.cos(angle) * radiusMm, y: point.y + Math.sin(angle) * radiusMm, z: point.z + zOffsetMm};
+  });
+}
+
+/**
+ * 3D: the cutter as a cylinder standing on the command point along +Z (flute
+ * length), with the shank dashed above it up to the overall length.
+ */
+function draw3dCutter(context, cutter, point, project, lengthScale, lengthUnit) {
+  const diameter = positiveDimension(cutter?.diameterMm);
+  const flute = positiveDimension(cutter?.lengthOfCutMm);
+  if (!diameter || !flute) return;
+  const radius = diameter / 2;
+  const style = {color: CUTTER_COLOR, width: 1.3, dash: [], alpha: 0.9, glow: 0};
+  drawPolyline(context, circlePoints(point, radius, 0), project, style);
+  drawPolyline(context, circlePoints(point, radius, flute), project, style);
+  for (const angle of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
+    const x = point.x + Math.cos(angle) * radius;
+    const y = point.y + Math.sin(angle) * radius;
+    drawPolyline(context, [{x, y, z: point.z}, {x, y, z: point.z + flute}], project, style);
+  }
+  const shank = positiveDimension(cutter.shankDiameterMm);
+  const overall = positiveDimension(cutter.overallLengthMm);
+  if (shank && overall && overall > flute) {
+    const shankStyle = {color: CUTTER_SHANK_COLOR, width: 1, dash: [3, 4], alpha: 0.8, glow: 0};
+    drawPolyline(context, circlePoints(point, shank / 2, flute), project, shankStyle);
+    drawPolyline(context, circlePoints(point, shank / 2, overall), project, shankStyle);
+    for (const angle of [0, Math.PI]) {
+      const x = point.x + Math.cos(angle) * shank / 2;
+      const y = point.y + Math.sin(angle) * shank / 2;
+      drawPolyline(context, [{x, y, z: point.z + flute}, {x, y, z: point.z + overall}], project, shankStyle);
+    }
+  }
+  const top = project({x: point.x, y: point.y, z: point.z + flute});
+  context.globalAlpha = 1;
+  context.setLineDash([]);
+  context.fillStyle = CUTTER_COLOR;
+  context.font = '700 9px "Cascadia Code", Consolas, monospace';
+  context.fillText(cutterDisplayLabel(cutter, lengthScale, lengthUnit), top.x + 10, top.y - 6);
+}
+
 export function renderMillTop2d(context, {
   width,
   height,
   segments = [],
   visibleCount = 0,
   currentPoint = undefined,
+  cutter = null,
   lengthScale = 1,
   lengthUnit = "mm",
 } = {}) {
@@ -313,9 +420,10 @@ export function renderMillTop2d(context, {
 
   const bounds = renderBounds(segments, currentPoint);
   const project = millTopProjector(bounds, safeWidth, safeHeight);
-  drawTopGrid(context, bounds, project);
+  drawTopGrid(context, bounds, project, lengthScale);
   const shownCount = normalizedVisibleCount(visibleCount, segments.length);
   const shownPoint = drawMillPaths(context, segments, shownCount, project, currentPoint);
+  if (cutter && shownPoint) drawTopCutter(context, cutter, shownPoint, project, lengthScale, lengthUnit);
 
   context.fillStyle = "rgba(180, 205, 208, .82)";
   context.font = '9px "Cascadia Code", Consolas, monospace';
@@ -333,17 +441,27 @@ function boundsCorners(bounds) {
   return corners;
 }
 
+/**
+ * Machine picture for the 3D mill view: world up is machine +Z (the tool
+ * axis) and the operator stands at machine -Y looking toward +Y, so the XY
+ * table is the floor. The shared camera treats world +y as up and world +z as
+ * the viewer's side; this fixed rotation maps native XYZ into that picture.
+ */
+export function millMachinePicturePoint(point) {
+  return {x: point.x, y: point.z, z: -point.y};
+}
+
 export function mill3dProjector(bounds, width, height, camera = DEFAULT_CAMERA, {
   padding = 42,
   projection = null,
 } = {}) {
   const safeWidth = Math.max(1, Number(width) || 1);
   const safeHeight = Math.max(1, Number(height) || 1);
-  const center = {
+  const center = millMachinePicturePoint({
     x: (bounds.minX + bounds.maxX) / 2,
     y: (bounds.minY + bounds.maxY) / 2,
     z: (bounds.minZ + bounds.maxZ) / 2,
-  };
+  });
   const sceneSize = Math.max(
     bounds.maxX - bounds.minX,
     bounds.maxY - bounds.minY,
@@ -359,7 +477,7 @@ export function mill3dProjector(bounds, width, height, camera = DEFAULT_CAMERA, 
     center, yaw, pitch, scale: 1, projection: projectionMode, perspectiveDistance,
     width: 0, height: 0, panX: 0, panY: 0,
   };
-  const projectedCorners = boundsCorners(bounds).map((point) => projectModelPoint(point, unitOptions));
+  const projectedCorners = boundsCorners(bounds).map((point) => projectModelPoint(millMachinePicturePoint(point), unitOptions));
   const projectedWidth = Math.max(...projectedCorners.map((point) => point.x)) - Math.min(...projectedCorners.map((point) => point.x));
   const projectedHeight = Math.max(...projectedCorners.map((point) => point.y)) - Math.min(...projectedCorners.map((point) => point.y));
   const fitWidth = Math.max(1, safeWidth - padding * 2) / positiveFiniteOr(projectedWidth);
@@ -378,14 +496,14 @@ export function mill3dProjector(bounds, width, height, camera = DEFAULT_CAMERA, 
     panX: Number(camera?.panX) || 0,
     panY: Number(camera?.panY) || 0,
   };
-  return {project: (point) => projectModelPoint(point, options), center, scale, sceneSize, projection: projectionMode};
+  return {project: (point) => projectModelPoint(millMachinePicturePoint(point), options), center, scale, sceneSize, projection: projectionMode};
 }
 
-function draw3dGridAndAxes(context, bounds, project) {
+function draw3dGridAndAxes(context, bounds, project, lengthScale = 1) {
   const spanX = Math.max(bounds.maxX - bounds.minX, 1);
   const spanY = Math.max(bounds.maxY - bounds.minY, 1);
   const spanZ = Math.max(bounds.maxZ - bounds.minZ, Math.max(spanX, spanY) * 0.25, 1);
-  const step = niceGridStep(Math.max(spanX, spanY));
+  const step = gridStepFor(Math.max(spanX, spanY), lengthScale);
 
   for (const x of axisGridValues(bounds.minX, bounds.maxX, step)) {
     drawPolyline(context, [{x, y: bounds.minY, z: 0}, {x, y: bounds.maxY, z: 0}], project, {
@@ -420,6 +538,7 @@ export function renderMill3d(context, {
   segments = [],
   visibleCount = 0,
   currentPoint = undefined,
+  cutter = null,
   lengthScale = 1,
   lengthUnit = "mm",
   camera = DEFAULT_CAMERA,
@@ -436,9 +555,10 @@ export function renderMill3d(context, {
 
   const bounds = renderBounds(segments, currentPoint);
   const scene = mill3dProjector(bounds, safeWidth, safeHeight, camera, {projection});
-  draw3dGridAndAxes(context, bounds, scene.project);
+  draw3dGridAndAxes(context, bounds, scene.project, lengthScale);
   const shownCount = normalizedVisibleCount(visibleCount, segments.length);
   const shownPoint = drawMillPaths(context, segments, shownCount, scene.project, currentPoint);
+  if (cutter && shownPoint) draw3dCutter(context, cutter, shownPoint, scene.project, lengthScale, lengthUnit);
 
   context.fillStyle = "rgba(180, 205, 208, .82)";
   context.font = '9px "Cascadia Code", Consolas, monospace';

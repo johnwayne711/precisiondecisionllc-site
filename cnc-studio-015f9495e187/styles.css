@@ -267,6 +267,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tool-overlay-button.active { color: #fbbf24; border-color: rgba(251, 191, 36, .55); background: #30250d; box-shadow: inset 0 0 0 1px rgba(251, 191, 36, .08); }
 .toolbar-tool:disabled { cursor: default; opacity: .38; }
 .clear-tool:not(:disabled):hover { color: #fda4af; border-color: rgba(251, 113, 133, .45); }
+.clear-tool[data-count]:not([data-count="0"])::after { content: attr(data-count); margin-left: 5px; padding: 1px 5px; border-radius: 8px; color: #fde68a; background: rgba(250, 204, 21, .16); font-size: 8px; }
 .readout { justify-self: center; display: flex; align-items: baseline; gap: 6px; font-family: "Cascadia Code", Consolas, monospace; }
 .readout span { color: var(--muted); font-size: 10px; }
 .readout strong { min-width: 52px; color: var(--text); font-size: 12px; }
@@ -280,6 +281,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .legend .rough { background: var(--success); }
 .legend .cut { background: var(--cut); }
 .legend .arc { background: var(--arc); }
+.legend .mill-cut { background: #38bdf8; }
+.legend .blocked { height: 3px; background: repeating-linear-gradient(90deg, #fb7185 0 5px, transparent 5px 8px); }
 .legend .live { height: 3px; background: repeating-linear-gradient(90deg, #f472b6 0 5px, transparent 5px 8px); }
 .legend .reference { height: 3px; background: repeating-linear-gradient(90deg, #fbbf24 0 7px, transparent 7px 10px); }
 .tool-offset-alert { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; background: #490e1d; border-bottom: 2px solid #fb4f68; color: #fff1f2; }
@@ -420,6 +423,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .lathe-setup-controls[hidden] { display: none; }
 .mill-setup-boundary { padding: 10px; color: #a7c8d8; border: 1px solid rgba(56, 189, 248, .3); border-radius: 8px; background: rgba(9, 31, 44, .58); }
 .mill-setup-boundary[hidden] { display: none; }
+.mill-setup-boundary .tool-assembly-setup { margin-top: 8px; }
+.mill-state-readout { display: block; margin-top: 4px; color: #fbbf24; font-size: 8px; font-weight: 750; letter-spacing: .06em; }
+.mill-state-readout:empty { display: none; }
 .mill-setup-boundary strong { display: block; margin-bottom: 5px; color: #7dd3fc; font: 850 9px "Cascadia Code", Consolas, monospace; letter-spacing: .08em; }
 .mill-setup-boundary p { margin: 0; font-size: 9px; line-height: 1.5; }
 .control-stack label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
