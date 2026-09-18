@@ -1000,10 +1000,32 @@ function drawAxes(context, project, bounds, stockRadius) {
   context.fillText("X", xLabel.x, xLabel.y);
 }
 
+/**
+ * Rotate part-frame world points about the spindle axis so the fixed live
+ * tool stays on the turret side while the part turns by the current spindle
+ * angle (positive counterclockwise viewed from the free end). Machine axes
+ * are drawn without this rotation.
+ */
+function spindleRotatedProjector(project, spindleRotationDegrees, orientationSign = 1) {
+  const degrees = Number(spindleRotationDegrees) || 0;
+  if (!degrees) return project;
+  // The renderer's axial world x follows orientationSign; a chuck-right
+  // display mirrors Z, which flips the apparent rotation sense.
+  const angle = degrees * Math.PI / 180 * (orientationSign < 0 ? -1 : 1);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return (point) => project({
+    x: point.x,
+    y: point.y * cos - point.z * sin,
+    z: point.y * sin + point.z * cos,
+  });
+}
+
 export function renderLathe3d(context, {
   width, height, segments = [], visibleCount = 0, stock = null,
   xScale = 0.5, orientationSign = 1,
   showToolpaths = true,
+  spindleRotationDegrees = 0,
   camera = {yaw: -Math.PI / 4, pitch: Math.asin(1 / Math.sqrt(3)), zoom: 1, panX: 0, panY: 0},
   quality = {contourRings: 720, axialRings: 320, radialSlices: 128},
 } = {}) {
@@ -1015,10 +1037,11 @@ export function renderLathe3d(context, {
   context.fillRect(0, 0, width, height);
 
   const scene = makeProjector({width, height, segments, stock, xScale, orientationSign, camera});
+  const partProject = spindleRotatedProjector(scene.project, spindleRotationDegrees, orientationSign);
   drawAxes(context, scene.project, scene.bounds, stock?.radius);
-  drawStockSurface(context, stock, orientationSign, scene.project, camera, quality);
-  drawAxialBores(context, stock, orientationSign, scene.project, quality);
-  if (showToolpaths) drawToolpaths(context, segments, Math.min(visibleCount, segments.length), xScale, orientationSign, scene.project);
+  drawStockSurface(context, stock, orientationSign, partProject, camera, quality);
+  drawAxialBores(context, stock, orientationSign, partProject, quality);
+  if (showToolpaths) drawToolpaths(context, segments, Math.min(visibleCount, segments.length), xScale, orientationSign, partProject);
 
   context.fillStyle = "rgba(145, 166, 171, .66)";
   context.font = '9px "Cascadia Code", Consolas, monospace';

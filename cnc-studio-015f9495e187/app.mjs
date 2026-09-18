@@ -92,8 +92,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.22";
-const APP_BUILD = 124;
+const APP_VERSION = "v0.3.23";
+const APP_BUILD = 125;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -279,8 +279,9 @@ const DEFAULT_MACHINE_PROFILES = [
     liveToolDialect: "unconfigured", liveToolCapability: "unknown", cAxisCapability: "unknown",
     yAxisCapability: "unknown", cAxisEngagement: "unknown", rapidYMax: null, rapidCMax: null,
     liveToolMaxRpm: null, haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown", liveToolEvidence: "",
+    turretSide: "rear", rotaryPositiveSense: "unknown",
     toolChangeX: 0, toolChangeZ: 0, safeIndexX: 0, safeIndexZ: 0, turretStations: 12,
-    notes: "BEST-EFFORT DRAFT — NOT VERIFIED. Travel and rapid estimates come from Hardinge T-Series brochure 1312-1E; applicability to this older Conquest is unconfirmed. The 12-station turret is a guess from the 10/12-station options in Conquest parts list PL-60A. Assumes machine reference X0/Z0, negative machine travel, diameter-mode plotted home X12.74/Z16, and independent-axis rapid motion. Check every value at the machine before relying on it.",
+    notes: "BEST-EFFORT DRAFT — NOT VERIFIED. Travel and rapid estimates come from Hardinge T-Series brochure 1312-1E; applicability to this older Conquest is unconfirmed. The 12-station turret is a guess from the 10/12-station options in Conquest parts list PL-60A. Assumes machine reference X0/Z0, negative machine travel, diameter-mode plotted home X12.74/Z16, and independent-axis rapid motion. Rear (slant-bed) turret per the owner, 2026-09-18. Check every value at the machine before relying on it.",
     updatedAt: null,
   },
   {
@@ -295,7 +296,8 @@ const DEFAULT_MACHINE_PROFILES = [
     liveToolDialect: "hardinge-conquest-fanuc-18t", liveToolCapability: "equipped", cAxisCapability: "available",
     yAxisCapability: "unknown", cAxisEngagement: "automatic", rapidYMax: null, rapidCMax: null,
     liveToolMaxRpm: null, haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown",
-    liveToolEvidence: "Owner program N1101 (OPERATION - 9), 2026-09-17: M54 (LIVE TOOL ON COOLANT ON), M55 (LIVE TOOL OFF COOLANT OFF), absolute B spindle index in degrees, G30 U0 W0 home, G98 inch/min, G97 S with M54 as live RPM. No Hardinge programming manual retained.",
+    liveToolEvidence: "Owner program N1101 (OPERATION - 9), 2026-09-17: M54 (LIVE TOOL ON COOLANT ON), M55 (LIVE TOOL OFF COOLANT OFF), absolute B spindle index in degrees, G30 U0 W0 home, G98 inch/min, G97 S with M54 as live RPM. Rear turret per the owner, 2026-09-18. No Hardinge programming manual retained.",
+    turretSide: "rear", rotaryPositiveSense: "unknown",
     toolChangeX: 0, toolChangeZ: 0, safeIndexX: 0, safeIndexZ: 0, turretStations: 12,
     notes: "DRAFT LIVE-TOOL SYNTAX PROFILE — NOT VERIFIED. Machine facts repeat the Hardinge Conquest T42 draft (brochure 1312-1E estimates, parts list PL-60A turret guess, plotted home X12.74/Z16). Live-tool syntax is owner-program-sourced: M54/M55 live tool on/off (post reports coolant with them), absolute B spindle index in degrees, S routed to the live spindle with M54 or while it runs, G30 U0 W0 second-reference return, Fanuc G-code system A (G98/G99 feed modes; G90/G92/G94 are turning cycles). Automatic spindle positioning-mode engagement on a B word is assumed and disclosed per program. Live-tool RPM limit and B rapid rate are unknown. Check every value at the machine before relying on it.",
     updatedAt: null,
@@ -309,7 +311,7 @@ const DEFAULT_MACHINE_PROFILES = [
     rapidXMax: 5000 / 25.4, rapidYMax: null, rapidZMax: 8000 / 25.4, rapidCMax: null,
     liveToolDialect: "unconfigured", liveToolCapability: "unknown", cAxisCapability: "unknown",
     yAxisCapability: "unknown", cAxisEngagement: "unknown", liveToolMaxRpm: null,
-    haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown", liveToolEvidence: "",
+    haasDefaultToFloat: "unknown", haasIntegerFeedScale: "unknown", turretSide: "unknown", rotaryPositiveSense: "unknown", liveToolEvidence: "",
     notes: "DRAFT — factory specifications, pending confirmation on this machine. Mori Seiki SL-75 brochure, specification table (PDF page 4): 12 turret stations; physical X slide stroke 20 + 380 = 400 mm; Z stroke 1550 mm; X rapid 5000 mm/min; Z rapid 8000 mm/min. Inch fields are converted from these published metric values. Source: https://t-mt.com/kousaku/img/25809/25809.pdf\nThe brochure distinguishes SL-75A/B/C and several controls. Exact variant/control, spindle limits, installed options, machine-coordinate limits, home, tool-change positions and rapid interpolation remain unconfirmed. Stroke lengths do not establish coordinate limits or part zero.\nInitial plane is X/Z (G18); programmed plane changes override it. Inch/diameter inputs match the owner's setup. The visible G96 application convention is G20=SFM/G21=m/min; it is editable and does not qualify the installed control. Mori manual PM-NLTMSC518-I1EN contains metric G96 examples and defines G50 S as the spindle-speed limit in min^-1 (B-17/B-19, D-15/D-18), but its exact edition/control applicability is unconfirmed. Ordinary X/Z radius examples omit G18 (B-12/B-13). Source: https://www.remontservo.ru/tash-kumyr/pages/publications/article-610/img-article/Mori-Seiki-SLSeries-Programming-Manua-l2008PMNLTMSC518I1ENL12002H02.pdf",
     updatedAt: null,
   },
@@ -320,7 +322,7 @@ const DEFAULT_MACHINE_PROFILES = [
     startMode: "unknown", rapidBehavior: "unknown", rapidXMax: null, rapidYMax: null, rapidZMax: null, rapidCMax: null,
     liveToolDialect: "haas-lathe-ngc", liveToolCapability: "equipped", cAxisCapability: "available",
     yAxisCapability: "unavailable", cAxisEngagement: "automatic", liveToolMaxRpm: null, haasDefaultToFloat: "unknown",
-    haasIntegerFeedScale: "unknown",
+    haasIntegerFeedScale: "unknown", turretSide: "unknown", rotaryPositiveSense: "unknown",
     liveToolEvidence: "https://www.haascnc.com/service/codes-settings.type%3Dmcode.machine%3Dlathe.value%3DM134.html",
     notes: "DRAFT SYNTAX PROFILE ONLY — official Haas NGC live-tool command documentation is linked as evidence. This profile does not establish a specific machine's installed options, travels, rapid rates, spindle limit, offsets, or mounted-tool geometry.",
     updatedAt: null,
@@ -331,7 +333,7 @@ const DEFAULT_MACHINE_PROFILES = [
     orientation: "left", startMode: "unknown", rapidBehavior: "unknown", rapidXMax: null, rapidYMax: null,
     rapidZMax: null, rapidCMax: null, liveToolDialect: "unconfigured", liveToolCapability: "unknown",
     cAxisCapability: "unknown", yAxisCapability: "unknown", cAxisEngagement: "unknown", liveToolMaxRpm: null, haasDefaultToFloat: "unknown",
-    haasIntegerFeedScale: "unknown",
+    haasIntegerFeedScale: "unknown", turretSide: "unknown", rotaryPositiveSense: "unknown",
     liveToolEvidence: "", notes: "", updatedAt: null,
   },
 ];
@@ -343,7 +345,7 @@ const MACHINE_PROFILE_FIELDS = [
   "startMode", "startX", "startZ", "rapidBehavior", "rapidXMax", "rapidZMax", "toolChangeX", "toolChangeZ",
   "safeIndexX", "safeIndexZ", "turretStations", "liveToolDialect", "liveToolCapability", "cAxisCapability",
   "yAxisCapability", "cAxisEngagement", "rapidYMax", "rapidCMax", "liveToolMaxRpm", "haasDefaultToFloat",
-  "haasIntegerFeedScale", "liveToolEvidence", "notes",
+  "haasIntegerFeedScale", "turretSide", "rotaryPositiveSense", "liveToolEvidence", "notes",
 ];
 const NUMERIC_MACHINE_FIELDS = new Set([
   "displayHomeX", "displayHomeZ",
@@ -1236,6 +1238,9 @@ function normalizeMachineProfile(profile) {
     ? upgraded.cssUnitsSource : Object.hasOwn(profile || {}, "cssUnits") ? "legacy" : "template";
   normalized.cssUnitsNeedsReview = upgraded.cssUnitsNeedsReview === true;
   normalized.displayHomeMode = normalized.displayHomeMode === "estimate" ? "estimate" : "off";
+  normalized.turretSide = ["rear", "front"].includes(normalized.turretSide) ? normalized.turretSide : "unknown";
+  normalized.rotaryPositiveSense = ["ccw-from-free-end", "cw-from-free-end"].includes(normalized.rotaryPositiveSense)
+    ? normalized.rotaryPositiveSense : "unknown";
   for (const field of NUMERIC_MACHINE_FIELDS) {
     const value = normalized[field];
     normalized[field] = value === "" || value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
@@ -1350,6 +1355,7 @@ function machinePlotOptions(profile) {
     liveToolMaxRpm: hasNumber(profile.liveToolMaxRpm) ? Number(profile.liveToolMaxRpm) : null,
     haasDefaultToFloat: profile.haasDefaultToFloat || "unknown",
     haasIntegerFeedScale: profile.haasIntegerFeedScale || "unknown",
+    rotaryPositiveSense: profile.rotaryPositiveSense || "unknown",
     g76Settings: latheControllerSettings(state.latheControllerSettings, profile.id),
     cutterCompensationContract: profile.liveToolDialect === 'haas-lathe-ngc' ? 'haas-lathe-ngc-nose-v1' : null,
     retainBlockedPathAfterUnsupportedM: true,
@@ -4174,6 +4180,35 @@ function rotarySectionSummary(stock) {
   });
 }
 
+/**
+ * Spindle angle for machine-frame display at the current playback position:
+ * the commanded B of the last visible rotary-indexed segment, signed by the
+ * profile's rotary sense (positive B counterclockwise from the free end
+ * unless declared clockwise). Null when no rotary angle is known.
+ */
+function visibleSpindleRotation() {
+  const visible = state.parsed.segments.slice(0, state.visibleBlocks);
+  const segment = [...visible].reverse().find((candidate) => (
+    candidate?.coordinateMode === "rotary-indexed" && Number.isFinite(candidate.rotaryAngleDegrees)
+  ));
+  if (!segment) return {degrees: 0, known: false, senseKnown: true};
+  return {
+    degrees: segment.rotaryAngleDegrees * (segment.rotarySense === -1 ? -1 : 1),
+    known: true,
+    senseKnown: segment.rotarySenseKnown === true,
+  };
+}
+
+function faceViewFrameOptions() {
+  const rotation = visibleSpindleRotation();
+  const profile = currentMachineProfile();
+  return {
+    spindleRotationDegrees: rotation.degrees,
+    turretSide: profile?.turretSide === "front" ? "front" : (profile?.turretSide === "rear" ? "rear" : "unknown"),
+    rotarySenseKnown: rotation.senseKnown,
+  };
+}
+
 /** Face-plane centre of the live cutter at the last visible live segment. */
 function visibleLiveCutterState(stock) {
   const visible = state.parsed.segments.slice(0, state.visibleBlocks);
@@ -4405,7 +4440,7 @@ function drawRotarySectionMarkers2d(stock) {
   ctx.fillStyle = "rgba(180, 229, 226, .9)";
   ctx.font = '9px "Cascadia Code", Consolas, monospace';
   const decimals = elements.displayUnits.value === "inch" ? 4 : 3;
-  ctx.fillText(`SIDE-MILL FLAT R${formatDistance(feature.planeDistance, decimals)} @ B${feature.normalAngleDegrees.toFixed(1)} (${formatDistance(feature.depthBelowOd, decimals)} deep)`,
+  ctx.fillText(`SIDE-MILL FLAT R${formatDistance(feature.planeDistance, decimals)} @ ${Number.isFinite(feature.normalCommandedB) ? `B${feature.normalCommandedB.toFixed(1)}` : `${feature.normalAngleDegrees.toFixed(1)}°`} (${formatDistance(feature.depthBelowOd, decimals)} deep)`,
     Math.min(a.x, b.x), Math.min(a.y, b.y) - 6);
   ctx.restore();
 }
@@ -6849,6 +6884,7 @@ function draw3d(rect) {
     camera: state.camera3d,
     quality: renderQuality,
     showToolpaths: elements.toolpathToggle.checked,
+    spindleRotationDegrees: faceViewFrameOptions().spindleRotationDegrees,
   });
   state.graphicsHits = [];
   drawViewCube();
@@ -6876,6 +6912,7 @@ function drawFace(rect) {
     sectionFaceZ: stock ? stock.materialEndZ : null,
     cutterRadius: stock ? (visibleLiveCutterState(stock)?.radius || 0) : 0,
     cutterCenter: stock ? (visibleLiveCutterState(stock)?.center || null) : null,
+    ...faceViewFrameOptions(),
     lengthScale: unitScale(),
     lengthUnit: unitName(),
     lengthDecimals: elements.displayUnits.value === "inch" ? 4 : 3,
@@ -6891,7 +6928,9 @@ function drawFace(rect) {
     faceHeading.textContent = sectionSummary.status === ROTARY_SECTION_STATUS.MODELED
       ? "FACE VIEW · SIDE-MILL SECTION MODELED"
       : "FACE VIEW · SIDE-MILL SECTION PARTIAL";
-    faceCopy.textContent = `${sectionSummary.details.join(". ")}. Exact ray entries per pass at ${(360 / (stock.rotarySections.angleSamples || 3600)).toFixed(2)}°; holder, turret and drive engagement remain path-only.`;
+    const frame = faceViewFrameOptions();
+    const frameNote = `${frame.turretSide === "unknown" ? " Turret side is not declared; drawn as a rear turret." : ""}${frame.rotarySenseKnown ? "" : " Positive B is assumed counterclockwise from the free end (right-hand rule); declare the rotary direction in Setup to confirm."}`;
+    faceCopy.textContent = `${sectionSummary.details.join(". ")}. The part is shown turned to the current B with the tool fixed on the turret side.${frameNote} Exact ray entries per pass at ${(360 / (stock.rotarySections.angleSamples || 3600)).toFixed(2)}°; holder, turret and drive engagement remain path-only.`;
   } else if (liveSummary.status === LIVE_STOCK_STATUS.MODELED) {
     faceHeading.textContent = "FACE VIEW · AXIAL BORE MODELED";
     faceCopy.textContent = `${liveSummary.label}. Circle diameter and depth come from the assigned cutter and exact plunge; holder and collision remain path-only.`;
@@ -7293,6 +7332,15 @@ function updateStats() {
       notes.unshift({line: warning.line, code: warning.code, message: warning.message,
         ...(warning.danger ? {danger: true} : {verificationBlocked: true})});
     }
+  }
+  if (state.parsed.segments.some((segment) => segment.coordinateMode === "rotary-indexed" && segment.rotarySenseKnown !== true)) {
+    notes.unshift({
+      line: state.parsed.segments.find((segment) => segment.coordinateMode === "rotary-indexed")?.line || null,
+      info: true,
+      requiresAttention: true,
+      code: "rotary-sense-assumed",
+      message: "Positive B is assumed to turn the part counterclockwise viewed from the free end (right-hand rule about +Z). Declare the rotary direction in Setup → Live tool, rotary & extra axes if your machine turns the other way; dimensions do not change, only which way the part is shown turning.",
+    });
   }
   if (analyzedSectionSummary.airOnly) {
     notes.unshift({

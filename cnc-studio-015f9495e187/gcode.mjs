@@ -2031,12 +2031,13 @@ function parseHardingeRotaryIndex(record, state, warnings, cAxisMotions) {
   return {present: true, blocked: false, start, end, event};
 }
 
-function rotaryIndexPoints(x, z, startDegrees, endDegrees) {
+function rotaryIndexPoints(x, z, startDegrees, endDegrees, sense = 1) {
   const delta = endDegrees - startDegrees;
   const steps = Math.max(1, Math.ceil(Math.abs(delta) / ROTARY_INDEX_SAMPLE_DEGREES));
   const points = [];
   for (let index = 0; index <= steps; index += 1) {
-    points.push({x, z, c: index === steps ? endDegrees : startDegrees + delta * index / steps});
+    const commanded = index === steps ? endDegrees : startDegrees + delta * index / steps;
+    points.push({x, z, c: -commanded * sense});
   }
   return points;
 }
@@ -2059,6 +2060,8 @@ function parseHardingeLiveRecord(record, state, xMode, warnings, cAxis) {
     machiningMode: "live-tool",
     coordinateMode: "rotary-indexed",
     rotaryAxis: "B",
+    rotarySense: state.rotarySense,
+    rotarySenseKnown: state.rotarySenseKnown,
     xCoordinateMode: xMode === "diameter" ? "diameter" : "radius",
     plane: state.plane,
     verificationBlocked: issues.length > 0,
@@ -2090,12 +2093,13 @@ function parseHardingeLiveRecord(record, state, xMode, warnings, cAxis) {
         message: "A B index of more than 180 degrees has an unconfigured rollover/shortest-path direction; its sweep is retained only as a blocked path.",
       });
     }
-    const points = rotaryIndexPoints(point.x, point.z, cAxis.event.start, cAxis.event.end);
+    const points = rotaryIndexPoints(point.x, point.z, cAxis.event.start, cAxis.event.end, state.rotarySense);
     const uncertainty = uncertaintyOf({x: state.xUncertaintyMm, z: state.zUncertaintyMm});
     return baseSegment(
-      {...point, c: cAxis.event.start}, {...point, c: cAxis.event.end}, points, issues,
+      {...point, c: -cAxis.event.start * state.rotarySense}, {...point, c: -cAxis.event.end * state.rotarySense}, points, issues,
       {
         type: "rapid",
+        rotaryAngleDegrees: cAxis.event.end,
         rotaryIndex: {axis: "B", start: cAxis.event.start, end: cAxis.event.end,
           uncertaintyDegrees: cAxis.event.geometryUncertaintyDegrees},
         geometryUncertaintyMm: uncertainty,
@@ -2193,7 +2197,7 @@ function parseHardingeLiveRecord(record, state, xMode, warnings, cAxis) {
   }
   if (distance(start, end) < EPSILON) return null;
   const angle = rotaryKnown ? state.cAxisPosition : null;
-  const withAngle = (point) => (angle === null ? {...point} : {...point, c: angle});
+  const withAngle = (point) => (angle === null ? {...point} : {...point, c: -angle * state.rotarySense});
   const points = (state.motion === "rapid" ? rapidPath(start, end, state, xMode) : [start, end]).map(withAngle);
   if (issues.length) noteLiveToolAttempt(record, state);
   return baseSegment(withAngle(start), withAngle(end), points, issues, {
@@ -4113,6 +4117,7 @@ export function parseGcode(source, {
   liveToolMaxRpm: requestedLiveToolMaxRpm = null,
   haasDefaultToFloat: requestedHaasDefaultToFloat = "unknown",
   haasIntegerFeedScale: requestedHaasIntegerFeedScale = "unknown",
+  rotaryPositiveSense: requestedRotaryPositiveSense = "unknown",
   g76Settings = null,
   cutterCompensationContract = null,
   retainBlockedPathAfterUnsupportedM = false,
@@ -4148,6 +4153,13 @@ export function parseGcode(source, {
       z: Number.isFinite(referencePosition?.z) ? referencePosition.z : null,
     },
     secondReferencePosition: {x: null, z: null},
+    // Part-frame convention for a fixed tool at a commanded spindle angle B:
+    // with positive B counterclockwise viewed from the free end (right-hand
+    // rule about +Z) the tool sits at part-frame polar angle -B. A profile may
+    // declare the opposite sense; unknown keeps the right-hand rule and is
+    // disclosed by the application.
+    rotarySense: requestedRotaryPositiveSense === "cw-from-free-end" ? -1 : 1,
+    rotarySenseKnown: ["cw-from-free-end", "ccw-from-free-end"].includes(requestedRotaryPositiveSense),
     rotaryModeAssumptionNoted: false,
     liveToolSpeedSource: "unknown",
     rapidBehavior, rapidXMax, rapidZMax, arcChordTolerance,

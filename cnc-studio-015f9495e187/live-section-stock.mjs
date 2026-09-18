@@ -489,7 +489,9 @@ export function buildRotarySectionStock(segments, {
       modeledCuts += 1;
       passes.push({
         line: segmentLine(segment), segmentIndex, toolKey: segment.toolKey || null,
-        angleDegrees: theta, toolCenterRadius: rIn, retractRadius: rOut, cutterRadius: w,
+        angleDegrees: theta,
+        commandedB: finite(Number(segment.rotaryAngleDegrees)) ? Number(segment.rotaryAngleDegrees) : null,
+        toolCenterRadius: rIn, retractRadius: rOut, cutterRadius: w,
         innerRadius: rIn - w, zTip, zTop: z1, baseRadius, removedVolume: volume,
       });
       continue;
@@ -628,6 +630,9 @@ export function analyzeFlatFeature(passes, sections, {planeTolerance = 0.0025} =
     kind: "flat",
     consistentPlane,
     normalAngleDegrees: theta0,
+    normalCommandedB: finite(reference.commandedB) ? reference.commandedB : null,
+    spanBeforeDegrees: Number.isFinite(minimumAngle) ? -minimumAngle : null,
+    spanAfterDegrees: Number.isFinite(maximumAngle) ? maximumAngle : null,
     planeDistance,
     depthBelowOd: baseRadius - planeDistance,
     baseRadius,
@@ -686,9 +691,10 @@ export function summarizeRotarySectionStock(result, {lengthScale = 1, lengthUnit
   const feature = result.feature;
   const details = [];
   if (feature) {
-    details.push(`${feature.passCount} radial pass${feature.passCount === 1 ? "" : "es"} at ${feature.angularStepDegrees.toFixed(2)}° steps about B${feature.normalAngleDegrees.toFixed(2)}`);
+    const about = finite(feature.normalCommandedB) ? `B${feature.normalCommandedB.toFixed(2)}` : `part angle ${feature.normalAngleDegrees.toFixed(2)}°`;
+    details.push(`${feature.passCount} radial pass${feature.passCount === 1 ? "" : "es"} at ${feature.angularStepDegrees.toFixed(2)}° steps about ${about}`);
     details.push(`Nearest surface ${fmt(feature.planeDistance)} ${lengthUnit} from spindle axis (${fmt(feature.depthBelowOd)} ${lengthUnit} below Ø${fmt(feature.baseRadius * 2)} OD)`);
-    details.push(`Cut spans B${feature.odSpanStartDegrees?.toFixed(2)}–B${feature.odSpanEndDegrees?.toFixed(2)} on the OD, chord ${fmt(feature.chordWidth)} ${lengthUnit}`);
+    details.push(`Cut spans ${feature.spanBeforeDegrees?.toFixed(2)}° before to ${feature.spanAfterDegrees?.toFixed(2)}° after ${about} on the OD, chord ${fmt(feature.chordWidth)} ${lengthUnit}`);
     details.push(`Z ${fmt(feature.zTip)} to ${fmt(feature.zTop)} ${lengthUnit} (${fmt(feature.length)} ${lengthUnit} long)`);
     details.push(feature.consistentPlane
       ? `Passes share one tangent plane within ${fmt(feature.maximumPlaneDeviation)} ${lengthUnit}; cusps between passes ≤ ${fmt(feature.maximumCusp)} ${lengthUnit} (ideal flat width ${fmt(feature.idealFlatWidth)} ${lengthUnit})`

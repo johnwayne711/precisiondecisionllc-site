@@ -22,9 +22,32 @@ export function liveFaceSegmentPoints(segment, xScale = 1) {
   return points.map((point) => liveFacePoint(segment, point, xScale));
 }
 
-export function liveFaceBounds(segments, {xScale = 1, stockRadius = 0} = {}) {
+const DEGREES = Math.PI / 180;
+
+/**
+ * Machine-frame display transform for the Face view. Canonical part-frame
+ * face coordinates rotate by the current spindle angle (positive B/C is
+ * counterclockwise viewed from the free end, the right-hand rule about +Z,
+ * unless the profile declares otherwise) so the fixed tool stays on the
+ * turret side while the part turns. A front-turret lathe has +X toward the
+ * operator and +Y down, i.e. the rear-turret picture rotated 180 degrees.
+ */
+export function liveFaceFrame({spindleRotationDegrees = 0, turretSide = "rear"} = {}) {
+  const rotation = (Number.isFinite(spindleRotationDegrees) ? spindleRotationDegrees : 0)
+    + (turretSide === "front" ? 180 : 0);
+  const cos = Math.cos(rotation * DEGREES);
+  const sin = Math.sin(rotation * DEGREES);
+  return (point) => {
+    const x = Number(point?.x) || 0;
+    const y = Number(point?.y) || 0;
+    return {x: x * cos - y * sin, y: x * sin + y * cos};
+  };
+}
+
+export function liveFaceBounds(segments, {xScale = 1, stockRadius = 0, frame = null} = {}) {
+  const transform = typeof frame === "function" ? frame : (point) => point;
   const points = (segments || []).filter((segment) => segment?.liveTool || segment?.machiningMode === "live-tool")
-    .flatMap((segment) => liveFaceSegmentPoints(segment, xScale));
+    .flatMap((segment) => liveFaceSegmentPoints(segment, xScale)).map(transform);
   if (stockRadius > 0) points.push(
     {x: -stockRadius, y: -stockRadius},
     {x: stockRadius, y: stockRadius},
@@ -51,15 +74,20 @@ export function axialBoreDiameterLabel(bore, {
   return `BORE Ø${shown.toFixed(decimals)} ${String(lengthUnit || "mm")}`;
 }
 
+/**
+ * Screen projection of machine-frame face coordinates viewed from the free
+ * end toward the chuck: +X (toward the turret on a rear-turret lathe) is
+ * screen-right and +Y is screen-up, so +Z points at the viewer.
+ */
 export function liveFaceProjector(bounds, width, height, padding = 34) {
   const spanX = Math.max(EPSILON, bounds.maxX - bounds.minX);
   const spanY = Math.max(EPSILON, bounds.maxY - bounds.minY);
-  const scale = Math.max(0.01, Math.min((width - padding * 2) / spanY, (height - padding * 2) / spanX));
+  const scale = Math.max(0.01, Math.min((width - padding * 2) / spanX, (height - padding * 2) / spanY));
   const centerX = (bounds.minX + bounds.maxX) / 2;
   const centerY = (bounds.minY + bounds.maxY) / 2;
   return (point) => ({
-    x: width / 2 - (point.y - centerY) * scale,
-    y: height / 2 - (point.x - centerX) * scale,
+    x: width / 2 + (point.x - centerX) * scale,
+    y: height / 2 - (point.y - centerY) * scale,
   });
 }
 
@@ -98,13 +126,18 @@ export function renderLiveFace2d(context, {
   sectionFaceZ = null,
   cutterRadius = 0,
   cutterCenter = null,
+  spindleRotationDegrees = 0,
+  turretSide = "rear",
+  rotarySenseKnown = true,
   lengthScale = 1,
   lengthUnit = "mm",
   lengthDecimals = 3,
 } = {}) {
   const liveSegments = segments.filter((segment) => segment?.liveTool || segment?.machiningMode === "live-tool");
-  const bounds = liveFaceBounds(liveSegments, {xScale, stockRadius});
-  const project = liveFaceProjector(bounds, width, height);
+  const frame = liveFaceFrame({spindleRotationDegrees, turretSide});
+  const bounds = liveFaceBounds(liveSegments, {xScale, stockRadius, frame});
+  const projectFrame = liveFaceProjector(bounds, width, height);
+  const project = (point) => projectFrame(frame(point));
   context.clearRect(0, 0, width, height);
   context.fillStyle = "#061012";
   context.fillRect(0, 0, width, height);
@@ -227,13 +260,21 @@ export function renderLiveFace2d(context, {
     });
   }
 
+  // Machine axes stay fixed on screen while the part-frame geometry above
+  // rotates with the spindle: +X toward the turret, +Y up, viewed from the
+  // free end. A front turret puts +X on the left and +Y down.
+  const front = turretSide === "front";
+  const turretLabel = turretSide === "rear" ? "TURRET REAR" : front ? "TURRET FRONT" : "TURRET SIDE UNKNOWN · DRAWN AS REAR";
+  const rotationLabel = Number.isFinite(spindleRotationDegrees) && Math.abs(spindleRotationDegrees) > EPSILON
+    ? ` · PART AT B${spindleRotationDegrees.toFixed(2)}${rotarySenseKnown ? "" : " (+B CCW ASSUMED)"}`
+    : "";
   context.fillStyle = "rgba(180, 205, 208, .76)";
   context.font = '9px "Cascadia Code", Consolas, monospace';
-  context.fillText("FACE VIEW · +X UP · +Y LEFT", 12, 18);
+  context.fillText(`FACE VIEW · FROM FREE END · +X ${front ? "LEFT" : "RIGHT"} · +Y ${front ? "DOWN" : "UP"} · ${turretLabel}${rotationLabel}`, 12, 18);
   context.fillStyle = "#56e39f";
-  context.fillText("X+", origin.x + 5, 12);
+  context.fillText("X+", front ? 12 : width - 22, origin.y - 5);
   context.fillStyle = "#f472b6";
-  context.fillText("Y+", 12, origin.y - 5);
+  context.fillText("Y+", origin.x + 5, front ? height - 8 : 12);
   if (!liveSegments.length) {
     context.fillStyle = "rgba(145, 166, 171, .82)";
     context.textAlign = "center";
