@@ -44,6 +44,20 @@ export function liveFaceFrame({spindleRotationDegrees = 0, turretSide = "rear"} 
   };
 }
 
+/**
+ * Vertical coordinate (machine +Y, millimetres) of a segment point in the
+ * operator's front elevation. Turning points sit on the turret side (+X) and
+ * therefore project onto the spindle centerline; rotary-indexed and G112
+ * points use their machine-frame Y after the same frame transform the Face
+ * view uses (spindle rotation, turret side).
+ */
+export function frontElevationVertical(segment, point, xScale = 1, frame = null) {
+  const rotaryPoint = Number.isFinite(Number(point?.c)) || segment?.coordinateMode === "g112-face";
+  if (!rotaryPoint) return 0;
+  const transform = typeof frame === "function" ? frame : (value) => value;
+  return transform(liveFacePoint(segment, point, xScale)).y;
+}
+
 export function liveFaceBounds(segments, {xScale = 1, stockRadius = 0, frame = null} = {}) {
   const transform = typeof frame === "function" ? frame : (point) => point;
   const points = (segments || []).filter((segment) => segment?.liveTool || segment?.machiningMode === "live-tool")

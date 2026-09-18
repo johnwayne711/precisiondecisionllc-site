@@ -57,7 +57,7 @@ import {LIVE_TOOL_LIBRARY_CATALOG, listLiveToolLibraryRecords} from "./live-tool
 import {renderLiveFace2d} from "./live-view.mjs";
 import {buildAxialFlatBoreStock, LIVE_STOCK_STATUS, summarizeAxialFlatBoreStock} from "./live-stock.mjs";
 import {buildRotarySectionStock, ROTARY_SECTION_STATUS, summarizeRotarySectionStock} from "./live-section-stock.mjs";
-import {liveFacePoint} from "./live-view.mjs";
+import {frontElevationVertical, liveFaceFrame, liveFacePoint} from "./live-view.mjs";
 import {
   MILLING_TOOL_LIBRARY_CATALOG, listMillingToolLibraryRecords, millingToolLibraryRecordById,
 } from "./milling-tool-library.mjs";
@@ -92,8 +92,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.26";
-const APP_BUILD = 128;
+const APP_VERSION = "v0.3.27";
+const APP_BUILD = 129;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -384,6 +384,7 @@ const elements = {
   empty: $("emptyState"),
   chuckFaceZ: $("chuckFaceZ"), jawDiameter: $("jawDiameter"), clearance: $("clearanceInput"), collisionToggle: $("collisionToggle"),
   displayUnits: $("displayUnits"), unitReadout: $("unitReadout"), save: $("saveButton"), install: $("installButton"),
+  plotViewToggle: $("plotViewToggle"), plotTop: $("plotTopButton"), plotFront: $("plotFrontButton"), xReadoutLabel: $("xReadoutLabel"),
   dropOverlay: $("dropOverlay"), machineDialog: $("machineDialog"), machineForm: $("machineForm"),
   machineDialogTitle: $("machineDialogTitle"), machineStatusBadge: $("machineStatusBadge"), machineSaveStatus: $("machineSaveStatus"),
   originalFileInput: $("originalFileInput"), compareDialog: $("compareDialog"), compareRows: $("compareRows"),
@@ -468,6 +469,7 @@ const state = {
   dimensions: [], dimensionMode: false,
   showTool2d: false,
   toolAssignments: {}, toolAssignmentRevision: 0, toolAssignmentScope: null, declaredCutters: [],
+  plot2dView: "top", plotSegmentsCache: null,
   toolAssignmentDocumentIdentity: null, programEditOrigin: null, bundledSample: false,
   programIdentity: createProgramIdentity(sampleProgram, {fileName: "sample-g71-rough.nc", origin: "sample"}),
   bundledStepReference: false,
@@ -4133,7 +4135,7 @@ function drawGrid(width, height) {
     const programmedX = radiusX / xScale();
     const sy = worldToScreen({z: 0, x: programmedX}).y;
     ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(width, sy); ctx.stroke();
-    if (sy > 12 && sy < height - 15) ctx.fillText(`X${displayValue(programmedX).toFixed(gridDecimals(step))}`, 5, sy - 4);
+    if (sy > 12 && sy < height - 15) ctx.fillText(`${plotFront() ? "Y" : "X"}${displayValue(programmedX).toFixed(gridDecimals(step))}`, 5, sy - 4);
   }
   const origin = worldToScreen({z: 0, x: 0});
   ctx.strokeStyle = "rgba(141, 160, 189, 0.35)";
@@ -4429,26 +4431,93 @@ function drawKeepout() {
   ctx.setLineDash([]);
 }
 
+function sectionRadiusAtPartAngle(section, degrees) {
+  const samples = section.radii.length;
+  const wrapped = ((degrees % 360) + 360) % 360;
+  return section.radii[Math.round(wrapped / section.angleStepDegrees) % samples];
+}
+
+/**
+ * 2D presentation of modeled rotary-indexed sections. Top view: the +X and
+ * -X silhouettes step in where the section is cut (the flat faces the turret,
+ * i.e. the top edge). Front view: the cut is behind the part on a rear turret,
+ * so its outline is drawn as hidden (dashed) lines with its Y extent.
+ */
 function drawRotarySectionMarkers2d(stock) {
-  const feature = stock?.rotarySections?.feature;
-  if (!feature || !(feature.planeDistance > 0)) return;
-  const radius = feature.planeDistance / xScale();
-  const a = worldToScreen({z: feature.zTip, x: radius});
-  const b = worldToScreen({z: feature.zTop, x: radius});
-  ctx.save();
-  ctx.strokeStyle = "#7ce5dc";
-  ctx.lineWidth = 1.2;
-  ctx.setLineDash([6, 3]);
-  ctx.beginPath();
-  ctx.moveTo(a.x, a.y);
-  ctx.lineTo(b.x, b.y);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = "rgba(180, 229, 226, .9)";
-  ctx.font = '9px "Cascadia Code", Consolas, monospace';
+  const result = stock?.rotarySections;
+  const feature = result?.feature;
+  if (!feature || !(feature.planeDistance > 0) || !result.sections?.length) return;
+  const frameOptions = faceViewFrameOptions();
   const decimals = elements.displayUnits.value === "inch" ? 4 : 3;
-  ctx.fillText(`SIDE-MILL FLAT R${formatDistance(feature.planeDistance, decimals)} @ ${Number.isFinite(feature.normalCommandedB) ? `B${feature.normalCommandedB.toFixed(1)}` : `${feature.normalAngleDegrees.toFixed(1)}°`} (${formatDistance(feature.depthBelowOd, decimals)} deep)`,
-    Math.min(a.x, b.x), Math.min(a.y, b.y) - 6);
+  const label = `SIDE-MILL FLAT R${formatDistance(feature.planeDistance, decimals)} @ ${Number.isFinite(feature.normalCommandedB) ? `B${feature.normalCommandedB.toFixed(1)}` : `${feature.normalAngleDegrees.toFixed(1)}°`} (${formatDistance(feature.depthBelowOd, decimals)} deep)`;
+  ctx.save();
+  ctx.font = '9px "Cascadia Code", Consolas, monospace';
+  if (!plotFront()) {
+    // Top view: silhouette on the +X (top) and -X (bottom) edges.
+    for (const section of result.sections) {
+      for (const sign of [1, -1]) {
+        const partAngle = (sign > 0 ? 0 : 180) - frameOptions.spindleRotationDegrees;
+        const cutRadius = sectionRadiusAtPartAngle(section, partAngle);
+        if (!(cutRadius < section.baseRadius - 1e-9)) continue;
+        const removed = screenRect(section.startZ, section.endZ, sign * cutRadius, sign * section.baseRadius);
+        ctx.fillStyle = "rgba(2, 11, 14, .98)";
+        ctx.fillRect(removed.x, removed.y, removed.width, removed.height);
+        const a = worldToScreen({z: section.startZ, x: sign * cutRadius / xScale()});
+        const b = worldToScreen({z: section.endZ, x: sign * cutRadius / xScale()});
+        const step = worldToScreen({z: section.startZ, x: sign * section.baseRadius / xScale()});
+        ctx.strokeStyle = "#7ce5dc";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(step.x, step.y);
+        ctx.lineTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+        if (sign > 0) {
+          ctx.fillStyle = "rgba(180, 229, 226, .9)";
+          ctx.fillText(label, Math.min(a.x, b.x), Math.min(a.y, b.y) - 6);
+        }
+      }
+    }
+    ctx.restore();
+    return;
+  }
+  // Front view: the cut's machine-frame extent, dashed when it faces away.
+  const frame = liveFaceFrame(frameOptions);
+  for (const section of result.sections) {
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let normalX = 0;
+    const samples = section.radii.length;
+    for (let index = 0; index < samples; index += 1) {
+      const radius = section.radii[index];
+      if (!(radius < section.baseRadius - 1e-9)) continue;
+      const angle = index * section.angleStepDegrees * Math.PI / 180;
+      for (const r of [radius, section.baseRadius]) {
+        const point = frame({x: r * Math.cos(angle), y: r * Math.sin(angle)});
+        minY = Math.min(minY, point.y);
+        maxY = Math.max(maxY, point.y);
+        normalX += point.x;
+      }
+    }
+    if (!Number.isFinite(minY)) continue;
+    const hidden = normalX > 0;
+    const corners = [
+      worldToScreen({z: section.startZ, x: minY / xScale()}),
+      worldToScreen({z: section.endZ, x: minY / xScale()}),
+      worldToScreen({z: section.endZ, x: maxY / xScale()}),
+      worldToScreen({z: section.startZ, x: maxY / xScale()}),
+    ];
+    ctx.strokeStyle = "#7ce5dc";
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash(hidden ? [5, 4] : []);
+    ctx.beginPath();
+    corners.forEach((point, index) => { if (index) ctx.lineTo(point.x, point.y); else ctx.moveTo(point.x, point.y); });
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "rgba(180, 229, 226, .9)";
+    ctx.fillText(`${label}${hidden ? " · BEHIND THE PART (HIDDEN LINES)" : " · FACING YOU"}`, Math.min(...corners.map((point) => point.x)), Math.min(...corners.map((point) => point.y)) - 6);
+  }
   ctx.restore();
 }
 
@@ -6251,8 +6320,7 @@ function drawToolAssembly2d() {
   }
   const toolKey = activeProgramToolKey();
   const configured = configuredToolAssembly2d(toolKey);
-  const physicalReference = toolPhysicalReferencePointForExecution(
-    state.parsed.segments,
+  const physicalReference = toolPhysicalReferencePointForExecution(plotSegments(),
     state.visibleBlocks,
     xScale(),
   );
@@ -6373,6 +6441,35 @@ function segmentScreenPoints(segment) {
     ...point,
     x: point.x * effectiveXScale / xScale(),
   }));
+}
+
+/** True while the lathe 2D plot shows the operator's front elevation. */
+function plotFront() {
+  return state.viewMode === "2d" && !isMillMode() && state.plot2dView === "front";
+}
+
+/**
+ * Segments as drawn by the 2D plot. Top view uses the parsed segments (the
+ * usual X/Z plot: programmed X vertical). Front view re-projects every point
+ * so its vertical coordinate is machine +Y: turning points collapse onto the
+ * centerline (the tool is behind the part), live-tool points keep their
+ * machine-frame height. Geometry is never mutated; the copies are display-only.
+ */
+function plotSegments() {
+  if (!plotFront()) return state.parsed.segments;
+  const frameOptions = faceViewFrameOptions();
+  const key = JSON.stringify([frameOptions.spindleRotationDegrees, frameOptions.turretSide, xScale(), state.toolAssignmentRevision]);
+  const cache = state.plotSegmentsCache;
+  if (cache && cache.parsed === state.parsed && cache.key === key) return cache.segments;
+  const frame = liveFaceFrame(frameOptions);
+  const project = (segment) => {
+    const effectiveXScale = segment?.xCoordinateMode === "radius" ? 1 : xScale();
+    const map = (point) => (point ? {...point, x: frontElevationVertical(segment, point, xScale(), frame) / effectiveXScale} : point);
+    return {...segment, start: map(segment.start), end: map(segment.end), points: (segment.points || []).map(map), frontElevation: true};
+  };
+  const segments = state.parsed.segments.map(project);
+  state.plotSegmentsCache = {parsed: state.parsed, key, segments};
+  return segments;
 }
 
 function isUnsupportedControllerPathPreview(segment) {
@@ -6567,19 +6664,20 @@ function drawToolpath() {
     state.hoverBlockIndex = null;
     return;
   }
-  const count = Math.min(state.visibleBlocks, state.parsed.segments.length);
-  state.graphicsHits = state.parsed.segments.map((segment, blockIndex) => ({blockIndex, points: segmentScreenPoints(segment)}));
-  for (const segment of state.parsed.segments) {
+  const plotted = plotSegments();
+  const count = Math.min(state.visibleBlocks, plotted.length);
+  state.graphicsHits = plotted.map((segment, blockIndex) => ({blockIndex, points: segmentScreenPoints(segment)}));
+  for (const segment of plotted) {
     strokeSegment(segment, true);
   }
   for (let index = 0; index < count; index += 1) {
-    const segment = state.parsed.segments[index];
+    const segment = plotted[index];
     strokeSegment(segment);
   }
-  drawProfilePenetrationFragments();
+  if (!plotFront()) drawProfilePenetrationFragments();
   drawProgramPointMarkers2d(count);
   if (!count) return;
-  const finalSegment = state.parsed.segments[count - 1];
+  const finalSegment = plotted[count - 1];
   const marker = segmentScreenPoints(finalSegment).at(-1);
   ctx.fillStyle = "#e5eefc";
   ctx.shadowColor = "#56e39f";
@@ -6587,7 +6685,7 @@ function drawToolpath() {
   ctx.beginPath(); ctx.arc(marker.x, marker.y, 3.5, 0, Math.PI * 2); ctx.fill();
   ctx.shadowBlur = 0;
 
-  const {collisions} = evaluateCollisions(state.parsed.segments.slice(0, count), collisionOptions());
+  const {collisions} = plotFront() ? {collisions: []} : evaluateCollisions(state.parsed.segments.slice(0, count), collisionOptions());
   for (const collision of collisions) {
     const point = worldToScreen({z: collision.point.z, x: collision.point.x});
     ctx.strokeStyle = "#fb7185";
@@ -6643,7 +6741,7 @@ function dimensionEntityKey(entity) {
 }
 
 function updateDimensionControls() {
-  const available = state.viewMode === "2d" && !isMillMode();
+  const available = state.viewMode === "2d" && !isMillMode() && !plotFront();
   elements.dimensionButton.disabled = !available;
   elements.dimensionButton.classList.toggle("active", available && state.dimensionMode);
   elements.dimensionButton.setAttribute("aria-pressed", String(available && state.dimensionMode));
@@ -6795,7 +6893,7 @@ function resetGeometryInspectorDom() {
 }
 
 function renderGeometryInspector() {
-  const active = state.viewMode === "2d" && !isMillMode() && Boolean(state.geometrySelection);
+  const active = state.viewMode === "2d" && !isMillMode() && !plotFront() && Boolean(state.geometrySelection);
   elements.geometryInspector.hidden = !active;
   if (!active) return;
   const hit = state.geometrySelection;
@@ -8432,13 +8530,15 @@ function setGraphicsDimension(mode) {
       ? "Interactive three-dimensional mill command-centerline backplot in native XYZ coordinates. Stock, cutter geometry, compensation, and collision are not modeled."
       : "Top X/Y projection of the mill command-centerline path. Z motion is retained in geometry and shown in the coordinate readout and 3D view.")
     : face
-    ? "Machine-oriented live-tool face view from the free end toward the chuck, with positive X up and positive Y left. Shows programmed X/Y centerlines and any supported analytic axial bores; unsupported material removal and complete cutter-holder collision remain path-only."
+    ? "Live-tool face view from the free end toward the chuck, with positive X (turret side) to the right and positive Y up; the part is drawn fixed and the cutter moves around it. Shows programmed centerlines, modeled sections and any supported analytic axial bores; unsupported material removal and complete cutter-holder collision remain path-only."
     : threeDimensional
       ? "Interactive three-dimensional lathe backplot."
       : "Interactive lathe backplot. Click component geometry to inspect it, or use Dimension to pin exact line and radius measurements.");
   elements.canvas.style.cursor = threeDimensional ? "grab" : (face || isMillMode() ? "default" : "crosshair");
   elements.viewCube.hidden = !threeDimensional;
   elements.faceViewStatus.hidden = !face;
+  elements.plotViewToggle.hidden = !twoDimensional || isMillMode();
+  updatePlotViewToggle();
   if (!twoDimensional) {
     state.geometrySelection = null;
     state.dimensionMode = false;
@@ -8454,6 +8554,27 @@ function setGraphicsDimension(mode) {
   renderReferenceGeometryUi();
   fitView();
 }
+function updatePlotViewToggle() {
+  const front = state.plot2dView === "front";
+  elements.plotTop.classList.toggle("active", !front);
+  elements.plotFront.classList.toggle("active", front);
+  elements.plotTop.setAttribute("aria-pressed", String(!front));
+  elements.plotFront.setAttribute("aria-pressed", String(front));
+  elements.xReadoutLabel.textContent = plotFront() ? "Y" : "X";
+}
+
+function setPlot2dView(view) {
+  state.plot2dView = view === "front" ? "front" : "top";
+  state.plotSegmentsCache = null;
+  state.geometrySelection = null;
+  state.geometryHover = null;
+  state.dimensionMode = false;
+  updatePlotViewToggle();
+  updateDimensionControls();
+  draw();
+}
+elements.plotTop.addEventListener("click", () => setPlot2dView("top"));
+elements.plotFront.addEventListener("click", () => setPlot2dView("front"));
 elements.view2d.addEventListener("click", () => setGraphicsDimension("2d"));
 elements.viewFace.addEventListener("click", () => setGraphicsDimension("face"));
 elements.view3d.addEventListener("click", () => setGraphicsDimension("3d"));
@@ -8613,7 +8734,7 @@ function graphicsHitForEvent(event) {
   return graphicsHitAt(state.graphicsHits, event.clientX - rect.left, event.clientY - rect.top, {currentBlock: state.visibleBlocks});
 }
 function geometryHitForEvent(event) {
-  if (isMillMode() || state.viewMode !== "2d") return null;
+  if (isMillMode() || state.viewMode !== "2d" || plotFront()) return null;
   const rect = elements.canvas.getBoundingClientRect();
   return geometryHitAt(
     state.componentGeometry,
@@ -8664,7 +8785,7 @@ function updateGraphicsHover(event) {
   return hit;
 }
 function selectGeometryAt(event) {
-  if (isMillMode() || state.viewMode !== "2d") return false;
+  if (isMillMode() || state.viewMode !== "2d" || plotFront()) return false;
   const hit = geometryHitForEvent(event);
   if (!hit) return false;
   state.playing = false;

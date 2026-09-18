@@ -576,6 +576,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .warnings .note-occurrences li { margin: 0; padding: 7px 0; color: inherit; border: 0; border-top: 1px solid var(--border); background: none; overflow-wrap: anywhere; }
 .safety-note { margin: 0; padding: 10px 12px; color: #d4a8ae; border-top: 1px solid var(--border); background: rgba(251, 113, 133, .05); font-size: 9px; line-height: 1.45; }
 .declared-cutter-dialog { width: min(640px, calc(100vw - 28px)); }
+.plot-view-toggle[hidden] { display: none; }
 .declared-cutter-dialog .machine-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .machine-dialog { width: min(920px, calc(100vw - 28px)); max-height: min(900px, calc(100dvh - 28px)); padding: 0; color: var(--text); border: 1px solid #355159; border-radius: 14px; background: #091416; box-shadow: 0 28px 90px rgba(0, 0, 0, .72); overflow: hidden; }
 .machine-dialog::backdrop { background: rgba(2, 8, 10, .82); backdrop-filter: blur(5px); }

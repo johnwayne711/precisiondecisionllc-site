@@ -146,6 +146,10 @@
               <button id="viewFaceButton" type="button" aria-pressed="false" title="Show live-tool programmed centerlines projected onto the stock face">Face</button>
               <button id="view3dButton" type="button" aria-pressed="false">3D</button>
             </div>
+            <div id="plotViewToggle" class="segmented dimension-toggle plot-view-toggle" aria-label="2D plot orientation">
+              <button id="plotTopButton" class="active" type="button" aria-pressed="true" title="Looking down on the machine: chuck left, turret side at the top, so in/out (X) motion is visible">Top</button>
+              <button id="plotFrontButton" type="button" aria-pressed="false" title="Standing at the machine: chuck left, the tool behind the part; in/out (X) motion is toward you and hidden features are dashed">Front</button>
+            </div>
             <button id="toolOverlayButton" class="toolbar-tool tool-overlay-button" type="button" aria-pressed="false" title="Show the dimension-driven tool outline in the 2D view">Tool</button>
             <label class="graphics-toggle" title="Show or hide toolpaths without changing program progress or stock removal">
               <input id="toolpathToggle" type="checkbox" checked>
@@ -154,7 +158,7 @@
             <button id="dimensionButton" class="toolbar-tool" type="button" aria-pressed="false" title="Pin exact line and radius dimensions in the 2D view">Dimension</button>
             <button id="clearDimensionsButton" class="toolbar-tool clear-tool" type="button" title="Remove all pinned dimensions" disabled>Clear dims</button>
           </div>
-          <div id="latheReadout" class="readout"><span>Z</span><strong id="zReadout">0.0000</strong><span>X</span><strong id="xReadout">0.0000</strong><small id="unitReadout">in</small></div>
+          <div id="latheReadout" class="readout"><span>Z</span><strong id="zReadout">0.0000</strong><span id="xReadoutLabel">X</span><strong id="xReadout">0.0000</strong><small id="unitReadout">in</small></div>
           <div id="millReadout" class="readout" hidden><span>X</span><strong id="millXReadout">0.0000</strong><span>Y</span><strong id="millYReadout">0.0000</strong><span>Z</span><strong id="millZReadout">0.0000</strong><small id="millUnitReadout">in</small></div>
           <div class="legend">
             <span><i class="pending"></i>Pending</span>
