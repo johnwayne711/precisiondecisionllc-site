@@ -92,8 +92,8 @@ import {
 } from "./view3d.mjs";
 import {renderMill3d, renderMillTop2d} from "./mill-view.mjs";
 
-const APP_VERSION = "v0.3.21";
-const APP_BUILD = 123;
+const APP_VERSION = "v0.3.22";
+const APP_BUILD = 124;
 
 // Pairing acknowledgements belong only to this exact in-memory job and setup.
 let toolOffsetConfirmationScope = null;
@@ -4793,6 +4793,10 @@ function toolChoiceLabel(definition) {
 function openDeclaredCutterDialog(toolKey) {
   const dialog = $("declaredCutterDialog");
   const form = $("declaredCutterForm");
+  if (!dialog || !form) {
+    elements.status.textContent = "Reload the application to declare a cutter (a newer application file loaded before its page).";
+    return;
+  }
   form.reset();
   form.dataset.toolKey = toolKey;
   $("declaredCutterToolKey").textContent = toolKey;
@@ -7985,10 +7989,13 @@ elements.machineForm.elements.namedItem("liveToolDialect").addEventListener("cha
 });
 elements.machineForm.elements.namedItem("status").addEventListener("change", (event) => updateMachineStatusBadge(event.target.value));
 $("closeMachineButton").addEventListener("click", () => elements.machineDialog.close());
-$("declaredCutterForm").addEventListener("submit", saveDeclaredCutterFromDialog);
-$("declaredCutterClose").addEventListener("click", () => $("declaredCutterDialog").close());
-$("declaredCutterCancel").addEventListener("click", () => $("declaredCutterDialog").close());
-$("declaredCutterDialog").addEventListener("click", (event) => {
+// A CDN edge can briefly serve a stale index.html with a fresh app.mjs after
+// publication; bind the newer declared-cutter controls only when present so
+// that mixed state degrades to a missing feature instead of a blank app.
+$("declaredCutterForm")?.addEventListener("submit", saveDeclaredCutterFromDialog);
+$("declaredCutterClose")?.addEventListener("click", () => $("declaredCutterDialog")?.close());
+$("declaredCutterCancel")?.addEventListener("click", () => $("declaredCutterDialog")?.close());
+$("declaredCutterDialog")?.addEventListener("click", (event) => {
   if (event.target === $("declaredCutterDialog")) $("declaredCutterDialog").close();
 });
 $("cancelMachineButton").addEventListener("click", () => elements.machineDialog.close());
@@ -8024,11 +8031,11 @@ elements.machineMode.addEventListener("change", () => {
 $("plotButton").addEventListener("click", () => { plotProgram(); persistSession(); });
 $("loadSampleButton").addEventListener("click", () => loadProgram("sample-g71-rough.nc", sampleProgram, {bundledSample: true, machineMode: "lathe"}));
 $("loadLiveBoreSampleButton").addEventListener("click", loadLiveBoreSample);
-$("loadLiveFlatSampleButton").addEventListener("click", loadLiveFlatSample);
+$("loadLiveFlatSampleButton")?.addEventListener("click", loadLiveFlatSample);
 $("loadMillSampleButton").addEventListener("click", loadMillSample);
 $("loadStepSampleButton").addEventListener("click", loadStepSample);
 for (const id of ["loadSampleButton", "loadLiveBoreSampleButton", "loadLiveFlatSampleButton", "loadMillSampleButton", "loadStepSampleButton"]) {
-  $(id).addEventListener("click", () => $("sampleProgramMenu").removeAttribute("open"));
+  $(id)?.addEventListener("click", () => $("sampleProgramMenu").removeAttribute("open"));
 }
 elements.loadDxfReferenceDemo.addEventListener("click", loadDxfSample);
 elements.loadStepReferenceDemo.addEventListener("click", loadStepSample);
